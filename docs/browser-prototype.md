@@ -94,8 +94,18 @@ the consent reason above: the native dialog, the per-page token proxy
 (`src/browser/proxy.rs`, `src/browser/agent.rs`, about 2,100 lines) and the
 provider that `agent-browser` calls. The rest stands without it.
 
-The pane header's browser bar (back, forward, reload, the address,
-DevTools) is a mod, `defaults/mods/pane/browser.js`: zero core lines.
+The pane header's browser bar (back, forward, reload, the address, zoom, a
+viewport button, DevTools) is a mod, `defaults/mods/pane/browser.js`: zero
+core lines of its own.
+
+Zoom and responsive size are two small core commands the bar, keys and
+agents call, since only the app holds the CEF browser: `browser.zoom` (CEF's
+host zoom along Chromium's own steps, kept per site) and `browser.viewport`
+(Chromium's device emulation over the page's DevTools session: phone,
+tablet, a custom size, or fit). Together with their keys.json `browser`
+section (`cmd-=`, `cmd--`, `cmd-0` zoom the page that has the keyboard) they
+are about 340 lines of Rust outside tests (about 160 more in tests), 164 of
+them in `src/browser/emulate.rs`.
 
 Later, and mod-shaped where possible: browser tabs, docked
 DevTools (today `browser.devtools` opens CEF's own window), design mode
@@ -151,7 +161,9 @@ page](browser-dev.md#agents-drive-a-page-agent-access) in
 
 - **Global keys win over a focused page.** Keys bound in keys.json's
   `global` section still go to Herdr, so `cmd-w` closes the tab and
-  `cmd-1`…`cmd-9` switch tabs instead of reaching the page.
+  `cmd-1`…`cmd-9` switch tabs instead of reaching the page. A key bound to
+  `terminal` in the `browser` section goes to the page instead; the defaults
+  don't do that for any key.
 - **Mod tooltips and in-mod popups draw under a page.** Only overlays Herdr
   registers hide a page.
 - **The dialog's answer-time re-check is weak.** A page that moved to
@@ -172,8 +184,10 @@ in `docs/browser-dev.md`; show it on `just browser-dev --release`.
 
 These need a person and have not been done: typing in a page (a dead key,
 a Japanese IME), momentum scrolling, the right-click menu and a `<select>`
-popup (`scripts/browser-test-page.html` has each); `ctrl-alt-shift-escape`
-and a global key while a page has the keyboard; overlays drawing fully over
+popup (`scripts/browser-test-page.html` has each); `ctrl-alt-shift-escape`,
+a global key, and `cmd-=`/`cmd--`/`cmd-0` (page zoom) while a page has the
+keyboard; how a phone or tablet viewport looks in the pane, and the bar's
+zoom and viewport controls on hover; overlays drawing fully over
 a page; and the dialog (same `bN` as the header, Return, Esc and Cancel
 leave access off, the half-second Allow delay, Stop agent). That the app's
 other work waits while the dialog is open is read from the code, not
