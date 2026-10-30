@@ -21,8 +21,8 @@ Who built it and how: a coding agent (Claude) wrote the code and these docs
 under Cameron's direction. Cameron chose the approach and approved the plan.
 Separate agent reviewers attacked the agent-access design over several
 rounds, and each round's findings were fixed or written down as limits.
-Cameron has not yet done the manual checks that need a person at the
-keyboard (listed in [Manual checks](#manual-checks-pending)). Nothing here
+Cameron did the hands-on checks that need a person at the keyboard; the
+ones still open are listed in [Manual checks](#manual-checks). Nothing here
 has run outside this one Mac.
 
 ## Cost
@@ -180,18 +180,21 @@ Needs macOS on Apple silicon, `cmake` and `ninja`, and for the agent part
 and [Agents drive a page](browser-dev.md#agents-drive-a-page-agent-access)
 in `docs/browser-dev.md`; show it on `just browser-dev --release`.
 
-## Manual checks pending
+## Manual checks
 
-These need a person and have not been done: typing in a page (a dead key,
-a Japanese IME), momentum scrolling, the right-click menu and a `<select>`
-popup (`scripts/browser-test-page.html` has each); `ctrl-alt-shift-escape`,
-a global key, and `cmd-=`/`cmd--`/`cmd-0` (page zoom) while a page has the
-keyboard; how a phone or tablet viewport looks in the pane, and the bar's
-zoom and viewport controls on hover; overlays drawing fully over
-a page; and the dialog (same `bN` as the header, Return, Esc and Cancel
-leave access off, the half-second Allow delay, Stop agent). That the app's
-other work waits while the dialog is open is read from the code, not
-measured.
+Done by Cameron on this Mac: typing in a page (a dead key, a Japanese
+IME), momentum scrolling, the right-click menu, a `<select>` popup and a
+new-window link (`scripts/browser-test-page.html` has each);
+`ctrl-alt-shift-escape` handing the keyboard back to Herdr; the command
+palette and menus hiding a page and showing it again; browsing real sites
+from the browser bar; and the agent demo: **Allow** in the dialog, which
+named the same `b3` as the pane header, then an agent filling the test form.
+
+Still open: Return, Esc and Cancel leaving access off; the half-second
+Allow delay; **Stop agent**; `cmd-=`/`cmd--`/`cmd-0` and a global key
+while a page has the keyboard; how a phone or tablet viewport looks in the
+pane. That the app's other work waits while the dialog is open is read
+from the code, not measured.
 
 ---
 
