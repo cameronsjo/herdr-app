@@ -55,7 +55,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("browser.close", &[req("browser")], "Close a browser and its pane."),
     cmd("browser.devtools", &[req("browser"), opt("open")], "Open or close Chromium's DevTools window for a browser (no open: toggle)."),
     cmd("browser.zoom", &[opt("step"), opt("browser"), opt("level")],
-        "Zoom a browser's page (default: the focused browser): step \"in\" or \"out\" along Chromium's steps (25% to 500%), \"reset\" to 100%, or level, a percent from 25 to 500. Chromium keeps the zoom per site, so other pages on that site follow. Says the zoom now, in percent."),
+        "Zoom a browser's page (default: the focused browser): step \"in\" or \"out\" along Chromium's steps (25% to 500%), \"reset\" to 100%, or level, a percent from 25 to 500. Chromium keeps one zoom per host name (all its ports) in each profile, saved across restarts, so other pages on that host follow. A number alone (browser.zoom:125) is a level. Says the zoom now, in percent."),
     cmd("browser.viewport", &[opt("preset"), opt("browser"), opt("width"), opt("height"), opt("mobile")],
         "Lay a browser's page out at another screen size (default: the focused browser): preset \"phone\" (390x844), \"tablet\" (820x1180), both mobile with touch, or \"fit\" (the pane's own size again); or width and height in pixels, with mobile true or false. A size bigger than the pane is shrunk to fit it."),
     cmd("browser.agent_access", &[req("browser"), req("on")],

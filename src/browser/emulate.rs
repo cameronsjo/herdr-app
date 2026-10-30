@@ -45,10 +45,15 @@ pub fn step(current: f64, zoom_in: bool) -> f64 {
 
 /// What `browser.zoom` asks for, as the percent to set, from the page's
 /// `current` percent. `step`: "in", "out" or "reset" (100%); `level`: a
-/// percent from 25 to 500. One of the two, never both.
+/// percent from 25 to 500. One of the two, never both. A `step` that is a
+/// number is a level: the shorthand `browser.zoom:125` (keys.json, `do`)
+/// fills `step`, the command's first argument.
 pub fn zoom_target(args: &Value, current: f64) -> Result<f64, String> {
-    let step_arg = args.get("step").filter(|v| !v.is_null());
-    let level = args.get("level").filter(|v| !v.is_null());
+    let mut step_arg = args.get("step").filter(|v| !v.is_null());
+    let mut level = args.get("level").filter(|v| !v.is_null());
+    if level.is_none() && step_arg.and_then(Value::as_str).is_some_and(|s| s.trim().parse::<f64>().is_ok()) {
+        level = step_arg.take();
+    }
     match (step_arg, level) {
         (Some(_), Some(_)) => Err("browser.zoom takes step or level, not both".into()),
         (Some(s), None) => match s.as_str() {
@@ -157,7 +162,7 @@ pub fn calls(v: Option<&Viewport>, scale: f64) -> Vec<(&'static str, Value)> {
     }
 }
 
-/// A number, or a string that is one (`browser.zoom:125` in keys.json).
+/// A number, or a string that is one (`--level 125`, `{"level": "125"}`).
 fn number(v: &Value) -> Option<f64> {
     v.as_f64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok())).filter(|n: &f64| n.is_finite())
 }
@@ -203,6 +208,10 @@ mod tests {
         assert_eq!(at(json!({ "level": "150" })), Ok(150.0));
         assert_eq!(at(json!({ "level": 25 })), Ok(25.0));
         assert_eq!(at(json!({ "level": 500, "step": null })), Ok(500.0));
+        // The shorthand `browser.zoom:125` puts the number in step.
+        assert_eq!(at(json!({ "step": "125" })), Ok(125.0));
+        assert!(at(json!({ "step": "600" })).is_err());
+        assert!(at(json!({ "step": "125", "level": 150 })).is_err());
         for bad in [json!({}), json!({ "step": "up" }), json!({ "step": 1 }), json!({ "level": 20 }), json!({ "level": 501 }), json!({ "level": "big" }), json!({ "level": 110, "step": "in" })] {
             assert!(at(bad.clone()).is_err(), "{bad}");
         }

@@ -5,8 +5,10 @@
 // back to the page; Esc puts the page's address back. Zoom (- NN% +, the
 // percent resets it) and the viewport button (Fit, Phone, Tablet in turn)
 // show while the header is hovered, or while they aren't at their defaults.
-// In a narrow pane (measured while the pointer is over the bar) the percent
-// and the viewport's name go, so the address keeps its room.
+// A narrow bar keeps the address's room: no - and +, the zoom as a bare
+// number only when it isn't 100, the viewport as its icon only. Only the
+// pointer reports the bar's width, so a bar counts as narrow until the
+// pointer first crosses it.
 
 import { div, svg } from "gpui-kit";
 import { h_flex, InputState, Input } from "gpui-base";
@@ -26,8 +28,11 @@ export function address(text) {
   return search();
 }
 
-/** Below this bar width (px) the percent and the viewport's name hide. */
+/** Below this bar width (px) the bar is narrow: no - and +, no "%", no viewport name. */
 export const NARROW = 340;
+
+/** The least width (px) the address field keeps. */
+const ADDRESS_MIN = 64;
 
 /** The viewport button's order: each click moves to the next. */
 const VIEWPORTS = ["fit", "phone", "tablet"];
@@ -52,7 +57,7 @@ export default class BrowserBar {
     this.input = InputState.new({ placeholder: "Search or enter an address" });
     this.editing = false;
     this.shown = null; // the url the field holds while nobody edits it
-    this.narrow = false; // the bar was narrower than NARROW when last measured
+    this.narrow = true; // narrower than NARROW when last measured; unmeasured counts as narrow
     this.input.on("focus", (_e, cx) => {
       this.editing = true;
       this.input.set_selected_range({ start: 0, end: this.input.value().length });
@@ -101,7 +106,7 @@ export default class BrowserBar {
       .child(svg(`mods/pane/${icon}.svg`).size(14));
   }
 
-  // The percent (click: back to 100%).
+  // The percent (click: back to 100%); a narrow bar drops the "%".
   percent(t, pane, zoom) {
     return div()
       .id(`pb-zoom-${pane}`)
@@ -115,7 +120,7 @@ export default class BrowserBar {
         cx.stop_propagation();
         run("browser.zoom", { browser: this.browser, step: "reset" });
       })
-      .child(`${zoom}%`);
+      .child(this.narrow ? `${zoom}` : `${zoom}%`);
   }
 
   // Fit, Phone, Tablet in turn; its label says which, unless it's fit.
@@ -164,7 +169,8 @@ export default class BrowserBar {
       .child(div()
         .id(`pb-url-${pane}`)
         .flex_1()
-        .min_w(0)
+        // A floor for the address: in a very narrow pane what's right of it clips first.
+        .min_w(ADDRESS_MIN)
         .h(22)
         .mx(4)
         .px(8)
@@ -180,9 +186,9 @@ export default class BrowserBar {
         .on_key_down((e, cx) => this.key(e, cx))
         .child(Input.new(this.input).w_full().h_full().text_size(12).text_color(t.foreground)))
       .when(Boolean(b?.loading), (el) => el.child(svg("mods/workspace-chrome/spinner.svg").size(12).flex_none().text_color(t.dim).spin(900)))
-      .when(Boolean(b) && hovered, (el) => el.child(this.button(t, `pb-zout-${pane}`, "zoom-out", "browser.zoom", zoom > 25, { step: "out" })))
-      .when(Boolean(b) && !this.narrow && (hovered || zoom !== 100), (el) => el.child(this.percent(t, pane, zoom)))
-      .when(Boolean(b) && hovered, (el) => el.child(this.button(t, `pb-zin-${pane}`, "zoom-in", "browser.zoom", zoom < 500, { step: "in" })))
+      .when(Boolean(b) && hovered && !this.narrow, (el) => el.child(this.button(t, `pb-zout-${pane}`, "zoom-out", "browser.zoom", zoom > 25, { step: "out" })))
+      .when(Boolean(b) && (this.narrow ? zoom !== 100 : hovered || zoom !== 100), (el) => el.child(this.percent(t, pane, zoom)))
+      .when(Boolean(b) && hovered && !this.narrow, (el) => el.child(this.button(t, `pb-zin-${pane}`, "zoom-in", "browser.zoom", zoom < 500, { step: "in" })))
       .when(Boolean(b) && (hovered || Boolean(viewport)), (el) => el.child(this.viewport(t, pane, viewport)))
       .child(this.button(t, `pb-dev-${pane}`, "devtools", "browser.devtools", Boolean(b)));
   }

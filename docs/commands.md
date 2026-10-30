@@ -226,7 +226,7 @@ Open or close Chromium's DevTools window for a browser (no open: toggle).
 
 ## `browser.zoom`
 
-Zoom a browser's page (default: the focused browser): step "in" or "out" along Chromium's steps (25% to 500%), "reset" to 100%, or level, a percent from 25 to 500. Chromium keeps the zoom per site, so other pages on that site follow. Says the zoom now, in percent.
+Zoom a browser's page (default: the focused browser): step "in" or "out" along Chromium's steps (25% to 500%), "reset" to 100%, or level, a percent from 25 to 500. Chromium keeps one zoom per host name (all its ports) in each profile, saved across restarts, so other pages on that host follow. A number alone (browser.zoom:125) is a level. Says the zoom now, in percent.
 
 | Argument | Required |
 |---|---|

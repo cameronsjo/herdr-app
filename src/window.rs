@@ -1524,23 +1524,26 @@ impl AppWindow {
         {
             self.layout_page = None;
         }
-        let block = terminal_block(&self.chrome, self.focused_pane.as_deref()).is_some();
-        let pane_page = (!block && self.shows_tab())
-            .then(|| self.model.focused_pane())
-            .flatten()
-            .and_then(|p| self.model.active_tab().and_then(|t| t.shown().find(&p)).and_then(|n| n.browser()).map(str::to_owned));
+        let pane_page = self.pane_page();
         let covered = self.browsers.covered();
         let page = crate::browser::keyboard_page(dialog, control, self.layout_page.as_deref(), pane_page.as_deref(), &covered).map(str::to_owned);
         self.browsers.keys(page.as_deref(), window);
     }
 
+    /// The focused pane's page, while its tab shows and no layout terminal
+    /// block has the focus.
+    fn pane_page(&self) -> Option<String> {
+        let block = terminal_block(&self.chrome, self.focused_pane.as_deref()).is_some();
+        (!block && self.shows_tab())
+            .then(|| self.model.focused_pane())
+            .flatten()
+            .and_then(|p| self.model.active_tab().and_then(|t| t.shown().find(&p)).and_then(|n| n.browser()).map(str::to_owned))
+    }
+
     /// The browser the person is on: a layout block's page they clicked
-    /// into, else the focused pane's page while its tab shows.
+    /// into, else the focused pane's page (`pane_page`), as for the keyboard.
     fn focused_browser(&self) -> Option<String> {
-        self.layout_page.clone().or_else(|| {
-            let pane = self.model.focused_pane()?;
-            self.model.active_tab().and_then(|t| t.shown().find(&pane)).and_then(|n| n.browser()).map(str::to_owned)
-        })
+        self.layout_page.clone().or_else(|| self.pane_page())
     }
 
     /// The pane showing a browser.
