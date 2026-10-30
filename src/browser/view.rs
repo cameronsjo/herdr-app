@@ -220,6 +220,11 @@ pub fn page_created(id: &str) {
     });
 }
 
+/// The container a browser already has (a reopen keeps it).
+pub fn existing(id: &str) -> Option<Retained<NSView>> {
+    VIEWS.with_borrow(|v| v.get(id).map(|c| c.view.clone()))
+}
+
 /// The browser closed: its container goes too (runtime.rs removed the page first).
 pub fn remove(id: &str) {
     if let Some(c) = VIEWS.with_borrow_mut(|v| v.remove(id)) {

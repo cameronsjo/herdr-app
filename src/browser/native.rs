@@ -5,8 +5,9 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{AnyElement, App, IntoElement, ParentElement, Styled, Window, canvas, div};
 use serde_json::{Value, json};
 
+use super::agent::{self, Caller, Candidate};
 use super::registry::{self, Page, Registry};
-use super::{Hand, Look, Responder, Update, runtime, view};
+use super::{Hand, Look, Responder, Source, Update, proxy, runtime, view};
 use crate::layout::Node;
 use crate::model::Model;
 
@@ -85,6 +86,9 @@ impl Browsers {
     pub fn reconcile(&mut self, model: &Model, chrome: &Node, window: &mut Window, cx: &mut App) {
         let changes = self.registry.reconcile(&registry::blocks(model, chrome));
         for id in &changes.close {
+            if proxy::revoke(id) {
+                tracing::info!("browser: agent access off browser={id} by={}", Source::Close.label());
+            }
             runtime::close(id);
             view::remove(id);
         }
@@ -97,8 +101,9 @@ impl Browsers {
             return;
         }
         for (id, url) in changes.open {
+            let agent_profile = self.registry.get(&id).is_some_and(|e| e.agent_profile);
             match view::container(&id, window) {
-                Ok(parent) => runtime::open(&id, parent, url),
+                Ok(parent) => runtime::open(&id, parent, url, agent_profile),
                 Err(e) => tracing::error!("browser: no view for {id}: {e:#}"),
             }
         }
@@ -175,6 +180,58 @@ impl Browsers {
             tracing::debug!("browser: {holder} has the keyboard");
             self.holder = Some(holder);
         }
+    }
+
+    /// An agent-profile browser's (access on, last attaching terminal).
+    /// None: no such browser, or the person's profile.
+    pub fn agent_state(&self, browser: &str) -> Option<(bool, Option<String>)> {
+        self.registry.get(browser).filter(|e| e.agent_profile).map(|e| (e.agent_access, e.last_agent.clone()))
+    }
+
+    /// Agent access on or off (`agent::may_set_access`: on only from the
+    /// pane's own control). Off ends the agent's token and connection; the
+    /// connection's end reopens the page (runtime::agent_gone).
+    pub fn set_agent_access(&mut self, browser: &str, on: bool, from: Source) -> Result<(), String> {
+        agent::may_set_access(on, from).map_err(str::to_owned)?;
+        let e = self.registry.get(browser).ok_or_else(|| format!("no open browser {browser:?}: see `herdr-app ls`"))?;
+        if on {
+            agent::needs_agent_profile(e.agent_profile).map_err(str::to_owned)?;
+        }
+        self.registry.set_access(browser, on);
+        if !on {
+            proxy::revoke(browser);
+        }
+        tracing::info!("browser: agent access {} browser={browser} by={}", if on { "on" } else { "off" }, from.label());
+        Ok(())
+    }
+
+    /// The caller's browser and a token url for it (`{ attach }` on the
+    /// control socket). `tab_of`: a pane's tab.
+    /// `check`: the same choice and checks, no token (`herdr.check`).
+    pub fn attach(&mut self, terminal: &str, space: &str, tab: &str, wanted: Option<&str>, check: bool, tab_of: &dyn Fn(&str) -> Option<String>) -> Result<Value, String> {
+        let entries: Vec<(&registry::Entry, Option<String>)> =
+            self.registry.list().iter().map(|e| (e, e.pane.as_deref().and_then(tab_of))).collect();
+        let candidates: Vec<Candidate> = entries
+            .iter()
+            .map(|(e, t)| Candidate {
+                browser: &e.browser,
+                space: e.space.as_deref(),
+                tab: t.as_deref(),
+                focused_at: e.focused_at,
+                agent_profile: e.agent_profile,
+                access: e.agent_access,
+            })
+            .collect();
+        let (browser, how) = agent::select(&Caller { space, tab, wanted }, &candidates)?;
+        let chosen = candidates.iter().find(|c| c.browser == browser).ok_or("the browser went away")?;
+        agent::ready(chosen)?;
+        let (browser, pane, space) = (browser.to_owned(), entries.iter().find(|(e, _)| e.browser == browser).and_then(|(e, _)| e.pane.clone()), chosen.space.map(str::to_owned));
+        if check {
+            return Ok(json!({ "browser": browser, "pane": pane, "space": space, "selection": how }));
+        }
+        let url = proxy::attach(&browser)?;
+        self.registry.attached(&browser, terminal);
+        Ok(json!({ "cdpUrl": url, "browser": browser, "pane": pane, "space": space, "selection": how }))
     }
 
     /// The pages hidden under an overlay now (they can't have the keyboard).

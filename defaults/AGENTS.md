@@ -32,7 +32,8 @@ and terminals, open dialogs, popups and floating blocks, show a live
 terminal inside a block, run any app command, run programs (`exec`) and
 fetch URLs, keep state per mod or shared between mods, animate natively.
 
-You can't: use HTML, CSS, a web view, Node APIs or `setTimeout`; draw
+You can't: use HTML, CSS, a web view (a browser pane is a layout block,
+not a mod), Node APIs or `setTimeout`; draw
 outside your block except through overlays; change how a terminal itself
 draws text; read or change other mods' code at run time.
 
@@ -213,7 +214,7 @@ A layout is a tree of nodes. Four types:
   terminals as it arranges them), or `{ "agent": "focused" }` (one agent's
   terminal, full size: the one chosen with `agent.focus` / `agent.next`, else
   the focused pane's agent, else the first agent), or `{ "browser": "b1",
-  "url": "..." }` (a web page; never in `floating`).
+  "url": "...", "profile"?: "agent" }` (a web page; never in `floating`).
 - `row` / `column`: children side by side / stacked.
 - `stack`: shows one child (`"active": "<child id>"`), with an optional
   `"header"` (a mod that draws tabs, or `"tabs"` for a plain built-in strip).
@@ -535,11 +536,15 @@ The main ones:
   right-click targeting follow keyboard focus, including peek and floating terminals;
   with no terminal holding keyboard focus, they use the focused pane or block.
 - Browsers (macOS builds with the `browser` feature; elsewhere a placeholder):
-  `browser.open {url, place?, pane?}` (place `"right"` default, `"down"`, `"tab"`;
+  `browser.open {url, place?, pane?, profile?}` (place `"right"` default, `"down"`, `"tab"`;
   says `{browser, pane}`), `browser.navigate {browser, url}`, `browser.back {browser}`,
   `browser.forward {browser}`, `browser.reload {browser}`, `browser.close {browser}`,
   `browser.devtools {browser, open?}`. `herdr-app ls` and `browsers()` list them;
   a pane's `browser` names its page. Click a page to type in it; global keys still work.
+  Pages are http, https or about:blank. `profile: "agent"` opens a separate test
+  profile; the person can let agents drive it (`agent-browser`) with the
+  pane header's "Allow agent". `browser.agent_access {browser, on: false}` turns
+  that off; nothing but the person's click turns it on (not `run()`, not the socket).
 - Agents: `agent.next`, `agent.prev`, `agent.focus {terminal}`.
 - Layout: `layout.switch {name?}`, `layout.toggle {id}`, `layout.show {id}`, `layout.hide {id}`,
   `layout.resize {id, px | weight}`, `layout.select {stack, child}`, `layout.set {layout}`

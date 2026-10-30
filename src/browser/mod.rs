@@ -8,12 +8,16 @@
 //! commands say what's missing (off.rs). The window only talks to `Browsers`.
 
 #[cfg(any(test, all(target_os = "macos", feature = "browser")))]
+pub mod agent;
+#[cfg(any(test, all(target_os = "macos", feature = "browser")))]
 pub mod keys;
 #[cfg(any(test, all(target_os = "macos", feature = "browser")))]
 pub mod registry;
 
 #[cfg(all(target_os = "macos", feature = "browser"))]
 mod native;
+#[cfg(all(target_os = "macos", feature = "browser"))]
+mod proxy;
 #[cfg(all(target_os = "macos", feature = "browser"))]
 mod runtime;
 #[cfg(all(target_os = "macos", feature = "browser"))]
@@ -153,6 +157,78 @@ pub fn hand<'a>(wanted: Option<&'a str>, actual: &Responder) -> Hand<'a> {
 /// before the window first decided), or one the person just pressed.
 pub fn may_focus(page: &str, wanted: Option<Option<&str>>, pressed: bool) -> bool {
     pressed || wanted.is_none_or(|w| w == Some(page))
+}
+
+
+// ---- agent access: what the window needs in every build (rules: agent.rs)
+
+/// Where a change to agent access came from (and the audit log's `by=`).
+#[cfg_attr(not(all(target_os = "macos", feature = "browser")), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+    /// Herdr's own button in the browser pane's header (a person's click).
+    PaneControl,
+    /// `herdr-app do` over the control socket: agents can reach it.
+    Socket,
+    /// A mod's `run()` (and keys.json bindings, the native key monitor): agents write mods and keys.
+    Mod,
+    /// The dev-only switch (debug builds, `HERDR_DEV_AGENT_ACCESS=1` at launch).
+    DevSwitch,
+    Close,
+    Quit,
+}
+
+#[cfg_attr(not(all(target_os = "macos", feature = "browser")), allow(dead_code))]
+impl Source {
+    pub fn label(self) -> &'static str {
+        match self {
+            Source::PaneControl => "pane control",
+            Source::Socket => "socket",
+            Source::Mod => "mod or key",
+            Source::DevSwitch => "socket (dev switch, debug build)",
+            Source::Close => "close",
+            Source::Quit => "quit",
+        }
+    }
+}
+
+#[cfg(debug_assertions)]
+static DEV_SWITCH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Debug builds only: `HERDR_DEV_AGENT_ACCESS=1` in the app's own environment
+/// at launch lets the control socket turn agent access on, so an agent can
+/// test the path end to end without a person's click. Read once at startup
+/// and removed from the environment, so terminals never inherit it. Release
+/// builds compile none of this: the variable means nothing there.
+#[cfg_attr(not(all(target_os = "macos", feature = "browser")), allow(dead_code))]
+pub fn read_dev_switch() {
+    #[cfg(debug_assertions)]
+    {
+        const NAME: &str = "HERDR_DEV_AGENT_ACCESS";
+        let on = std::env::var(NAME).is_ok_and(|v| v == "1");
+        // SAFETY: called first thing in main, before any other thread exists.
+        unsafe { std::env::remove_var(NAME) };
+        DEV_SWITCH.store(on, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+pub fn dev_switch() -> bool {
+    #[cfg(debug_assertions)]
+    return DEV_SWITCH.load(std::sync::atomic::Ordering::SeqCst);
+    #[cfg(not(debug_assertions))]
+    false
+}
+
+// Errors an agent sees (pinned in agent.rs's tests).
+
+pub fn not_in_herdr() -> String {
+    "this terminal is not in Herdr (HC_TERMINAL_ID is unset): agent-browser can only drive a Herdr browser pane from a Herdr terminal".into()
+}
+pub fn parked(terminal: &str) -> String {
+    format!("terminal {terminal} has no pane in Herdr (parked): give it one with herdr-app do terminal.keep --terminal {terminal}")
+}
+pub fn remote(terminal: &str) -> String {
+    format!("terminal {terminal} runs on another machine: browser panes are only for this machine's terminals")
 }
 
 /// Whether browser panes work in this build.

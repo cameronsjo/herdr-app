@@ -61,8 +61,9 @@ export function playSound(sound: string): null;
  *   terminal.peek {terminal} (peek over the tab, with keep-as-tab and close),
  *   terminal.show {terminal?, pane?} (shown in the pane for now, in place of its own), terminal.copy, terminal.paste,
  *   terminal.right_click {to: "program" | "menu", terminal?} (right-clicks to a program that takes the mouse; Shift: the menu).
- * Browsers (macOS builds with the browser feature): browser.open {url, place?, pane?},
- *   browser.navigate {browser, url}, browser.back|forward|reload|close {browser}, browser.devtools {browser, open?}.
+ * Browsers (macOS builds with the browser feature): browser.open {url, place?, pane?, profile?},
+ *   browser.navigate {browser, url}, browser.back|forward|reload|close {browser}, browser.devtools {browser, open?},
+ *   browser.agent_access {browser, on: false} (only the person's click in the pane turns it on).
  * Agents: agent.next, agent.prev (the agents list's order), agent.focus {terminal} (sub-agents too).
  * Layout (the shown layout's nodes by id): layout.toggle|show|hide {id}, layout.resize {id, px | weight},
  *   layout.select {stack, child}, layout.set {layout} (personal trees; shipped layouts: click/look fields only), layout.switch {name?} (no name: the next one).
@@ -209,15 +210,20 @@ export function panes(): PaneInfo[];
 export interface BrowserInfo {
   /** Its id (`b1`), for browser.navigate, browser.close, ... */
   browser: string;
+  /** Without its query and fragment unless agent access is on. */
   url: string;
   title: string;
+  /** "agent": a separate test profile, the only kind agents can drive. */
+  profile: "agent" | "person";
+  /** The terminal that last attached an agent, as it claimed (HC_TERMINAL_ID). */
+  last_agent: string | null;
   loading: boolean;
   can_go_back: boolean;
   can_go_forward: boolean;
   /** Where it is: null for a browser block in the layout itself. */
   space: string | null;
   pane: string | null;
-  /** Whether agents may drive it. Off until the person turns it on. */
+  /** Whether agents may drive it. Off until the person turns it on in the pane's header. */
   agent_access: boolean;
   /** Its pane is the focused one. */
   focused: boolean;

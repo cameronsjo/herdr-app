@@ -21,6 +21,13 @@ pub struct Block {
     /// The space and pane, for a browser in a tab; None for a layout block.
     pub space: Option<String>,
     pub pane: Option<String>,
+    /// Opened with `profile: "agent"` (a separate Chromium profile).
+    pub agent_profile: bool,
+}
+
+/// `profile: "agent"`; anything else (absent, `"person"`) is the person's profile.
+pub fn is_agent(profile: Option<&str>) -> bool {
+    profile == Some("agent")
 }
 
 /// What the page in an open browser says about itself.
@@ -43,15 +50,22 @@ pub struct Entry {
     pub pane: Option<String>,
     /// Plan Task 5: off until the person turns it on; never saved.
     pub agent_access: bool,
+    pub agent_profile: bool,
+    /// The terminal that last attached an agent, as it claimed (`HC_TERMINAL_ID`).
+    pub last_agent: Option<String>,
     /// When the page last took the keyboard, ms since the epoch (0: never).
     pub focused_at: u64,
 }
 
 impl Entry {
     /// One browser as mods and `herdr-app ls` see it.
+    /// The url keeps its query and fragment only while agent access is on
+    /// (codes and magic links in a url stay out of `herdr-app ls` otherwise).
     pub fn json(&self, focused: bool) -> Value {
+        let url = if self.agent_access { self.page.url.clone() } else { super::agent::without_query(&self.page.url) };
         json!({
-            "browser": self.browser, "url": self.page.url, "title": self.page.title,
+            "browser": self.browser, "url": url, "title": self.page.title, "profile": if self.agent_profile { "agent" } else { "person" },
+            "last_agent": self.last_agent,
             "loading": self.page.loading, "can_go_back": self.page.can_go_back, "can_go_forward": self.page.can_go_forward,
             "space": self.space, "pane": self.pane, "agent_access": self.agent_access, "focused": focused,
         })
@@ -109,6 +123,8 @@ impl Registry {
                         space: b.space.clone(),
                         pane: b.pane.clone(),
                         agent_access: false,
+                        agent_profile: b.agent_profile,
+                        last_agent: None,
                         focused_at: 0,
                     });
                     changes.open.push((b.browser.clone(), url));
@@ -158,6 +174,19 @@ impl Registry {
         moved
     }
 
+    /// Turns agent access on or off; false when no such browser.
+    pub fn set_access(&mut self, browser: &str, on: bool) -> bool {
+        let Some(e) = self.entries.iter_mut().find(|e| e.browser == browser) else { return false };
+        e.agent_access = on;
+        true
+    }
+
+    pub fn attached(&mut self, browser: &str, terminal: &str) {
+        if let Some(e) = self.entries.iter_mut().find(|e| e.browser == browser) {
+            e.last_agent = Some(terminal.to_owned());
+        }
+    }
+
     /// The page took the keyboard.
     pub fn focused(&mut self, browser: &str, now: u64) {
         if let Some(e) = self.entries.iter_mut().find(|e| e.browser == browser) {
@@ -173,10 +202,11 @@ pub fn blocks(model: &Model, chrome: &Node) -> Vec<Block> {
     for space in &model.spaces {
         for tab in &space.tabs {
             for n in tab.root.walk() {
-                if let Some(Content::Browser { browser, url }) = n.content() {
+                if let Some(Content::Browser { browser, url, profile }) = n.content() {
                     out.push(Block {
                         browser: browser.clone(),
                         url: url.clone(),
+                        agent_profile: is_agent(profile.as_deref()),
                         node: n.id.clone(),
                         space: Some(space.id.clone()),
                         pane: Some(n.id.clone()),
@@ -186,8 +216,8 @@ pub fn blocks(model: &Model, chrome: &Node) -> Vec<Block> {
         }
     }
     for n in chrome.walk() {
-        if let Some(Content::Browser { browser, url }) = n.content() {
-            out.push(Block { browser: browser.clone(), url: url.clone(), node: n.id.clone(), space: None, pane: None });
+        if let Some(Content::Browser { browser, url, profile }) = n.content() {
+            out.push(Block { browser: browser.clone(), url: url.clone(), agent_profile: is_agent(profile.as_deref()), node: n.id.clone(), space: None, pane: None });
         }
     }
     out
@@ -198,25 +228,31 @@ fn id_number(id: &str) -> Option<u64> {
     id.strip_prefix('b').filter(|n| !n.starts_with('0')).and_then(|n| n.parse().ok())
 }
 
-/// What `browser.open`/`browser.navigate` accept: a url with a scheme, an
-/// absolute path (a file), or a host (`example.com`, `localhost:3000`).
-/// `javascript:` is refused: it would run in whatever page is open.
+/// What `browser.open`/`browser.navigate` accept: an http(s) url,
+/// `about:blank`, or a host (`example.com`, `localhost:3000`). Everything
+/// else fails the one URL gate (`agent::allowed_url`): `file:`, `data:`,
+/// `chrome:`, `javascript:` and the rest never open (plan Task 5, review F4).
 pub fn normalize_url(url: &str) -> Result<String, String> {
     let url = url.trim();
     if url.is_empty() {
         return Err("the url is empty".into());
     }
     if url.starts_with('/') {
-        return Ok(format!("file://{url}"));
+        return Err("file pages don't open in Herdr's browser: serve the folder over http (just browser-fixture serves scripts/)".into());
     }
     let scheme = url.split_once(':').map(|(s, _)| s.to_ascii_lowercase());
-    match scheme.as_deref() {
-        Some("javascript") => Err("javascript: urls are not opened".into()),
-        Some("http" | "https" | "file" | "about" | "data" | "chrome" | "devtools" | "view-source") => Ok(url.to_owned()),
+    let url = match scheme.as_deref() {
+        Some("javascript") => return Err("javascript: urls are not opened".into()),
+        Some("http" | "https" | "about") => url.to_owned(),
         // `localhost:3000`, `127.0.0.1:8080`: a host and port, not a scheme.
-        _ if is_local(url) => Ok(format!("http://{url}")),
-        Some(s) if !url[s.len() + 1..].starts_with(|c: char| c.is_ascii_digit()) && !s.contains('.') => Ok(url.to_owned()),
-        _ => Ok(format!("https://{url}")),
+        _ if is_local(url) => format!("http://{url}"),
+        Some(s) if !url[s.len() + 1..].starts_with(|c: char| c.is_ascii_digit()) && !s.contains('.') => url.to_owned(),
+        _ => format!("https://{url}"),
+    };
+    if super::agent::allowed_url(&url) {
+        Ok(url)
+    } else {
+        Err(format!("only http, https and about:blank pages open in Herdr's browser, not {}", super::agent::loggable(&url)))
     }
 }
 
@@ -232,11 +268,11 @@ mod tests {
     use crate::model::Tab;
 
     fn browser_pane(id: &str, browser: &str, url: &str) -> Node {
-        Node::block(id, Content::Browser { browser: browser.into(), url: url.into() })
+        Node::block(id, Content::Browser { browser: browser.into(), url: url.into(), profile: None })
     }
 
     fn block(browser: &str, url: &str, node: &str, space: Option<&str>) -> Block {
-        Block { browser: browser.into(), url: url.into(), node: node.into(), space: space.map(Into::into), pane: space.map(|_| node.into()) }
+        Block { browser: browser.into(), url: url.into(), node: node.into(), space: space.map(Into::into), pane: space.map(|_| node.into()), agent_profile: false }
     }
 
     #[test]
@@ -339,11 +375,14 @@ mod tests {
         assert_eq!(normalize_url("example.com").unwrap(), "https://example.com");
         assert_eq!(normalize_url("localhost:3000/app").unwrap(), "http://localhost:3000/app");
         assert_eq!(normalize_url("127.0.0.1:8080").unwrap(), "http://127.0.0.1:8080");
-        assert_eq!(normalize_url("/tmp/page.html").unwrap(), "file:///tmp/page.html");
         assert_eq!(normalize_url("about:blank").unwrap(), "about:blank");
-        assert_eq!(normalize_url("data:text/html,hi").unwrap(), "data:text/html,hi");
         assert!(normalize_url("javascript:alert(1)").is_err());
         assert!(normalize_url("JavaScript:alert(1)").is_err());
         assert!(normalize_url("  ").is_err());
+        // The one URL gate (agent::allowed_url): local files and privileged pages never open.
+        assert_eq!(normalize_url("/tmp/page.html").unwrap_err(), "file pages don't open in Herdr's browser: serve the folder over http (just browser-fixture serves scripts/)");
+        for bad in ["file:///etc/hosts", "data:text/html,hi", "chrome://version", "devtools://devtools/x", "view-source:https://a/", "mailto:x@y"] {
+            assert!(normalize_url(bad).unwrap_err().starts_with("only http, https and about:blank pages open"), "{bad}");
+        }
     }
 }

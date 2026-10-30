@@ -3840,6 +3840,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ttf-parser",
+ "tungstenite",
  "uds_windows",
  "windows-sys 0.61.2",
  "winresource",

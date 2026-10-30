@@ -1575,6 +1575,93 @@ impl AppWindow {
         cx.notify();
     }
 
+    /// The header of an agent-profile browser block: a warning that this is
+    /// a test profile, whether agent access is on (and which terminal last
+    /// attached, as it claimed), and the button that turns it on or off.
+    fn agent_bar(&self, node: &str, browser: &str, cx: &mut Context<Self>) -> AnyElement {
+        let (on, last) = self.browsers.agent_state(browser).unwrap_or((false, None));
+        let state = match (on, last) {
+            (false, _) => "Agent access off".to_owned(),
+            (true, None) => "Agent access ON".to_owned(),
+            (true, Some(t)) => format!("Agent access ON · last: terminal {t} (claimed)"),
+        };
+        let b = browser.to_owned();
+        div()
+            .flex_none()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .h(settings::z(26.0))
+            .bg(if on { c("blocked") } else { c("raised") })
+            .text_size(settings::z(12.0))
+            .text_color(c("foreground"))
+            .child(div().flex_1().overflow_hidden().whitespace_nowrap().child("Test profile: don't sign into real accounts."))
+            .child(div().whitespace_nowrap().child(state))
+            .child(
+                div()
+                    .id(SharedString::from(format!("agent-access-{node}")))
+                    .px_2()
+                    .rounded_sm()
+                    .bg(c("accent"))
+                    .text_color(c("accent_foreground"))
+                    .cursor_pointer()
+                    .child(if on { "Stop agent" } else { "Allow agent" })
+                    // A person's click: the one path that turns agent access on.
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        let on = this.browsers.agent_state(&b).is_some_and(|(on, _)| on);
+                        let r = this.set_agent_access(&b, !on, crate::browser::Source::PaneControl);
+                        if let Err(e) = r {
+                            let spec = json!({"kind":"toast", "notification":{"title":"agent access","body":e,"level":"error"}});
+                            this.open_overlay(mods::new_overlay_id(), spec, window, cx);
+                        }
+                        this.publish(cx);
+                        cx.notify();
+                    })),
+            )
+            .into_any_element()
+    }
+
+    /// Turns agent access for `browser` on or off (plan Task 5). On only
+    /// from Herdr's own pane control (or the debug-build dev switch); off
+    /// from anywhere, and off revokes the agent's token and ends its
+    /// connection, which reopens the page (nothing the agent set survives).
+    fn set_agent_access(&mut self, browser: &str, on: bool, from: crate::browser::Source) -> Result<Value, String> {
+        self.browsers.set_agent_access(browser, on, from)?;
+        Ok(json!({ "browser": browser, "agent_access": on }))
+    }
+
+    /// `{ attach: { terminal, session, browser? } }`: picks the caller's
+    /// browser (`browser::agent::select`) and hands back its token url.
+    /// `terminal` is the caller's claim (`HC_TERMINAL_ID`): a routing hint,
+    /// not an identity; the gate is the person's switch on the browser.
+    fn attach_agent(&mut self, req: &Value) -> Result<Value, String> {
+        let terminal = req.get("terminal").and_then(Value::as_str).filter(|t| !t.is_empty()).ok_or_else(crate::browser::not_in_herdr)?;
+        if terminal.contains('/') {
+            return Err(crate::browser::remote(terminal));
+        }
+        let pane = self.model.tabs().flat_map(|t| t.root.walk()).find(|n| n.terminal() == Some(terminal)).map(|n| n.id.clone());
+        let Some(pane) = pane else {
+            return Err(if self.live.contains_key(terminal) { crate::browser::parked(terminal) } else { format!("no terminal {terminal} in Herdr") });
+        };
+        let space = self.model.space_of(&pane).ok_or_else(|| crate::browser::parked(terminal))?;
+        if space.machine.is_some() {
+            return Err(crate::browser::remote(terminal));
+        }
+        let (space, tab) = (space.id.clone(), self.model.tab_of(&pane).map(|t| t.id.clone()).unwrap_or_default());
+        let wanted = req.get("browser").and_then(Value::as_str);
+        let tab_of = |p: &str| self.model.tab_of(p).map(|t| t.id.clone());
+        let check = req.get("check").and_then(Value::as_bool).unwrap_or(false);
+        let r = self.browsers.attach(terminal, &space, &tab, wanted, check, &tab_of);
+        if let Ok(v) = &r
+            && !check
+        {
+            tracing::info!("browser: agent attach browser={} terminal={terminal} (claimed, unverified) selection={}", v["browser"].as_str().unwrap_or("?"), v["selection"].as_str().unwrap_or("?"));
+        }
+        r
+    }
+
     /// A browser pane's saved url follows its page: it reopens where it was.
     /// (A browser block of the layout keeps the url its file gives it.)
     fn save_browser_url(&mut self, browser: &str, url: &str) {
@@ -1587,10 +1674,17 @@ impl AppWindow {
     }
 
     /// `browser.open`: a browser pane beside a pane, or as a new tab in its space.
-    fn open_browser(&mut self, url: &str, place: &str, pane: Option<String>) -> Result<Value, String> {
+    /// `profile`: `"agent"` (a separate Chromium profile, the only kind an
+    /// agent may drive) or `"person"` (default).
+    fn open_browser(&mut self, url: &str, place: &str, pane: Option<String>, profile: Option<&str>) -> Result<Value, String> {
+        let profile = match profile {
+            None | Some("person") => None,
+            Some("agent") => Some("agent".to_owned()),
+            Some(other) => return Err(format!("browser.open profile is \"agent\" or \"person\", not {other:?}")),
+        };
         let (browser, url) = self.browsers.prepare_open(url, &self.model, &self.chrome)?;
         let target = pane.or_else(|| self.model.focused_pane());
-        let block = |id: &str| Node::block(id, Content::Browser { browser: browser.clone(), url: url.clone() });
+        let block = |id: &str| Node::block(id, Content::Browser { browser: browser.clone(), url: url.clone(), profile: profile.clone() });
         match place {
             "right" | "down" => {
                 let target = target.ok_or("no pane to open the browser beside: make a space first (space.new), or use place \"tab\"")?;
@@ -1722,7 +1816,7 @@ impl AppWindow {
                         continue;
                     }
                     // A browser pane: its page, no terminal.
-                    if let Some(Content::Browser { browser, url }) = p.content() {
+                    if let Some(Content::Browser { browser, url, .. }) = p.content() {
                         let info = self.browsers.info(browser, focused);
                         let field = |k: &str| info.as_ref().and_then(|i| i.get(k)).and_then(Value::as_str).filter(|v| !v.is_empty()).map(str::to_owned);
                         let title = field("title").or_else(|| field("url")).unwrap_or_else(|| url.clone());
@@ -3084,8 +3178,25 @@ impl AppWindow {
             }
             // ---- browsers
             "browser.open" => {
-                let r = self.open_browser(Self::arg(a, "url").unwrap_or_default(), Self::arg(a, "place").unwrap_or("right"), Self::owned(a, "pane"));
+                let r = self.open_browser(Self::arg(a, "url").unwrap_or_default(), Self::arg(a, "place").unwrap_or("right"), Self::owned(a, "pane"), Self::arg(a, "profile"));
                 self.answer(r);
+            }
+            // Off from anywhere; on only from Herdr's own pane button (an agent can
+            // reach the socket and write mods). `person` here means a mod's run(),
+            // a key or a menu, which agents can also write.
+            "browser.agent_access" => {
+                let b = Self::arg(a, "browser").unwrap_or_default().to_owned();
+                let on = a.get("on").and_then(Value::as_bool).unwrap_or(false);
+                let from = if person {
+                    crate::browser::Source::Mod
+                } else if on && crate::browser::dev_switch() {
+                    tracing::warn!("browser: DEV SWITCH (debug build): the control socket turns agent access on for {b}");
+                    crate::browser::Source::DevSwitch
+                } else {
+                    crate::browser::Source::Socket
+                };
+                let r = self.set_agent_access(&b, on, from);
+                return self.answer(r);
             }
             "browser.close" => {
                 let b = Self::arg(a, "browser").unwrap_or_default();
@@ -3624,6 +3735,15 @@ impl AppWindow {
         if cmd.get("ls").is_some() {
             return self.world();
         }
+        // agent-browser's provider (`herdr-app __agent-browser-provider`): a
+        // token url for the caller's browser, if the person allowed it. Only
+        // the socket answers this; it is no command, so no mod or key can.
+        if let Some(attach) = cmd.get("attach") {
+            return match self.attach_agent(attach) {
+                Ok(v) => v,
+                Err(e) => json!({ "error": e }),
+            };
+        }
         if cmd.get("status").is_some() {
             let round = |v: f32| (v as f64 * 100.0).round() / 100.0;
             let errors: Vec<String> = ["settings", "keys", "layout", "programs"]
@@ -3687,7 +3807,7 @@ impl AppWindow {
                         let terms: Vec<Value> = c.root.terminals().iter().filter_map(|n| Some(terminal(&n.id, n.terminal()?))).collect();
                         let mut tab = json!({ "id": c.id, "name": Model::tab_name(p, c), "active": Some(&c.id) == active.as_ref(), "settled": c.settled.is_some(), "terminals": terms });
                         let browsers: Vec<Value> = c.root.walk().into_iter().filter_map(|n| match n.content() {
-                            Some(Content::Browser { browser, url }) => Some(self.browsers.info(browser, false).map_or_else(
+                            Some(Content::Browser { browser, url, .. }) => Some(self.browsers.info(browser, false).map_or_else(
                                 || json!({ "browser": browser, "pane": n.id, "url": url }),
                                 |i| json!({ "browser": browser, "pane": n.id, "url": i["url"], "title": i["title"] }),
                             )),
@@ -3973,19 +4093,32 @@ impl AppWindow {
                 None => div().into_any_element(),
             },
             Content::Mod { .. } => self.render_slot(&n.id, cx),
-            Content::Browser { browser, url } => {
+            Content::Browser { browser, url, profile } => {
                 let id = n.id.clone();
+                // An agent-profile browser gets Herdr's own header: the test-profile
+                // warning and the agent-access switch. Herdr draws it (no mod), and
+                // its button is the only way agent access turns on (plan Task 5).
+                let bar = (profile.as_deref() == Some("agent")).then(|| self.agent_bar(&n.id, browser, cx));
                 div()
                     .size_full()
-                    // The page takes clicks itself once it shows; until then a click focuses the pane.
-                    .on_any_mouse_down(cx.listener(move |this, _, window, cx| {
-                        if this.model.tab_of(&id).is_some() && this.model.focused_pane().as_deref() != Some(id.as_str()) {
-                            this.model.focus_pane(&id);
-                            this.focused_pane = None;
-                            this.sync(window, cx);
-                        }
-                    }))
-                    .child(self.browsers.element(&n.id, browser, url, crate::browser::Look { surface: c("surface"), text: c("foreground"), dim: c("dim") }))
+                    .flex()
+                    .flex_col()
+                    .children(bar)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .relative()
+                            // The page takes clicks itself once it shows; until then a click focuses the pane.
+                            .on_any_mouse_down(cx.listener(move |this, _, window, cx| {
+                                if this.model.tab_of(&id).is_some() && this.model.focused_pane().as_deref() != Some(id.as_str()) {
+                                    this.model.focus_pane(&id);
+                                    this.focused_pane = None;
+                                    this.sync(window, cx);
+                                }
+                            }))
+                            .child(self.browsers.element(&n.id, browser, url, crate::browser::Look { surface: c("surface"), text: c("foreground"), dim: c("dim") })),
+                    )
                     .into_any_element()
             }
             Content::Agent { .. } => match self.shown_agent() {

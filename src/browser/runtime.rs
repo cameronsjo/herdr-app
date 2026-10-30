@@ -20,7 +20,9 @@ use objc2::runtime::{AnyClass, AnyObject, AnyProtocol, Bool};
 use objc2::{MainThreadMarker, msg_send};
 use objc2_app_kit::NSView;
 
+use super::agent;
 use super::native::Event;
+use super::proxy;
 use super::registry::Page;
 use super::view;
 
@@ -73,6 +75,12 @@ struct State {
     /// ours, not the page's.
     closing: Vec<c_int>,
     app: Option<App>,
+    /// Ids opened on the agent profile (`profile: "agent"`), for reopening.
+    agent_profile: HashMap<String, bool>,
+    /// The agent profile's request context: its own cache path, cookies and storage.
+    agent_context: Option<RequestContext>,
+    /// DevTools observers, by CEF identifier: one per browser an agent talked to.
+    observers: HashMap<c_int, Registration>,
 }
 
 impl State {
@@ -128,6 +136,10 @@ pub fn page_view(id: &str) -> Option<NonNull<NSView>> {
 }
 
 pub fn navigate(id: &str, url: &str) -> Result<(), String> {
+    if !agent::allowed_url(url) {
+        tracing::warn!("browser: {id} not sent to {}: only http, https and about:blank pages open", agent::loggable(url));
+        return Err(format!("only http, https and about:blank pages open, not {}", agent::loggable(url)));
+    }
     let frame = need(id)?.main_frame().ok_or("the page has no main frame")?;
     frame.load_url(Some(&CefString::from(url)));
     Ok(())
@@ -173,6 +185,48 @@ pub fn set_focus(id: &str) {
     }
 }
 
+/// Runs the pump soon (any thread): the agent proxy queued work for a page.
+pub fn wake() {
+    if let Some(tx) = PUMP.get() {
+        let _ = tx.try_send(0);
+    }
+}
+
+/// Sends one DevTools message (JSON, already allowed by the proxy) to
+/// browser `id`'s page, watching its answers first. False: no page now.
+pub fn send_devtools(id: &str, message: &[u8]) -> bool {
+    let Some((b, generation)) = STATE.with_borrow(|s| {
+        s.browsers.iter().find(|o| o.id == id && s.is_current(&o.id, o.generation)).map(|o| (o.browser.clone(), o.generation))
+    }) else {
+        return false;
+    };
+    let Some(host) = b.host() else { return false };
+    let cef = b.identifier();
+    if !STATE.with_borrow(|s| s.observers.contains_key(&cef)) {
+        let mut observer = HerdrDevTools::new(id.to_owned(), generation);
+        match host.add_dev_tools_message_observer(Some(&mut observer)) {
+            Some(r) => STATE.with_borrow_mut(|s| s.observers.insert(cef, r)),
+            None => return false,
+        };
+    }
+    host.send_dev_tools_message(Some(message)) == 1
+}
+
+/// An agent's connection to `id` ended: the page reopens at its url in a
+/// new CEF browser, whose DevTools session starts clean. Whatever the
+/// agent set (overrides, headers, auto-attach) goes with the old one.
+pub fn agent_gone(id: &str) {
+    let Some(url) = STATE.with_borrow(|s| s.pages.get(id).map(|p| p.url.clone())) else { return };
+    if phase() != Phase::Ready || browser(id).is_none() {
+        return;
+    }
+    let Some(parent) = view::existing(id) else { return };
+    let agent_profile = STATE.with_borrow(|s| s.agent_profile.get(id).copied().unwrap_or(false));
+    tracing::info!("browser: {id}'s agent session ended; reopening it at {} so nothing the agent set stays", agent::loggable(&url));
+    close(id);
+    open(id, parent, url, agent_profile);
+}
+
 fn phase() -> Phase {
     STATE.with_borrow(|s| s.phase)
 }
@@ -202,7 +256,19 @@ pub fn start(cx: &mut gpui::App) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A folder only this user can open (created or tightened to 0700).
+fn private_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+}
+
 fn start_cef() -> anyhow::Result<()> {
+    // CEF reads the process's argv: a remote-debugging switch there would open a port.
+    let argv: Vec<String> = std::env::args().collect();
+    if let Some(switch) = agent::forbidden_switch(argv.iter().map(String::as_str)) {
+        anyhow::bail!("refusing to start CEF with --{switch}: Herdr's browser never opens a DevTools port");
+    }
     let exe = std::env::current_exe()?;
     let framework = exe.parent().unwrap_or(&exe).join("../Frameworks").join(FRAMEWORK);
     if !framework.is_file() {
@@ -221,15 +287,21 @@ fn start_cef() -> anyhow::Result<()> {
     }
     declare_app_protocol()?;
 
-    let profile = crate::mods::app_dir().join("browser/profile");
-    std::fs::create_dir_all(&profile)?;
+    // The person's profile and the agent profile (plan Task 5) sit side by
+    // side under `browser/`, CEF's root cache path; every folder is 0700.
+    let root = crate::mods::app_dir().join("browser");
+    let profile = root.join("profile");
+    for dir in [&crate::mods::app_dir(), &root, &profile, &root.join("agent-profile")] {
+        private_dir(dir)?;
+    }
+    let root_str = root.to_string_lossy();
     let profile_str = profile.to_string_lossy();
-    let log = crate::mods::app_dir().join("browser/cef.log");
+    let log = root.join("cef.log");
     let settings = Settings {
         // Renderers run in Chromium's macOS sandbox (the helper starts it).
         no_sandbox: 0,
         external_message_pump: 1,
-        root_cache_path: CefString::from(profile_str.as_ref()),
+        root_cache_path: CefString::from(root_str.as_ref()),
         cache_path: CefString::from(profile_str.as_ref()),
         log_file: CefString::from(log.to_string_lossy().as_ref()),
         log_severity: LogSeverity::WARNING,
@@ -335,6 +407,7 @@ fn pump() {
     do_message_loop_work();
     PUMPING.set(false);
     finish_navigations();
+    proxy::drain();
 }
 
 /// Closes a browser the way CEF wants for a child view: its DevTools first,
@@ -381,8 +454,9 @@ fn finish_navigations() {
 }
 
 /// Opens browser `id` filling `parent`, now or once CEF's context is ready.
-pub fn open(id: &str, parent: Retained<NSView>, url: String) {
+pub fn open(id: &str, parent: Retained<NSView>, url: String, agent_profile: bool) {
     let generation = STATE.with_borrow_mut(|s| {
+        s.agent_profile.insert(id.to_owned(), agent_profile);
         s.next_generation += 1;
         s.current.insert(id.to_owned(), s.next_generation);
         s.pages.insert(id.to_owned(), Page { url: url.clone(), loading: true, ..Page::default() });
@@ -395,7 +469,40 @@ pub fn open(id: &str, parent: Retained<NSView>, url: String) {
     }
 }
 
+/// The agent profile's request context, made once: its own folder under
+/// CEF's root cache path, so cookies and storage never mix with the person's.
+fn agent_context() -> Option<RequestContext> {
+    if let Some(c) = STATE.with_borrow(|s| s.agent_context.clone()) {
+        return Some(c);
+    }
+    let path = crate::mods::app_dir().join("browser/agent-profile");
+    let settings = RequestContextSettings { cache_path: CefString::from(path.to_string_lossy().as_ref()), ..Default::default() };
+    let context = request_context_create_context(Some(&settings), None)?;
+    tracing::info!("browser: agent profile at {}", path.display());
+    STATE.with_borrow_mut(|s| s.agent_context = Some(context.clone()));
+    Some(context)
+}
+
 fn create(id: &str, generation: u64, parent: &NSView, url: &str) {
+    // The one URL gate: a saved or restored block can name anything.
+    let url = if agent::allowed_url(url) {
+        url
+    } else {
+        tracing::warn!("browser: {id} opens on about:blank, not {}: only http, https and about:blank pages open", agent::loggable(url));
+        registry_blank()
+    };
+    let agent_profile = STATE.with_borrow(|s| s.agent_profile.get(id).copied().unwrap_or(false));
+    let mut context = if agent_profile {
+        match agent_context() {
+            Some(c) => Some(c),
+            None => {
+                tracing::error!("browser: CEF refused the agent profile; {id} not opened");
+                return;
+            }
+        }
+    } else {
+        None
+    };
     let size = parent.bounds().size;
     let bounds = Rect { x: 0, y: 0, width: size.width as c_int, height: size.height as c_int };
     let handle: sys::cef_window_handle_t = (parent as *const NSView).cast_mut().cast();
@@ -406,6 +513,7 @@ fn create(id: &str, generation: u64, parent: &NSView, url: &str) {
         HerdrLoad::new(id.clone(), generation),
         HerdrDisplay::new(id.clone(), generation),
         HerdrFocus::new(id.clone(), generation),
+        HerdrDownloads::new(id.clone(), agent_profile),
     );
     STATE.with_borrow_mut(|s| s.creating += 1);
     let asked = browser_host_create_browser(
@@ -414,13 +522,13 @@ fn create(id: &str, generation: u64, parent: &NSView, url: &str) {
         Some(&CefString::from(url)),
         Some(&BrowserSettings::default()),
         None,
-        None,
+        context.as_mut(),
     );
     if asked != 1 {
         STATE.with_borrow_mut(|s| s.creating -= 1);
         tracing::error!("browser: CEF refused to create {id}");
     } else {
-        tracing::info!("browser: creating {id} at {}", short(url));
+        tracing::info!("browser: creating {id} at {}{}", agent::loggable(url), if agent_profile { " (agent profile)" } else { "" });
     }
 }
 
@@ -464,6 +572,10 @@ pub fn shutdown() {
     if !matches!(phase(), Phase::Starting | Phase::Ready) {
         return;
     }
+    // Quit ends every agent token and connection first.
+    for b in proxy::revoke_all() {
+        tracing::info!("browser: agent access off browser={b} by={}", super::Source::Quit.label());
+    }
     if PUMPING.get() {
         tracing::warn!("browser: quit inside a CEF callback; CEF not shut down");
         return;
@@ -504,8 +616,8 @@ pub fn shutdown() {
     });
 }
 
-fn short(url: &str) -> String {
-    if url.len() <= 80 { url.to_string() } else { format!("{}…", &url[..url.floor_char_boundary(77)]) }
+fn registry_blank() -> &'static str {
+    super::registry::BLANK
 }
 
 wrap_app! {
@@ -520,6 +632,13 @@ wrap_app! {
             command_line: Option<&mut CommandLine>,
         ) {
             let Some(command_line) = command_line else { return };
+            // Never a DevTools port, whatever reached the command line.
+            for switch in agent::FORBIDDEN_SWITCHES {
+                if command_line.has_switch(Some(&CefString::from(switch))) == 1 {
+                    tracing::error!("browser: --{switch} is on CEF's command line; Herdr's browser never opens a DevTools port. Stopping.");
+                    std::process::abort();
+                }
+            }
             // A mock key for the profile's cookie encryption: the spike never
             // touches the person's login keychain. Don't sign into real
             // accounts in this profile.
@@ -564,9 +683,14 @@ wrap_client! {
         load: LoadHandler,
         display: DisplayHandler,
         focus: FocusHandler,
+        downloads: DownloadHandler,
     }
 
     impl Client {
+        fn download_handler(&self) -> Option<DownloadHandler> {
+            Some(self.downloads.clone())
+        }
+
         fn life_span_handler(&self) -> Option<LifeSpanHandler> {
             Some(self.life_span.clone())
         }
@@ -631,13 +755,13 @@ wrap_life_span_handler! {
 
         fn on_before_popup(
             &self,
-            _browser: Option<&mut Browser>,
-            _frame: Option<&mut Frame>,
+            browser: Option<&mut Browser>,
+            frame: Option<&mut Frame>,
             _popup_id: c_int,
             target_url: Option<&CefString>,
             _target_frame_name: Option<&CefString>,
             _target_disposition: WindowOpenDisposition,
-            _user_gesture: c_int,
+            user_gesture: c_int,
             _popup_features: Option<&PopupFeatures>,
             _window_info: Option<&mut WindowInfo>,
             _client: Option<&mut Option<Client>>,
@@ -646,11 +770,22 @@ wrap_life_span_handler! {
             _no_javascript_access: Option<&mut c_int>,
         ) -> c_int {
             // No top-level Chromium windows: a popup or a new-tab link opens in this pane.
+            // The URL gate, and a cross-origin frame needs the person's gesture.
             if let Some(url) = target_url.map(|u| u.to_string()).filter(|u| !u.is_empty())
                 && is_current(&self.id, self.generation)
             {
-                tracing::info!("browser: {} popup {} opens in its pane", self.id, short(&url));
-                STATE.with_borrow_mut(|s| s.navigations.push((self.id.clone(), url)));
+                let frame_url = frame.as_ref().map(|f| CefString::from(&f.url()).to_string()).unwrap_or_default();
+                let is_main = frame.as_ref().is_some_and(|f| f.is_main() == 1);
+                let main_url = browser.and_then(|b| b.main_frame()).map(|f| CefString::from(&f.url()).to_string()).unwrap_or_default();
+                if agent::popup_allowed(&url, &frame_url, &main_url, is_main, user_gesture == 1) {
+                    tracing::info!("browser: {} popup {} opens in its pane", self.id, agent::loggable(&url));
+                    STATE.with_borrow_mut(|s| s.navigations.push((self.id.clone(), url)));
+                } else {
+                    tracing::warn!(
+                        "browser: {} popup to {} dropped (gesture {}, main frame {is_main}): only http, https and about:blank, and a cross-origin frame needs a click",
+                        self.id, agent::loggable(&url), user_gesture == 1
+                    );
+                }
             }
             1
         }
@@ -676,6 +811,9 @@ wrap_life_span_handler! {
                 // By CEF's identifier: a newer browser with the same Herdr id stays.
                 s.browsers.retain(|o| Some(o.browser.identifier()) != cef);
                 s.closing.retain(|b| Some(*b) != cef);
+                if let Some(cef) = cef {
+                    s.observers.remove(&cef);
+                }
                 if s.is_current(&self.id, self.generation) {
                     s.current.remove(&self.id);
                     s.pages.remove(&self.id);
@@ -705,7 +843,7 @@ wrap_load_handler! {
             let Some(frame) = frame else { return };
             if frame.is_main() == 1 {
                 let url = CefString::from(&frame.url()).to_string();
-                tracing::info!("browser: {} load end {} status {http_status_code}", self.id, short(&url));
+                tracing::info!("browser: {} load end {} status {http_status_code}", self.id, agent::loggable(&url));
             }
         }
 
@@ -720,7 +858,7 @@ wrap_load_handler! {
             if frame.is_some_and(|f| f.is_main() == 1) {
                 let text = error_text.map(|t| t.to_string()).unwrap_or_default();
                 let url = failed_url.map(|u| u.to_string()).unwrap_or_default();
-                tracing::warn!("browser: {} load error {} {error_code:?} {text}", self.id, short(&url));
+                tracing::warn!("browser: {} load error {} {error_code:?} {text}", self.id, agent::loggable(&url));
             }
         }
     }
@@ -736,6 +874,9 @@ wrap_display_handler! {
         fn on_address_change(&self, _browser: Option<&mut Browser>, frame: Option<&mut Frame>, url: Option<&CefString>) {
             if frame.is_some_and(|f| f.is_main() == 1) {
                 let url = url.map(|u| u.to_string()).unwrap_or_default();
+                if is_current(&self.id, self.generation) {
+                    proxy::set_url(&self.id, &url);
+                }
                 page_changed(&self.id, self.generation, |p| p.url = url);
             }
         }
@@ -806,6 +947,51 @@ wrap_life_span_handler! {
                 s.devtools
             });
             tracing::info!("browser: a DevTools window closed ({open} open)");
+        }
+    }
+}
+
+// Downloads: an agent-profile page never downloads (CDP can't pick a
+// folder, and nothing should land on disk from a page an agent drives).
+wrap_download_handler! {
+    struct HerdrDownloads {
+        id: String,
+        agent_profile: bool,
+    }
+
+    impl DownloadHandler {
+        fn can_download(&self, _browser: Option<&mut Browser>, url: Option<&CefString>, _method: Option<&CefString>) -> c_int {
+            if self.agent_profile {
+                let url = url.map(|u| u.to_string()).unwrap_or_default();
+                tracing::info!("browser: {} download of {} refused (agent profile)", self.id, agent::loggable(&url));
+            }
+            c_int::from(!self.agent_profile)
+        }
+    }
+}
+
+// The agent's side of a page's DevTools session: every answer and event
+// goes to the proxy, which passes on only this agent's own.
+wrap_dev_tools_message_observer! {
+    struct HerdrDevTools {
+        id: String,
+        generation: u64,
+    }
+
+    impl DevToolsMessageObserver {
+        fn on_dev_tools_message(&self, _browser: Option<&mut Browser>, message: Option<&[u8]>) -> c_int {
+            if let Some(message) = message
+                && is_current(&self.id, self.generation)
+            {
+                proxy::from_page(&self.id, message);
+            }
+            1
+        }
+
+        fn on_dev_tools_agent_detached(&self, _browser: Option<&mut Browser>) {
+            if is_current(&self.id, self.generation) && proxy::revoke(&self.id) {
+                tracing::info!("browser: agent access token for {} revoked: CEF's DevTools agent went away", self.id);
+            }
         }
     }
 }

@@ -48,6 +48,18 @@ impl Browsers {
         Vec::new()
     }
 
+    pub fn agent_state(&self, _browser: &str) -> Option<(bool, Option<String>)> {
+        None
+    }
+
+    pub fn set_agent_access(&mut self, _browser: &str, _on: bool, _from: super::Source) -> Result<(), String> {
+        Err(UNAVAILABLE.into())
+    }
+
+    pub fn attach(&mut self, _terminal: &str, _space: &str, _tab: &str, _wanted: Option<&str>, _check: bool, _tab_of: &dyn Fn(&str) -> Option<String>) -> Result<serde_json::Value, String> {
+        Err(UNAVAILABLE.into())
+    }
+
     pub fn keys(&mut self, _page: Option<&str>, _window: &mut Window) {}
 
     pub fn covered(&self) -> Vec<String> {

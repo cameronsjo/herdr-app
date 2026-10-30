@@ -111,6 +111,20 @@ floats included, even when the window is covered or minimized. No screen
 capture or permissions. It needs a running window that has drawn a frame;
 `HERDR_APP_HOME` selects the window, as for `status`.
 
+## Browser panes and agent-browser
+
+Browser panes (macOS builds with the browser feature) show in `herdr-app ls`
+under `browsers`. You can drive one with `agent-browser` (`snapshot -i`,
+`click @e3`, `fill @e2 text`) only after the person turns on agent access
+in that pane's header; you can't turn it on yourself. Ask them. If
+agent-browser says `Plugin 'herdr' returned success=false`, run
+`agent-browser plugin run herdr herdr.check` to see why. Terminals opened
+before this version or with `hc run` don't have the environment;
+`AGENT_BROWSER_PROVIDER=` opts a terminal out. `HERDR_BROWSER=<id>` picks a
+browser when there are two. Only a browser opened with `--profile agent` can
+be driven; open one with `herdr-app do browser.open --profile agent --url <url>`
+only when asked.
+
 ## Problems and safety
 
 If Herdr misbehaves, `herdr-app feedback "<what happened>"` drafts a report.

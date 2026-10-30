@@ -31,11 +31,14 @@ CEF_PATH=~/.cache/herdr-app/cef CEF_DOWNLOAD_URL=https://cef-builds.spotifycdn.c
 
 `just browser-dev` prints its scratch folder (`/tmp/hbd.*`) and writes
 `<scratch>/herdr-app`, which talks to that window only. The scratch home
-starts with no space; make one, then open a page beside it:
+starts with no space; make one, then open a page beside it. Pages open
+over http, https or `about:blank` only (no `file:`), so serve the test
+pages first with `just browser-fixture` (in another terminal; it serves
+`scripts/` on `http://127.0.0.1:8765`):
 
 ```sh
 herdr-app do space.new
-herdr-app do browser.open --url "file://$PWD/scripts/browser-test-page.html"
+herdr-app do browser.open --url http://127.0.0.1:8765/browser-test-page.html
 herdr-app do browser.open --url example.com --place tab
 herdr-app ls
 herdr-app do browser.navigate --browser b1 --url https://example.com/
@@ -89,4 +92,86 @@ a new-window link.
   DevTools window.
 - The profile (cookies, cache) is `<app home>/browser/profile`; delete it
   while the app is closed to start fresh. Don't sign into real accounts in
-  it: it uses a mock keychain.
+  it: it uses a mock keychain. The app home, `browser/` and both profiles
+  are created `0700`; the control socket is `0600` and drops a peer running
+  as another user.
+- One URL gate covers `browser.open`, `browser.navigate`, a restored
+  block's url, popups and an agent's `Page.navigate`: `http`, `https` and
+  `about:blank` only. A popup from a frame of another origin needs a click.
+  Logs keep a url's scheme, host and path only.
+
+## Agents drive a page (agent access)
+
+An agent in a Herdr terminal can drive a browser pane with
+[`agent-browser`](https://github.com/vercel-labs/agent-browser), once the
+person allows it for that pane:
+
+1. `just browser-fixture` (another terminal), then
+   `herdr-app do browser.open --profile agent --url http://127.0.0.1:8765/browser-fixture.html`.
+   `profile: "agent"` is a separate Chromium profile
+   (`<app home>/browser/agent-profile`); only such a browser can be driven.
+   Its header says "Test profile: don't sign into real accounts." Downloads
+   are refused in it.
+2. Click **Allow agent** in that header. Nothing else turns agent access on:
+   `herdr-app do browser.agent_access --on true` and a mod's `run()` are
+   refused, because an agent can reach both. Turning it off works from
+   anywhere (the header's **Stop agent**, or
+   `herdr-app do browser.agent_access --browser b1 --on false`). Access is
+   never saved; closing the browser or quitting turns it off.
+3. In a terminal Herdr started (any agent pane), `agent-browser snapshot -i`,
+   `agent-browser click @e5`, `agent-browser fill @e2 "Ada"`. The header
+   names the terminal that last attached, as it claimed itself.
+
+How it works: Herdr gives its local terminals `AGENT_BROWSER_PROVIDER=herdr`,
+`AGENT_BROWSER_PLUGINS` (Herdr's own provider, `herdr-app
+__agent-browser-provider`, first) and an `AGENT_BROWSER_SESSION` of their
+own. The provider asks the window over the control socket for the caller's
+browser (`HERDR_BROWSER=<id>` picks one in the caller's space; else the
+browser in its tab, else the one in its space the person focused last) and
+gets `ws://127.0.0.1:<port>/<token>`: a 256-bit token for that one page.
+Herdr's proxy passes CDP messages from that socket to the page's in-process
+DevTools session through an allowlist (`src/browser/agent.rs`): no
+`Target.attachToBrowserTarget`, no cookie reads, no file inputs, no
+downloads; cookie headers are stripped from network events. It refuses any
+upgrade with an `Origin` header or a `Host` other than `127.0.0.1:<port>`,
+and answers anything but an upgrade with a bare 404. Turning access off, a
+new attach for the same page, closing the browser and quitting end the
+token and the connection; when an agent's connection ends, the page
+reopens at its url so nothing the agent set (headers, overrides) stays.
+Every on, off and attach is in the log, never the token or port.
+
+agent-browser hides a provider's error text (`Plugin 'herdr' returned
+success=false`); `agent-browser plugin run herdr herdr.check` says why
+(for example `agent access is off for b1: ask the person to turn on agent
+access for b1`). Terminals started before this build, or by `hc run`, don't
+have the environment; `AGENT_BROWSER_PROVIDER=` opts a terminal out.
+
+What this does and doesn't protect (state this wherever the prototype is
+shown):
+
+> Agent access is a consent switch for a cooperating agent, not a security
+> boundary against software running as you. While it is on, any process
+> running as your user can get the page's CDP token through Herdr's control
+> socket and act as you on whatever site that pane shows: run script in the
+> page, click, type, and read what the page shows. Any process running as
+> you can also read this profile's cookies from disk, because the prototype
+> encrypts them with Chromium's public test key (`--use-mock-keychain`).
+> Other users on the machine and web pages cannot reach the agent
+> connection: it needs a 256-bit token, accepts only loopback connections
+> without an `Origin` header, and ends when you turn access off, close the
+> browser, or quit. Use this browser only with test accounts, never your own.
+
+Signing: the dev bundle is ad hoc signed without the hardened runtime, so
+library validation is off (`DYLD_INSERT_LIBRARIES` works on the browser
+process at its next launch, same user only), and Chromium logs a failed
+signature check of its own process (`process_requirement.cc … -67030`);
+whether Chromium then skips checks between its processes is unverified.
+
+### Dev-only switch (debug builds)
+
+A debug build started with `HERDR_DEV_AGENT_ACCESS=1` in its own
+environment lets `herdr-app do browser.agent_access --on true` turn access
+on, so an agent can test the whole path without a person's click. It is
+read once at launch and removed from the environment (terminals never
+inherit it), logged as `DEV SWITCH ON` at startup and on every use, and not
+compiled into release builds.

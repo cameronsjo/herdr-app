@@ -60,8 +60,9 @@ browser-build *args:
 
 # Runs the dev bundle on a scratch home and its own core, never your real
 # ones. `$root/herdr-app` talks to it, e.g. `$root/herdr-app do space.new`,
-# then `$root/herdr-app do browser.open --url <url>` (a test page:
-# scripts/browser-test-page.html). Quit it (cmd-q) to end; the scratch folder
+# then `$root/herdr-app do browser.open --url <url>` (test pages: run
+# `just browser-fixture`, then http://127.0.0.1:8765/browser-fixture.html).
+# Quit it (cmd-q) to end; the scratch folder
 # stays for its logs.
 # Herdr with Chromium browser panes, on a scratch home (macOS)
 [macos]
@@ -77,10 +78,17 @@ browser-dev *args:
     printf '#!/bin/bash\nHERDR_APP_HOME=%q exec %q "$@"\n' "$HERDR_APP_HOME" "$app" > "$root/herdr-app"
     chmod +x "$root/herdr-app"
     echo "scratch: $root (log: $root/app.log)"
-    echo "drive it: $root/herdr-app do space.new; $root/herdr-app do browser.open --url file://$PWD/scripts/browser-test-page.html"
+    echo "drive it: just browser-fixture (another terminal); $root/herdr-app do space.new; $root/herdr-app do browser.open --profile agent --url http://127.0.0.1:8765/browser-fixture.html"
     # Stops only this run's core (HC_SESSION, XDG_STATE_HOME above).
     trap 'hc server stop >/dev/null 2>&1 || true' EXIT
     "$app" 2>&1 | tee "$root/app.log"
+
+# Serves scripts/ on http://127.0.0.1:8765 for browser panes (they open
+# http, https and about:blank only): open
+# http://127.0.0.1:8765/browser-fixture.html with --profile agent.
+# Serves scripts/ over loopback http for browser panes
+browser-fixture port="8765":
+    python3 -m http.server {{port}} --bind 127.0.0.1 --directory scripts
 
 [linux]
 install:

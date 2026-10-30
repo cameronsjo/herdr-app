@@ -32,10 +32,14 @@ pub enum Content {
     /// placeholder elsewhere). `browser` is the app's id for it (`b1`);
     /// `url` is where it was last, so a block whose browser isn't open
     /// (a restart, another screen) opens there again.
+    /// `profile: "agent"`: a separate Chromium profile for test accounts;
+    /// only such a browser can be driven by an agent (plan Task 5).
     Browser {
         browser: String,
         #[serde(default)]
         url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile: Option<String>,
     },
 }
 
@@ -781,14 +785,14 @@ mod tests {
     fn browser_blocks_round_trip_as_panes() {
         let json = r#"{ "id": "p1", "type": "block", "content": { "browser": "b1", "url": "https://example.com/" } }"#;
         let n: Node = serde_json::from_str(json).unwrap();
-        assert_eq!(n.content(), Some(&Content::Browser { browser: "b1".into(), url: "https://example.com/".into() }));
+        assert_eq!(n.content(), Some(&Content::Browser { browser: "b1".into(), url: "https://example.com/".into(), profile: None }));
         assert!(n.is_pane());
         assert_eq!(n.browser(), Some("b1"));
         let back: Node = serde_json::from_str(&serde_json::to_string(&n).unwrap()).unwrap();
         assert_eq!(back, n);
         // A block saved without a url still parses (it opens on a blank page).
         let bare: Node = serde_json::from_str(r#"{ "id": "p2", "type": "block", "content": { "browser": "b2" } }"#).unwrap();
-        assert_eq!(bare.content(), Some(&Content::Browser { browser: "b2".into(), url: String::new() }));
+        assert_eq!(bare.content(), Some(&Content::Browser { browser: "b2".into(), url: String::new(), profile: None }));
         // The other kinds still parse as themselves.
         let t: Node = serde_json::from_str(r#"{ "id": "t", "type": "block", "content": { "terminal": "x" } }"#).unwrap();
         assert_eq!(t.terminal(), Some("x"));

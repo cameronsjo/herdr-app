@@ -165,13 +165,14 @@ End a terminal and its sub-agents.
 
 ## `browser.open`
 
-Open a web page in a browser pane (macOS builds with the browser feature): "right" (default) or "down" of a pane (default: the focused one), or as a new "tab" in its space. Says its browser id and pane.
+Open a web page (http, https or about:blank) in a browser pane (macOS builds with the browser feature): "right" (default) or "down" of a pane (default: the focused one), or as a new "tab" in its space. profile "agent": a separate test profile, the only kind an agent can drive once the person allows it. Says its browser id and pane.
 
 | Argument | Required |
 |---|---|
 | `url` | yes |
 | `place` | no |
 | `pane` | no |
+| `profile` | no |
 
 ## `browser.navigate`
 
@@ -222,6 +223,15 @@ Open or close Chromium's DevTools window for a browser (no open: toggle).
 |---|---|
 | `browser` | yes |
 | `open` | no |
+
+## `browser.agent_access`
+
+Turn agent access off for a browser (on: false): its agent's connection ends and the page reopens. Turning it on is only for the person, with the "Allow agent" button in an agent-profile browser's header; this command refuses on: true.
+
+| Argument | Required |
+|---|---|
+| `browser` | yes |
+| `on` | yes |
 
 ## `space.select`
 
