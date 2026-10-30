@@ -2,7 +2,6 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod bench;
-#[cfg(all(target_os = "macos", feature = "browser"))]
 mod browser;
 mod commands;
 mod control;
@@ -217,9 +216,7 @@ pub fn open_main(core: std::sync::Arc<hc::Core>, requests: async_channel::Receiv
                 app_id: Some(std::env::var("HERDR_APP_ID").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "herdr-app".into())),
                 ..Default::default()
             };
-            let _window = cx.open_window(options, |window, cx| cx.new(|cx| window::AppWindow::new(core, requests, window, cx)))
+            cx.open_window(options, |window, cx| cx.new(|cx| window::AppWindow::new(core, requests, window, cx)))
                 .expect("cannot open the Herdr window");
             cx.activate(true);
-            #[cfg(all(target_os = "macos", feature = "browser"))]
-            browser::spike(_window, cx);
 }

@@ -28,6 +28,15 @@ pub enum Content {
     },
     /// An agent's terminal, full size (`"focused"`: the selected agent).
     Agent { agent: String },
+    /// A Chromium page (macOS builds with the `browser` feature; a
+    /// placeholder elsewhere). `browser` is the app's id for it (`b1`);
+    /// `url` is where it was last, so a block whose browser isn't open
+    /// (a restart, another screen) opens there again.
+    Browser {
+        browser: String,
+        #[serde(default)]
+        url: String,
+    },
 }
 
 /// Which side of its node a floating block sits on. Left/right make it
@@ -63,6 +72,8 @@ pub enum Align {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Float {
     pub id: String,
+    /// Never a browser: its native view can't float over GPUI's drawing.
+    #[serde(deserialize_with = "float_content")]
     pub content: Content,
     #[serde(default)]
     pub edge: Edge,
@@ -74,6 +85,15 @@ pub struct Float {
     pub peek: Option<f32>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub hidden: bool,
+}
+
+fn float_content<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Content, D::Error> {
+    match Content::deserialize(d)? {
+        Content::Browser { browser, .. } => Err(serde::de::Error::custom(format!(
+            "a floating block can't show a browser ({browser}): put it in a pane or a layout block"
+        ))),
+        content => Ok(content),
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -465,9 +485,17 @@ impl Node {
         }
     }
 
-    /// A pane in a tab: a terminal, or a mod beside them (a viewer, a board).
+    /// A pane in a tab: a terminal, or a mod or browser beside them (a viewer, a board, a page).
     pub fn is_pane(&self) -> bool {
-        matches!(self.content(), Some(Content::Terminal { .. } | Content::Mod { .. }))
+        matches!(self.content(), Some(Content::Terminal { .. } | Content::Mod { .. } | Content::Browser { .. }))
+    }
+
+    /// The browser a block shows.
+    pub fn browser(&self) -> Option<&str> {
+        match self.content() {
+            Some(Content::Browser { browser, .. }) => Some(browser),
+            _ => None,
+        }
     }
 
     pub fn closable(&self) -> bool {
@@ -747,6 +775,35 @@ mod tests {
         assert_eq!((n.floating[0].edge, n.floating[0].align), (Edge::Left, Align::Center));
         let back: Node = serde_json::from_str(&serde_json::to_string(&n).unwrap()).unwrap();
         assert_eq!(back, n);
+    }
+
+    #[test]
+    fn browser_blocks_round_trip_as_panes() {
+        let json = r#"{ "id": "p1", "type": "block", "content": { "browser": "b1", "url": "https://example.com/" } }"#;
+        let n: Node = serde_json::from_str(json).unwrap();
+        assert_eq!(n.content(), Some(&Content::Browser { browser: "b1".into(), url: "https://example.com/".into() }));
+        assert!(n.is_pane());
+        assert_eq!(n.browser(), Some("b1"));
+        let back: Node = serde_json::from_str(&serde_json::to_string(&n).unwrap()).unwrap();
+        assert_eq!(back, n);
+        // A block saved without a url still parses (it opens on a blank page).
+        let bare: Node = serde_json::from_str(r#"{ "id": "p2", "type": "block", "content": { "browser": "b2" } }"#).unwrap();
+        assert_eq!(bare.content(), Some(&Content::Browser { browser: "b2".into(), url: String::new() }));
+        // The other kinds still parse as themselves.
+        let t: Node = serde_json::from_str(r#"{ "id": "t", "type": "block", "content": { "terminal": "x" } }"#).unwrap();
+        assert_eq!(t.terminal(), Some("x"));
+    }
+
+    #[test]
+    fn floating_blocks_refuse_browsers() {
+        let json = r#"{ "id": "root", "type": "block", "content": {"agent": "focused"},
+          "floating": [ { "id": "f", "content": { "browser": "b1", "url": "https://example.com/" } } ] }"#;
+        let error = serde_json::from_str::<Node>(json).unwrap_err().to_string();
+        assert!(error.contains("a floating block can't show a browser (b1)"), "{error}");
+        // Other floats are unaffected.
+        let ok = r#"{ "id": "root", "type": "block", "content": {"agent": "focused"},
+          "floating": [ { "id": "f", "content": { "mod": "team" } } ] }"#;
+        assert!(serde_json::from_str::<Node>(ok).is_ok());
     }
 
     fn term(id: &str) -> Node {

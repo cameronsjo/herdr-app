@@ -3814,6 +3814,7 @@ dependencies = [
  "anyhow",
  "async-channel",
  "base64 0.22.1",
+ "block2 0.6.2",
  "cef",
  "fancy-regex 0.19.2",
  "ghostty-sys",

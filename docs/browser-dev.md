@@ -1,0 +1,70 @@
+# Browser panes (prototype, macOS)
+
+A browser pane shows a real Chromium page in a block: CEF (the Chromium
+Embedded Framework) in windowed mode, one native view per page over the
+window. It's behind the Cargo feature `browser`, off by default; other
+builds show a placeholder where a browser block is.
+
+## Build and run
+
+```sh
+just browser-build   # target/browser-dev/Herdr Dev.app: the app, CEF's framework, 5 helper apps
+just browser-dev     # the same, then runs it on a scratch home and its own core
+```
+
+Both need `cmake` and `ninja` (`brew install cmake ninja`). CEF on macOS only
+starts from such a bundle, so `cargo run` can't show a page.
+
+`CEF_PATH` is where CEF's binary distribution (about 600 MB) is downloaded
+once and kept. It must be outside the repo; the recipes default to
+`~/.cache/herdr-app/cef`. A bare `cargo build --features browser` without it
+is refused: `build.rs` says why, and `.cargo/config.toml` points CEF's
+download at an address that doesn't resolve, so nothing lands in `target/`.
+To build by hand:
+
+```sh
+CEF_PATH=~/.cache/herdr-app/cef CEF_DOWNLOAD_URL=https://cef-builds.spotifycdn.com \
+  cargo build --features browser --bin herdr-helper --bin herdr-app
+```
+
+## Try it
+
+`just browser-dev` prints its scratch folder (`/tmp/hbd.*`) and writes
+`<scratch>/herdr-app`, which talks to that window only. The scratch home
+starts with no space; make one, then open a page beside it:
+
+```sh
+herdr-app do space.new
+herdr-app do browser.open --url "file://$PWD/scripts/browser-test-page.html"
+herdr-app do browser.open --url example.com --place tab
+herdr-app ls
+herdr-app do browser.navigate --browser b1 --url https://example.com/
+herdr-app do browser.devtools --browser b1
+herdr-app do browser.close --browser b2
+```
+
+Run those through `<scratch>/herdr-app`, not your installed `herdr-app`,
+which drives your real window.
+
+`scripts/browser-test-page.html` has what to try by hand: typing with dead
+keys and an IME, a `<select>`, a long list to scroll, a right-click menu and
+a new-window link.
+
+## How it behaves
+
+- A browser block is `{ "browser": "b1", "url": "..." }`, as a pane in a tab
+  (saved with the tab, so it reopens at its last page after a restart) or as
+  a block in a layout. Floating blocks refuse it: a native view can't float
+  over GPUI's drawing.
+- Each frame the page's view takes its block's bounds; a block that isn't
+  painted (another tab, a zoomed pane, a hidden column) hides its page.
+  Overlays (dialogs, menus, toasts) still draw under a page.
+- Clicking a page gives it the keyboard and makes its pane the focused one.
+  While a page has the keyboard, keys bound in keys.json's `global` section
+  (and the shown layout's), plus `ctrl-alt-shift-escape`, still go to Herdr.
+- A popup or a `target="_blank"` link opens in the same pane.
+- No remote-debugging port is opened. `browser.devtools` opens CEF's own
+  DevTools window.
+- The profile (cookies, cache) is `<app home>/browser/profile`; delete it
+  while the app is closed to start fresh. Don't sign into real accounts in
+  it: it uses a mock keychain.

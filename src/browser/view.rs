@@ -1,0 +1,196 @@
+//! The native side of a browser block: one container `NSView` per browser
+//! over GPUI's view, moved to its block's bounds each frame and hidden when
+//! its block isn't painted; who has the keyboard; and the key monitor that
+//! keeps Herdr's global keys working while a page has it.
+//!
+//! GPUI has no hosted-native-view element and no layout-change event, so a
+//! block's canvas reports its bounds while painting (`place`) and a canvas
+//! painted last hides every view not placed this frame (`end_frame`).
+
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::ptr::NonNull;
+
+use block2::RcBlock;
+use gpui::{Bounds, Pixels, Window};
+use objc2::rc::Retained;
+use objc2::runtime::AnyObject;
+use objc2::{MainThreadMarker, MainThreadOnly as _};
+use objc2_app_kit::{NSEvent, NSEventMask, NSEventModifierFlags, NSView, NSWindowOrderingMode};
+use objc2_foundation::{NSPoint, NSRect, NSSize};
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+use super::keys::{self, Press};
+use super::runtime;
+
+struct Container {
+    view: Retained<NSView>,
+    /// Painted this frame.
+    placed: bool,
+}
+
+thread_local! {
+    static VIEWS: RefCell<HashMap<String, Container>> = RefCell::new(HashMap::new());
+    static BINDINGS: RefCell<Vec<(String, String)>> = const { RefCell::new(Vec::new()) };
+    static MONITOR: RefCell<Option<Retained<AnyObject>>> = const { RefCell::new(None) };
+}
+
+/// GPUI's own view for a window (its window handle).
+fn gpui_view(window: &Window) -> anyhow::Result<&NSView> {
+    let handle = HasWindowHandle::window_handle(window).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        anyhow::bail!("not an AppKit window");
+    };
+    // SAFETY: GPUI's window handle is its live GPUIView; used on the main thread
+    // while the window lives (the borrow can't outlive `window`).
+    Ok(unsafe { handle.ns_view.cast::<NSView>().as_ref() })
+}
+
+/// The container a browser fills, made once per browser, hidden until its
+/// block paints. It sits in the window's content view, above GPUI's view.
+pub fn container(id: &str, window: &Window) -> anyhow::Result<Retained<NSView>> {
+    if let Some(v) = VIEWS.with_borrow(|v| v.get(id).map(|c| c.view.clone())) {
+        return Ok(v);
+    }
+    let mtm = MainThreadMarker::new().ok_or_else(|| anyhow::anyhow!("not on the main thread"))?;
+    let gpui = gpui_view(window)?;
+    // SAFETY: a main-thread read of the view tree.
+    let content = unsafe { gpui.superview() }.ok_or_else(|| anyhow::anyhow!("GPUI's view has no superview"))?;
+    // A size to start at: CEF sizes its view to the parent's when it creates it.
+    let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(800.0, 600.0));
+    let view = NSView::initWithFrame(NSView::alloc(mtm), frame);
+    view.setWantsLayer(true);
+    view.setHidden(true);
+    content.addSubview_positioned_relativeTo(&view, NSWindowOrderingMode::Above, Some(gpui));
+    VIEWS.with_borrow_mut(|v| v.insert(id.to_owned(), Container { view: view.clone(), placed: false }));
+    Ok(view)
+}
+
+/// Puts a browser's view on its block (window points, top-left origin, as
+/// GPUI paints) and shows it.
+pub fn place(id: &str, bounds: Bounds<Pixels>, window: &Window) {
+    let Ok(gpui) = gpui_view(window) else { return };
+    let host = gpui.frame();
+    let (x, y) = (f64::from(f32::from(bounds.origin.x)), f64::from(f32::from(bounds.origin.y)));
+    let (w, h) = (f64::from(f32::from(bounds.size.width)), f64::from(f32::from(bounds.size.height)));
+    // The content view's origin is its bottom left; GPUI's is the top left.
+    let frame = NSRect::new(NSPoint::new(host.origin.x + x, host.origin.y + host.size.height - y - h), NSSize::new(w, h));
+    VIEWS.with_borrow_mut(|views| {
+        let Some(c) = views.get_mut(id) else { return };
+        c.placed = true;
+        let old = c.view.frame();
+        if old.origin != frame.origin || old.size != frame.size {
+            tracing::debug!("browser: {id} placed at {x},{y} {w}x{h} (window points, top left)");
+            c.view.setFrame(frame);
+            // The page fills its container (CEF sizes it once, at creation).
+            if let Some(page) = runtime::page_view(id) {
+                // SAFETY: CEF's live browser view, main thread.
+                unsafe { page.as_ref() }.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), frame.size));
+            }
+        }
+        if c.view.isHidden() {
+            tracing::debug!("browser: {id} shown");
+            c.view.setHidden(false);
+        }
+    });
+}
+
+/// After a frame: a view whose block wasn't painted (another tab, a zoomed
+/// pane, a hidden column) hides.
+pub fn end_frame() {
+    VIEWS.with_borrow_mut(|views| {
+        for (id, c) in views.iter_mut() {
+            if !c.placed && !c.view.isHidden() {
+                tracing::debug!("browser: {id} hidden (its block isn't shown)");
+                c.view.setHidden(true);
+            }
+            c.placed = false;
+        }
+    });
+}
+
+/// The browser closed: its container goes too (runtime.rs removed the page first).
+pub fn remove(id: &str) {
+    if let Some(c) = VIEWS.with_borrow_mut(|v| v.remove(id)) {
+        c.view.removeFromSuperview();
+    }
+}
+
+/// The page takes the keyboard. False while its view doesn't exist yet.
+pub fn give_keys(id: &str, window: &Window) -> bool {
+    let Some(page) = runtime::page_view(id) else {
+        tracing::debug!("browser: {id} can't take the keyboard yet: no page view");
+        return false;
+    };
+    // SAFETY: CEF's live browser view, main thread.
+    let page = unsafe { page.as_ref() };
+    let Some(ns_window) = gpui_view(window).ok().and_then(|g| g.window()) else { return false };
+    let taken = ns_window.makeFirstResponder(Some(page));
+    if !taken {
+        tracing::debug!("browser: {id} can't take the keyboard: the window refused");
+    }
+    taken
+}
+
+/// GPUI takes the keyboard back.
+pub fn take_keys(window: &Window) {
+    if let Ok(gpui) = gpui_view(window)
+        && let Some(ns_window) = gpui.window()
+    {
+        ns_window.makeFirstResponder(Some(gpui));
+    }
+}
+
+pub fn set_bindings(bindings: Vec<(String, String)>) {
+    BINDINGS.with_borrow_mut(|b| *b = bindings);
+}
+
+/// Once: a key-down monitor in front of AppKit's dispatch. While a page has
+/// the keyboard, a key bound globally in keys.json (or the escape hatch)
+/// runs its action in Herdr and never reaches the page.
+pub fn install_monitor() {
+    if MONITOR.with_borrow(Option::is_some) {
+        return;
+    }
+    let handler = RcBlock::new(|event: NonNull<NSEvent>| -> *mut NSEvent {
+        // SAFETY: AppKit hands the monitor a live event, on the main thread.
+        let ev = unsafe { event.as_ref() };
+        match route(ev) {
+            Some(action) => {
+                tracing::info!("browser: a page had the keyboard; {action} goes to Herdr");
+                crate::mods::request(crate::mods::Request::Run { name: action, args: serde_json::Value::Null });
+                std::ptr::null_mut()
+            }
+            None => event.as_ptr(),
+        }
+    });
+    // SAFETY: the handler returns the event it was given, or null to drop it.
+    let monitor = unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::KeyDown, &handler) };
+    MONITOR.with_borrow_mut(|m| *m = monitor);
+}
+
+/// The action for a key pressed while a page has the keyboard.
+fn route(ev: &NSEvent) -> Option<String> {
+    let mtm = MainThreadMarker::new()?;
+    let responder = ev.window(mtm)?.firstResponder()?;
+    let responder: &AnyObject = &responder;
+    let view = responder.downcast_ref::<NSView>()?;
+    let in_page = VIEWS.with_borrow(|views| views.values().any(|c| view.isDescendantOf(&c.view)));
+    if !in_page {
+        return None;
+    }
+    let flags = ev.modifierFlags();
+    let text = |s: Option<Retained<objc2_foundation::NSString>>| s.map(|s| s.to_string().to_lowercase()).filter(|s| !s.is_empty());
+    let key = keys::named(ev.keyCode())
+        .map(str::to_owned)
+        .or_else(|| text(ev.charactersByApplyingModifiers(NSEventModifierFlags::empty())))?;
+    let press = Press {
+        ctrl: flags.contains(NSEventModifierFlags::Control),
+        alt: flags.contains(NSEventModifierFlags::Option),
+        shift: flags.contains(NSEventModifierFlags::Shift),
+        cmd: flags.contains(NSEventModifierFlags::Command),
+        key,
+        shifted: text(ev.charactersIgnoringModifiers()),
+    };
+    BINDINGS.with_borrow(|b| keys::find(b, &press).map(str::to_owned))
+}

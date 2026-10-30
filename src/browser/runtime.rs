@@ -7,7 +7,9 @@
 //! may come from any thread and only sends on a channel.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::ffi::{CString, c_int};
+use std::ptr::NonNull;
 use std::os::unix::ffi::OsStrExt as _;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -17,6 +19,9 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, AnyProtocol, Bool};
 use objc2::{MainThreadMarker, msg_send};
 use objc2_app_kit::NSView;
+
+use super::native::Event;
+use super::registry::Page;
 
 const FRAMEWORK: &str = "Chromium Embedded Framework.framework/Chromium Embedded Framework";
 /// CEF asks to be pumped at least this often (cef_app.h, CefDoMessageLoopWork).
@@ -39,24 +44,103 @@ enum Phase {
 #[derive(Default)]
 struct State {
     phase: Phase,
-    /// Browsers asked for before CEF's context was ready.
-    pending: Vec<(Retained<NSView>, String)>,
+    /// Browsers asked for before CEF's context was ready: (id, parent, url).
+    pending: Vec<(String, Retained<NSView>, String)>,
     /// Asked of CEF, `on_after_created` not seen yet.
     creating: usize,
-    browsers: Vec<Browser>,
-    /// Closes the page itself asked for (`window.close()`): finished after
-    /// `do_close` returns, never inside it.
-    tear_down: Vec<c_int>,
+    /// Open browsers by Herdr's id (`b1`).
+    browsers: Vec<(String, Browser)>,
+    /// What each page last said about itself.
+    pages: HashMap<String, Page>,
+    /// Popups turned into navigations of their own browser, after the callback.
+    navigations: Vec<(String, String)>,
+    /// DevTools windows open (CEF's own; closed before shutdown).
+    devtools: usize,
+    /// Browsers Herdr is closing: their `do_close` is ours, not the page's.
+    closing: Vec<String>,
     app: Option<App>,
 }
 
 thread_local! {
     static STATE: RefCell<State> = RefCell::new(State::default());
     static PUMPING: Cell<bool> = const { Cell::new(false) };
+    static EVENTS: RefCell<Option<async_channel::Sender<Event>>> = const { RefCell::new(None) };
 }
 
 /// `on_schedule_message_pump_work` → the foreground pump task.
 static PUMP: OnceLock<async_channel::Sender<i64>> = OnceLock::new();
+
+/// Where page changes, focus and close requests go (the window's `Browsers`).
+pub fn set_events(tx: async_channel::Sender<Event>) {
+    EVENTS.with_borrow_mut(|e| *e = Some(tx));
+}
+
+fn send(event: Event) {
+    EVENTS.with_borrow(|e| {
+        if let Some(tx) = e {
+            let _ = tx.try_send(event);
+        }
+    });
+}
+
+fn browser(id: &str) -> Option<Browser> {
+    STATE.with_borrow(|s| s.browsers.iter().find(|(b, _)| b == id).map(|(_, b)| b.clone()))
+}
+
+fn need(id: &str) -> Result<Browser, String> {
+    browser(id).ok_or_else(|| format!("browser {id} is still opening"))
+}
+
+/// The page's own view (CEF's), once the browser exists.
+pub fn page_view(id: &str) -> Option<NonNull<NSView>> {
+    NonNull::new(browser(id)?.host()?.window_handle().cast::<NSView>())
+}
+
+pub fn navigate(id: &str, url: &str) -> Result<(), String> {
+    let frame = need(id)?.main_frame().ok_or("the page has no main frame")?;
+    frame.load_url(Some(&CefString::from(url)));
+    Ok(())
+}
+
+/// -1 back, 1 forward.
+pub fn history(id: &str, step: i32) -> Result<(), String> {
+    let b = need(id)?;
+    match step {
+        -1 if b.can_go_back() == 1 => b.go_back(),
+        1 if b.can_go_forward() == 1 => b.go_forward(),
+        -1 => return Err(format!("browser {id} has nothing to go back to")),
+        _ => return Err(format!("browser {id} has nothing to go forward to")),
+    }
+    Ok(())
+}
+
+pub fn reload(id: &str) -> Result<(), String> {
+    need(id)?.reload();
+    Ok(())
+}
+
+/// Opens or closes CEF's own DevTools window for a browser (None toggles).
+/// Returns whether it's open now. No debugging port: DevTools talks to the
+/// browser inside CEF.
+pub fn devtools(id: &str, open: Option<bool>) -> Result<bool, String> {
+    let host = need(id)?.host().ok_or("the browser has no host")?;
+    let is_open = host.has_dev_tools() == 1;
+    let want = open.unwrap_or(!is_open);
+    if want && !is_open {
+        let mut client = DevToolsClient::new(DevToolsLifeSpan::new());
+        host.show_dev_tools(Some(&WindowInfo::default()), Some(&mut client), Some(&BrowserSettings::default()), None);
+    } else if !want && is_open {
+        host.close_dev_tools();
+    }
+    Ok(want)
+}
+
+/// Tells CEF its page has the keyboard (the view is first responder already).
+pub fn set_focus(id: &str) {
+    if let Some(host) = browser(id).and_then(|b| b.host()) {
+        host.set_focus(1);
+    }
+}
 
 fn phase() -> Phase {
     STATE.with_borrow(|s| s.phase)
@@ -219,14 +303,18 @@ fn pump() {
     PUMPING.set(true);
     do_message_loop_work();
     PUMPING.set(false);
-    finish_closes();
+    finish_navigations();
 }
 
-/// Closes a browser the way CEF wants for a child view: remove its view (the
-/// superview holds the only reference, so it is freed and CEF sees its window
-/// go), then a forced `CloseBrowser` as a backstop.
-fn close(browser: &Browser) {
+/// Closes a browser the way CEF wants for a child view: its DevTools first,
+/// then remove its view (the superview holds the only reference, so it is
+/// freed and CEF sees its window go), then a forced `CloseBrowser` as a
+/// backstop. `on_before_close` follows asynchronously.
+fn close_browser(browser: &Browser) {
     let Some(host) = browser.host() else { return };
+    if host.has_dev_tools() == 1 {
+        host.close_dev_tools();
+    }
     let view = host.window_handle().cast::<NSView>();
     // SAFETY: CEF's browser view, on the main thread; CEF keeps no reference
     // of its own, so this only borrows it until it's removed.
@@ -236,31 +324,54 @@ fn close(browser: &Browser) {
     host.close_browser(1);
 }
 
-fn finish_closes() {
-    let ids = STATE.with_borrow_mut(|s| std::mem::take(&mut s.tear_down));
-    for id in ids {
-        let browser = STATE.with_borrow(|s| s.browsers.iter().find(|b| b.identifier() == id).cloned());
-        if let Some(browser) = browser {
-            objc2::rc::autoreleasepool(|_| close(&browser));
+/// Closes Herdr's browser `id` (its block is gone). One still being created
+/// closes as soon as it exists; one never started is dropped.
+pub fn close(id: &str) {
+    STATE.with_borrow_mut(|s| s.pending.retain(|(p, _, _)| p != id));
+    match browser(id) {
+        Some(b) => {
+            tracing::info!("browser: closing {id}");
+            STATE.with_borrow_mut(|s| s.closing.push(id.to_owned()));
+            objc2::rc::autoreleasepool(|_| close_browser(&b));
         }
+        None => STATE.with_borrow_mut(|s| {
+            // Created later: `on_after_created` sees it unwanted and closes it.
+            s.pages.remove(id);
+        }),
     }
 }
 
-/// Opens a browser filling `parent`, now or once CEF's context is ready.
-pub fn open(parent: Retained<NSView>, url: String) {
+fn finish_navigations() {
+    let navs = STATE.with_borrow_mut(|s| std::mem::take(&mut s.navigations));
+    for (id, url) in navs {
+        let _ = navigate(&id, &url);
+    }
+}
+
+/// Opens browser `id` filling `parent`, now or once CEF's context is ready.
+pub fn open(id: &str, parent: Retained<NSView>, url: String) {
+    STATE.with_borrow_mut(|s| {
+        s.pages.insert(id.to_owned(), Page { url: url.clone(), loading: true, ..Page::default() });
+    });
     match phase() {
-        Phase::Starting => STATE.with_borrow_mut(|s| s.pending.push((parent, url))),
-        Phase::Ready => create(&parent, &url),
-        other => tracing::warn!("browser: not opened, CEF is {other:?}"),
+        Phase::Starting => STATE.with_borrow_mut(|s| s.pending.push((id.to_owned(), parent, url))),
+        Phase::Ready => create(id, &parent, &url),
+        other => tracing::warn!("browser: {id} not opened, CEF is {other:?}"),
     }
 }
 
-fn create(parent: &NSView, url: &str) {
+fn create(id: &str, parent: &NSView, url: &str) {
     let size = parent.bounds().size;
     let bounds = Rect { x: 0, y: 0, width: size.width as c_int, height: size.height as c_int };
     let handle: sys::cef_window_handle_t = (parent as *const NSView).cast_mut().cast();
     let window_info = WindowInfo::default().set_as_child(handle, &bounds);
-    let mut client = HerdrClient::new(HerdrLifeSpan::new(), HerdrLoad::new());
+    let id = id.to_owned();
+    let mut client = HerdrClient::new(
+        HerdrLifeSpan::new(id.clone()),
+        HerdrLoad::new(id.clone()),
+        HerdrDisplay::new(id.clone()),
+        HerdrFocus::new(id.clone()),
+    );
     STATE.with_borrow_mut(|s| s.creating += 1);
     let asked = browser_host_create_browser(
         Some(&window_info),
@@ -272,10 +383,20 @@ fn create(parent: &NSView, url: &str) {
     );
     if asked != 1 {
         STATE.with_borrow_mut(|s| s.creating -= 1);
-        tracing::error!("browser: CEF refused to create a browser");
+        tracing::error!("browser: CEF refused to create {id}");
     } else {
-        tracing::info!("browser: creating {}", short(url));
+        tracing::info!("browser: creating {id} at {}", short(url));
     }
+}
+
+/// Records a page change and tells the window.
+fn page_changed(id: &str, change: impl FnOnce(&mut Page)) {
+    let page = STATE.with_borrow_mut(|s| {
+        let page = s.pages.entry(id.to_owned()).or_default();
+        change(page);
+        page.clone()
+    });
+    send(Event::Page { browser: id.to_owned(), page });
 }
 
 fn context_ready() {
@@ -286,8 +407,8 @@ fn context_ready() {
         std::mem::take(&mut s.pending)
     });
     tracing::info!("browser: CEF context ready");
-    for (parent, url) in pending {
-        create(&parent, &url);
+    for (id, parent, url) in pending {
+        create(&id, &parent, &url);
     }
 }
 
@@ -309,7 +430,6 @@ pub fn shutdown() {
             // Its own pool, as no run loop drains one here: the closed
             // browser's view must really be freed for CEF to finish closing.
             objc2::rc::autoreleasepool(|_| do_message_loop_work());
-            finish_closes();
             std::thread::sleep(Duration::from_millis(5));
         }
     };
@@ -318,13 +438,13 @@ pub fn shutdown() {
     let browsers = STATE.with_borrow_mut(|s| {
         s.phase = Phase::Closing;
         s.pending.clear();
-        s.browsers.clone()
+        s.browsers.iter().map(|(_, b)| b.clone()).collect::<Vec<_>>()
     });
     tracing::info!("browser: closing {} browser(s)", browsers.len());
     // Forced: no beforeunload prompt can hold up quitting.
-    objc2::rc::autoreleasepool(|_| browsers.iter().for_each(close));
-    pump_until(&|s| s.browsers.is_empty());
-    let left = STATE.with_borrow(|s| s.browsers.len());
+    objc2::rc::autoreleasepool(|_| browsers.iter().for_each(close_browser));
+    pump_until(&|s| s.browsers.is_empty() && s.devtools == 0);
+    let left = STATE.with_borrow(|s| s.browsers.len() + s.devtools);
     if left > 0 {
         tracing::warn!("browser: {left} browser(s) still open after {CLOSE_DEADLINE:?}; CEF not shut down");
     } else {
@@ -395,6 +515,8 @@ wrap_client! {
     struct HerdrClient {
         life_span: LifeSpanHandler,
         load: LoadHandler,
+        display: DisplayHandler,
+        focus: FocusHandler,
     }
 
     impl Client {
@@ -405,11 +527,21 @@ wrap_client! {
         fn load_handler(&self) -> Option<LoadHandler> {
             Some(self.load.clone())
         }
+
+        fn display_handler(&self) -> Option<DisplayHandler> {
+            Some(self.display.clone())
+        }
+
+        fn focus_handler(&self) -> Option<FocusHandler> {
+            Some(self.focus.clone())
+        }
     }
 }
 
 wrap_life_span_handler! {
-    struct HerdrLifeSpan;
+    struct HerdrLifeSpan {
+        id: String,
+    }
 
     impl LifeSpanHandler {
         fn on_after_created(&self, browser: Option<&mut Browser>) {
@@ -418,47 +550,89 @@ wrap_life_span_handler! {
             // SAFETY: CEF's browser view, read on the main thread.
             let placed = view.and_then(|v| unsafe { v.as_ref() }).map(|v| {
                 let f = v.frame();
-                format!("{}x{} at {},{}, in a window: {}", f.size.width, f.size.height, f.origin.x, f.origin.y, v.window().is_some())
+                format!("{}x{}, in a window: {}", f.size.width, f.size.height, v.window().is_some())
             });
-            tracing::info!("browser: created {}, view {}", browser.identifier(), placed.unwrap_or_else(|| "missing".into()));
+            tracing::info!("browser: created {} (cef {}), view {}", self.id, browser.identifier(), placed.unwrap_or_else(|| "missing".into()));
             let browser = browser.clone();
-            STATE.with_borrow_mut(|s| {
+            // Its block went while CEF was creating it: close it right away.
+            let wanted = STATE.with_borrow_mut(|s| {
                 s.creating = s.creating.saturating_sub(1);
-                s.browsers.push(browser);
+                s.browsers.push((self.id.clone(), browser.clone()));
+                s.pages.contains_key(&self.id)
             });
+            if !wanted {
+                STATE.with_borrow_mut(|s| s.closing.push(self.id.clone()));
+                close_browser(&browser);
+            }
         }
 
-        fn do_close(&self, browser: Option<&mut Browser>) -> c_int {
-            // 0 would make CEF send performClose: to the browser's top-level
-            // window: Herdr's own. 1: we finish the close ourselves, right
-            // after this returns (a view freed inside DoClose is missed).
-            // Closes Herdr starts remove the view first, so CEF skips this.
-            if let Some(browser) = browser {
-                let id = browser.identifier();
-                tracing::info!("browser: do_close {id}");
-                STATE.with_borrow_mut(|s| s.tear_down.push(id));
+        fn on_before_popup(
+            &self,
+            _browser: Option<&mut Browser>,
+            _frame: Option<&mut Frame>,
+            _popup_id: c_int,
+            target_url: Option<&CefString>,
+            _target_frame_name: Option<&CefString>,
+            _target_disposition: WindowOpenDisposition,
+            _user_gesture: c_int,
+            _popup_features: Option<&PopupFeatures>,
+            _window_info: Option<&mut WindowInfo>,
+            _client: Option<&mut Option<Client>>,
+            _settings: Option<&mut BrowserSettings>,
+            _extra_info: Option<&mut Option<DictionaryValue>>,
+            _no_javascript_access: Option<&mut c_int>,
+        ) -> c_int {
+            // No top-level Chromium windows: a popup or a new-tab link opens in this pane.
+            if let Some(url) = target_url.map(|u| u.to_string()).filter(|u| !u.is_empty()) {
+                tracing::info!("browser: {} popup {} opens in its pane", self.id, short(&url));
+                STATE.with_borrow_mut(|s| s.navigations.push((self.id.clone(), url)));
             }
             1
         }
 
-        fn on_before_close(&self, browser: Option<&mut Browser>) {
-            let Some(browser) = browser else { return };
-            let id = browser.identifier();
-            STATE.with_borrow_mut(|s| s.browsers.retain(|b| b.identifier() != id));
-            tracing::info!("browser: closed {id}");
+        fn do_close(&self, browser: Option<&mut Browser>) -> c_int {
+            // 0 would make CEF send performClose: to the browser's top-level
+            // window: Herdr's own. 1: Herdr closes it. Closes Herdr starts
+            // land here too (ignored); a page that closes itself
+            // (window.close()) asks the window to close its pane.
+            let ours = STATE.with_borrow(|s| s.phase == Phase::Closing || s.closing.contains(&self.id));
+            if browser.is_some() && !ours {
+                tracing::info!("browser: {} asked to close", self.id);
+                send(Event::CloseAsked(self.id.clone()));
+            }
+            1
+        }
+
+        fn on_before_close(&self, _browser: Option<&mut Browser>) {
+            STATE.with_borrow_mut(|s| {
+                s.browsers.retain(|(b, _)| *b != self.id);
+                s.closing.retain(|b| *b != self.id);
+                s.pages.remove(&self.id);
+            });
+            tracing::info!("browser: closed {}", self.id);
         }
     }
 }
 
 wrap_load_handler! {
-    struct HerdrLoad;
+    struct HerdrLoad {
+        id: String,
+    }
 
     impl LoadHandler {
+        fn on_loading_state_change(&self, _browser: Option<&mut Browser>, is_loading: c_int, can_go_back: c_int, can_go_forward: c_int) {
+            page_changed(&self.id, |p| {
+                p.loading = is_loading == 1;
+                p.can_go_back = can_go_back == 1;
+                p.can_go_forward = can_go_forward == 1;
+            });
+        }
+
         fn on_load_end(&self, _browser: Option<&mut Browser>, frame: Option<&mut Frame>, http_status_code: c_int) {
             let Some(frame) = frame else { return };
             if frame.is_main() == 1 {
                 let url = CefString::from(&frame.url()).to_string();
-                tracing::info!("browser: load end {} status {http_status_code}", short(&url));
+                tracing::info!("browser: {} load end {} status {http_status_code}", self.id, short(&url));
             }
         }
 
@@ -473,8 +647,75 @@ wrap_load_handler! {
             if frame.is_some_and(|f| f.is_main() == 1) {
                 let text = error_text.map(|t| t.to_string()).unwrap_or_default();
                 let url = failed_url.map(|u| u.to_string()).unwrap_or_default();
-                tracing::warn!("browser: load error {} {error_code:?} {text}", short(&url));
+                tracing::warn!("browser: {} load error {} {error_code:?} {text}", self.id, short(&url));
             }
+        }
+    }
+}
+
+wrap_display_handler! {
+    struct HerdrDisplay {
+        id: String,
+    }
+
+    impl DisplayHandler {
+        fn on_address_change(&self, _browser: Option<&mut Browser>, frame: Option<&mut Frame>, url: Option<&CefString>) {
+            if frame.is_some_and(|f| f.is_main() == 1) {
+                let url = url.map(|u| u.to_string()).unwrap_or_default();
+                page_changed(&self.id, |p| p.url = url);
+            }
+        }
+
+        fn on_title_change(&self, _browser: Option<&mut Browser>, title: Option<&CefString>) {
+            let title = title.map(|t| t.to_string()).unwrap_or_default();
+            page_changed(&self.id, |p| p.title = title);
+        }
+    }
+}
+
+wrap_focus_handler! {
+    struct HerdrFocus {
+        id: String,
+    }
+
+    impl FocusHandler {
+        fn on_got_focus(&self, _browser: Option<&mut Browser>) {
+            send(Event::Focused(self.id.clone()));
+        }
+    }
+}
+
+wrap_client! {
+    struct DevToolsClient {
+        life_span: LifeSpanHandler,
+    }
+
+    impl Client {
+        fn life_span_handler(&self) -> Option<LifeSpanHandler> {
+            Some(self.life_span.clone())
+        }
+    }
+}
+
+// CEF's DevTools window: counted, so quit waits for it to close too.
+wrap_life_span_handler! {
+    struct DevToolsLifeSpan;
+
+    impl LifeSpanHandler {
+        fn on_after_created(&self, _browser: Option<&mut Browser>) {
+            let open = STATE.with_borrow_mut(|s| {
+                s.devtools += 1;
+                s.devtools
+            });
+            tracing::info!("browser: a DevTools window opened ({open} open)");
+        }
+
+        fn on_before_close(&self, _browser: Option<&mut Browser>) {
+            let open = STATE.with_borrow_mut(|s| {
+                s.devtools = s.devtools.saturating_sub(1);
+                s.devtools
+            });
+            tracing::info!("browser: a DevTools window closed ({open} open)");
         }
     }
 }

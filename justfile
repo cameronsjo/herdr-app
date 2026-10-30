@@ -49,10 +49,21 @@ docs-check: build
     bun test scripts/docs.test.ts
     bun scripts/docs.ts check
 
-# Builds target/browser-dev/Herdr Dev.app (scripts/browser-dev-bundle) and
-# runs it on a scratch home and its own core, never your real ones. Quit it
-# (cmd-q) to end; the scratch folder stays for its logs.
-# Herdr with a Chromium browser in the window (macOS, `browser` feature)
+# Builds target/browser-dev/Herdr Dev.app (scripts/browser-dev-bundle): the
+# `browser` feature, CEF's framework and helpers. CEF_PATH (default
+# ~/.cache/herdr-app/cef) keeps CEF's ~600 MB download outside the repo; a
+# bare `cargo build --features browser` without it is refused (build.rs).
+# Herdr with Chromium browser panes, built but not started (macOS)
+[macos]
+browser-build *args:
+    bash scripts/browser-dev-bundle {{args}}
+
+# Runs the dev bundle on a scratch home and its own core, never your real
+# ones. `$root/herdr-app` talks to it, e.g. `$root/herdr-app do space.new`,
+# then `$root/herdr-app do browser.open --url <url>` (a test page:
+# scripts/browser-test-page.html). Quit it (cmd-q) to end; the scratch folder
+# stays for its logs.
+# Herdr with Chromium browser panes, on a scratch home (macOS)
 [macos]
 browser-dev *args:
     #!/usr/bin/env bash
@@ -61,11 +72,15 @@ browser-dev *args:
     # Short: hc's socket path inside it has a 103-byte limit.
     root=$(mktemp -d /tmp/hbd.XXXXXX)
     export HERDR_APP_HOME=$root/home XDG_STATE_HOME=$root/state HC_SESSION=hbd-${root##*.}
-    export HERDR_APP_ID=herdr-browser-dev HERDR_APP_NO_SOUND=1 HERDR_TELEMETRY=0 HERDR_BROWSER_SPIKE=1
+    export HERDR_APP_ID=herdr-browser-dev HERDR_APP_NO_SOUND=1 HERDR_TELEMETRY=0
+    app="$PWD/target/browser-dev/Herdr Dev.app/Contents/MacOS/Herdr"
+    printf '#!/bin/bash\nHERDR_APP_HOME=%q exec %q "$@"\n' "$HERDR_APP_HOME" "$app" > "$root/herdr-app"
+    chmod +x "$root/herdr-app"
     echo "scratch: $root (log: $root/app.log)"
+    echo "drive it: $root/herdr-app do space.new; $root/herdr-app do browser.open --url file://$PWD/scripts/browser-test-page.html"
     # Stops only this run's core (HC_SESSION, XDG_STATE_HOME above).
     trap 'hc server stop >/dev/null 2>&1 || true' EXIT
-    "target/browser-dev/Herdr Dev.app/Contents/MacOS/Herdr" 2>&1 | tee "$root/app.log"
+    "$app" 2>&1 | tee "$root/app.log"
 
 [linux]
 install:

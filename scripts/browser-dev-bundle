@@ -6,8 +6,9 @@
 #   scripts/browser-dev-bundle [--release]
 #
 # CEF_PATH: where the CEF binary distribution is downloaded and kept, outside
-# the repo (default ~/.cache/herdr-app/cef; about 500 MB). RUSTUP_TOOLCHAIN
-# picks the Rust toolchain as usual.
+# the repo (default ~/.cache/herdr-app/cef; about 500 MB). A bare
+# `cargo build --features browser` without it is refused (build.rs,
+# .cargo/config.toml). RUSTUP_TOOLCHAIN picks the Rust toolchain as usual.
 set -euo pipefail
 
 [[ $(uname -s) == Darwin ]] || { echo 'browser-dev-bundle: macOS only' >&2; exit 1; }
@@ -22,6 +23,12 @@ case ${1:-} in
 esac
 
 export CEF_PATH=${CEF_PATH:-${XDG_CACHE_HOME:-$HOME/.cache}/herdr-app/cef}
+case $CEF_PATH in
+  "$PWD"|"$PWD"/*|[!/]*) echo "browser-dev-bundle: CEF_PATH=$CEF_PATH must be an absolute path outside the repo" >&2; exit 1 ;;
+esac
+# .cargo/config.toml blocks CEF downloads (they'd land in target/ without
+# CEF_PATH); with CEF_PATH set, a first download goes there from CEF's CDN.
+export CEF_DOWNLOAD_URL=${CEF_DOWNLOAD_URL:-https://cef-builds.spotifycdn.com}
 # The CEF build the bindings were made for: cef-dll-sys 156.2.0+156.0.14 -> 156.0.14.
 cef_version=$(awk '/^name = "cef-dll-sys"$/ { getline; sub(/.*\+/, ""); sub(/"$/, ""); print; exit }' Cargo.lock)
 [[ -n $cef_version ]] || { echo 'browser-dev-bundle: no cef-dll-sys in Cargo.lock' >&2; exit 1; }

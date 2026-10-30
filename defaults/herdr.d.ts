@@ -61,6 +61,8 @@ export function playSound(sound: string): null;
  *   terminal.peek {terminal} (peek over the tab, with keep-as-tab and close),
  *   terminal.show {terminal?, pane?} (shown in the pane for now, in place of its own), terminal.copy, terminal.paste,
  *   terminal.right_click {to: "program" | "menu", terminal?} (right-clicks to a program that takes the mouse; Shift: the menu).
+ * Browsers (macOS builds with the browser feature): browser.open {url, place?, pane?},
+ *   browser.navigate {browser, url}, browser.back|forward|reload|close {browser}, browser.devtools {browser, open?}.
  * Agents: agent.next, agent.prev (the agents list's order), agent.focus {terminal} (sub-agents too).
  * Layout (the shown layout's nodes by id): layout.toggle|show|hide {id}, layout.resize {id, px | weight},
  *   layout.select {stack, child}, layout.set {layout} (personal trees; shipped layouts: click/look fields only), layout.switch {name?} (no name: the next one).
@@ -178,9 +180,12 @@ export function agents(): AgentInfo[];
 export interface PaneInfo {
   pane: string;
   /** null for a mod pane (`pane.split {mod}`): then `mod` names it, and only
-   *  pane, mod, tab, title, focused and zoomed are set. */
+   *  pane, mod, tab, title, focused and zoomed are set. Also null for a browser
+   *  pane: then `browser` and `url` say which page (see browsers()). */
   terminal: string | null;
   mod?: string;
+  browser?: string;
+  url?: string;
   tab: string;
   /** The terminal's title (what the program set), or the mod's name. */
   title: string;
@@ -200,6 +205,26 @@ export interface PaneInfo {
 /** Every pane in every tab. A pane header mod finds its own with
  *  `panes().find((p) => p.pane === props().pane)`. Live. */
 export function panes(): PaneInfo[];
+
+export interface BrowserInfo {
+  /** Its id (`b1`), for browser.navigate, browser.close, ... */
+  browser: string;
+  url: string;
+  title: string;
+  loading: boolean;
+  can_go_back: boolean;
+  can_go_forward: boolean;
+  /** Where it is: null for a browser block in the layout itself. */
+  space: string | null;
+  pane: string | null;
+  /** Whether agents may drive it. Off until the person turns it on. */
+  agent_access: boolean;
+  /** Its pane is the focused one. */
+  focused: boolean;
+}
+
+/** Every open browser (macOS builds with the `browser` feature; empty elsewhere). Live. */
+export function browsers(): BrowserInfo[];
 
 /** Sets agent.next / agent.prev order to match the list a mod displays.
  *  Call when rendering the list. In memory only; missing agents are ignored, new agents

@@ -212,7 +212,8 @@ A layout is a tree of nodes. Four types:
   `{ "terminal": "t7" }`, `{ "tab": "active" }` (the shown tab's
   terminals as it arranges them), or `{ "agent": "focused" }` (one agent's
   terminal, full size: the one chosen with `agent.focus` / `agent.next`, else
-  the focused pane's agent, else the first agent).
+  the focused pane's agent, else the first agent), or `{ "browser": "b1",
+  "url": "..." }` (a web page; never in `floating`).
 - `row` / `column`: children side by side / stacked.
 - `stack`: shows one child (`"active": "<child id>"`), with an optional
   `"header"` (a mod that draws tabs, or `"tabs"` for a plain built-in strip).
@@ -533,6 +534,12 @@ The main ones:
   Shift+right-click is always Herdr's menu). Copy, paste, paste-image and implicit
   right-click targeting follow keyboard focus, including peek and floating terminals;
   with no terminal holding keyboard focus, they use the focused pane or block.
+- Browsers (macOS builds with the `browser` feature; elsewhere a placeholder):
+  `browser.open {url, place?, pane?}` (place `"right"` default, `"down"`, `"tab"`;
+  says `{browser, pane}`), `browser.navigate {browser, url}`, `browser.back {browser}`,
+  `browser.forward {browser}`, `browser.reload {browser}`, `browser.close {browser}`,
+  `browser.devtools {browser, open?}`. `herdr-app ls` and `browsers()` list them;
+  a pane's `browser` names its page. Click a page to type in it; global keys still work.
 - Agents: `agent.next`, `agent.prev`, `agent.focus {terminal}`.
 - Layout: `layout.switch {name?}`, `layout.toggle {id}`, `layout.show {id}`, `layout.hide {id}`,
   `layout.resize {id, px | weight}`, `layout.select {stack, child}`, `layout.set {layout}`

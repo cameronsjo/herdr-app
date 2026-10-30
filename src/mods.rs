@@ -556,6 +556,8 @@ pub struct Snapshot {
     pub agents: Value,
     /// Every pane: { pane, terminal, tab, title, cwd, branch, status, app, focused, zoomed }.
     pub panes: Value,
+    /// Every open browser: { browser, url, title, loading, can_go_back, can_go_forward, space, pane, agent_access, focused }.
+    pub browsers: Value,
     pub terminals: Value,
     pub focused: Value,
     /// Floating blocks by id: { edge, align, vertical }.
@@ -567,7 +569,7 @@ pub struct Snapshot {
 impl Default for Snapshot {
     /// Lists start empty, never null, so mods can map over them right away.
     fn default() -> Self {
-        Snapshot { layout: Value::Null, spaces: json!([]), machines: json!([]), agents: json!([]), panes: json!([]), terminals: json!([]), focused: Value::Null, floats: json!({}), window: Value::Null }
+        Snapshot { layout: Value::Null, spaces: json!([]), machines: json!([]), agents: json!([]), panes: json!([]), browsers: json!([]), terminals: json!([]), focused: Value::Null, floats: json!({}), window: Value::Null }
     }
 }
 
@@ -595,6 +597,9 @@ pub fn publish_agents(v: Value) -> bool {
 }
 pub fn publish_panes(v: Value) -> bool {
     publish(|s| (std::mem::replace(&mut s.panes, v.clone()), v))
+}
+pub fn publish_browsers(v: Value) -> bool {
+    publish(|s| (std::mem::replace(&mut s.browsers, v.clone()), v))
 }
 pub fn publish_terminals(v: Value) -> bool {
     publish(|s| (std::mem::replace(&mut s.terminals, v.clone()), v))
@@ -956,6 +961,7 @@ fn module(inst: Instance, copy: u64) -> HostModule {
         .function("machines", |_| Ok(read(|s| &s.machines)))
         .function("agents", |_| Ok(read(|s| &s.agents)))
         .function("panes", |_| Ok(read(|s| &s.panes)))
+        .function("browsers", |_| Ok(read(|s| &s.browsers)))
         .function("setAgentOrder", |a| {
             AGENT_ORDER.with(|s| *s.borrow_mut() = strings(a.get(0)));
             Ok(HostValue::Null)

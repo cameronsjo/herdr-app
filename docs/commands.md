@@ -163,6 +163,66 @@ End a terminal and its sub-agents.
 |---|---|
 | `terminal` | yes |
 
+## `browser.open`
+
+Open a web page in a browser pane (macOS builds with the browser feature): "right" (default) or "down" of a pane (default: the focused one), or as a new "tab" in its space. Says its browser id and pane.
+
+| Argument | Required |
+|---|---|
+| `url` | yes |
+| `place` | no |
+| `pane` | no |
+
+## `browser.navigate`
+
+Show another page in a browser (an id from `herdr-app ls`).
+
+| Argument | Required |
+|---|---|
+| `browser` | yes |
+| `url` | yes |
+
+## `browser.back`
+
+Go back a page in a browser.
+
+| Argument | Required |
+|---|---|
+| `browser` | yes |
+
+## `browser.forward`
+
+Go forward a page in a browser.
+
+| Argument | Required |
+|---|---|
+| `browser` | yes |
+
+## `browser.reload`
+
+Reload a browser's page.
+
+| Argument | Required |
+|---|---|
+| `browser` | yes |
+
+## `browser.close`
+
+Close a browser and its pane.
+
+| Argument | Required |
+|---|---|
+| `browser` | yes |
+
+## `browser.devtools`
+
+Open or close Chromium's DevTools window for a browser (no open: toggle).
+
+| Argument | Required |
+|---|---|
+| `browser` | yes |
+| `open` | no |
+
 ## `space.select`
 
 Show a space (by position or id).
