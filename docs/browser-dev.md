@@ -112,34 +112,23 @@ person allows it for that pane:
    (`<app home>/browser/agent-profile`); only such a browser can be driven.
    Its header says "Test profile: don't sign into real accounts." Downloads
    are refused in it.
-2. Click **Allow agent** in that header. Herdr draws the header in its own
-   top layer, after everything a layout or a mod draws (a mod's popups,
-   dialogs, toasts and tooltips included, nested in each other or not),
-   and the header takes every click on it: GPUI hit-tests that layer after
-   all other drawing too (a `HERDR:` patch in `vendor/gpui-pre`). So no
-   mod or layout content can sit over the button, and none gets or passes
-   on a click aimed at it. The header's colors and font are Herdr's own,
-   opaque, and no theme or layout changes them, so nothing shows through
-   it. Only Herdr's own overlays are drawn above it (dialogs, popups,
-   menus, the palette, toasts, floats, the drop preview, the update pill;
-   a mod's overlay opened through Herdr is one of these), and while one
-   overlaps any part of the header the header isn't drawn at all. A pane
-   whose drag grip would overlap the header has no grip. The button takes
-   a click only after it has shown for half a second with that label, in
-   the same place, for the same browser, with nothing over its header,
-   the window active and no drag going on, and never the second click of
-   a double click. So a double click on **Stop agent** can't turn access
-   back on, and an agent can't slide the button under the pointer
-   (`layout.resize`, `pane.swap`, `layout.set`), swap in another
-   browser's header, or put a decoy over it just before a click.
-   The property, precisely: a click turns access on only if Herdr drew
-   the button as the topmost thing at that point in every frame of the
-   last 500 ms, unmoved, with the same label and browser, and with no
-   Herdr overlay over any part of its header. What GPUI draws after the
-   top layer is its own tooltips (no mod's script can make one), prompts
-   (none in Herdr) and a drag's preview (a drag blocks the click). A
-   page's native view is above all of Herdr's drawing; a click on a page
-   goes to that page, never to a button under it.
+2. Click **Allow agent…** in that header. It turns nothing on. It opens a
+   macOS dialog, "Let agents drive this browser?", naming the browser, its
+   profile and its site (scheme and host only). Access turns on only when
+   you click **Allow** in that dialog; the log says
+   `agent access on browser=b1 by=native confirm`. **Cancel** is the
+   default button, so Return and Esc cancel; **Allow** has no key, and it
+   stays disabled for half a second after the dialog shows, so a double
+   click whose first click opened the dialog can't land on it. The dialog
+   doesn't open while Herdr isn't the active app or while another such
+   dialog is open, and an answer counts only if Herdr is still the active
+   app and the browser is still open at the site the dialog named. The
+   dialog is app-modal and AppKit draws it in its own window, above every
+   view in Herdr's window (GPUI's drawing and the pages): no layout, mod,
+   theme, page or Herdr command can draw over it, move it or answer it.
+   The header and the strip below are status markers Herdr draws, not the
+   control: a mod or a page can still cover or recolor them, which can
+   mislead you about the state but can't turn access on.
    Nothing else turns agent access on:
    `herdr-app do browser.agent_access --on true` and a mod's `run()` are
    refused, because an agent can reach both. Turning it off works from
@@ -218,26 +207,28 @@ What this does and doesn't protect (state this wherever the prototype is
 shown):
 
 > Agent access is a consent switch for a cooperating agent, not a security
-> boundary against software running as you. While it is on, any process
-> running as your user can get the page's CDP token through Herdr's control
-> socket and act as you on any http or https site it points that pane at:
-> run script in the page (which reads its non-HttpOnly cookies), click,
-> type, and read what the page shows. Any process running as you can also
-> read this profile's cookies from disk, because the prototype encrypts
-> them with Chromium's public test key (`--use-mock-keychain`). It can also
-> hide the access marker with a mod's overlay over it (which also keeps
-> **Allow agent** from taking a click; theme and layout edits can't change
-> the marker's colors or font, but a font file that claims the bundled
-> Geist name might change its glyphs), and if
-> your terminal app has macOS Accessibility permission, click **Allow
-> agent** itself. Herdr's own agent connection needs a 256-bit token and
-> accepts only loopback connections without an `Origin` header. But while
-> an agent-browser session is attached, agent-browser's own stream server
-> (a loopback websocket with no token, in agent-browser's code, not
-> Herdr's) lets any user on this machine, and any page served from
-> `localhost` or opened from a file in any browser, watch the pane and
-> click and type in it. Turning access off, closing the browser, or quitting
-> ends both. Use this browser only with test accounts, never your own.
+> boundary against software running as you. Only a person answering
+> **Allow** in a native macOS dialog turns it on. A process running as you
+> could still answer that dialog if it has macOS Accessibility permission
+> (or runs under an app that has it), and any app can open its own window
+> over the dialog without any permission, to relabel its buttons. While
+> access is on, any process running as your user can get the page's CDP
+> token through Herdr's control socket and act as you on any http or https
+> site it points that pane at: run script in the page (which reads its
+> non-HttpOnly cookies), click, type, and read what the page shows. Any
+> process running as you can also read this profile's cookies from disk,
+> because the prototype encrypts them with Chromium's public test key
+> (`--use-mock-keychain`). It can also hide or recolor the in-window access
+> marker (the pane header and the bottom strip) with a mod, a theme or a
+> layout; those are information, not the control. Herdr's own agent
+> connection needs a 256-bit token and accepts only loopback connections
+> without an `Origin` header. But while an agent-browser session is
+> attached, agent-browser's own stream server (a loopback websocket with no
+> token, in agent-browser's code, not Herdr's) lets any user on this
+> machine, and any page served from `localhost` or opened from a file in
+> any browser, watch the pane and click and type in it. Turning access off,
+> closing the browser, or quitting ends both. Use this browser only with
+> test accounts, never your own.
 
 Signing: the dev bundle is ad hoc signed without the hardened runtime, so
 library validation is off (`DYLD_INSERT_LIBRARIES` works on the browser

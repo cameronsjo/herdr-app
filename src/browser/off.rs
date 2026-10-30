@@ -75,19 +75,14 @@ impl Browsers {
         None
     }
 
-    /// No agent browsers, so no access buttons.
-    pub fn access_button(&self, _node: &str, _browser: &str, _sets: bool) -> Option<AnyElement> {
-        None
+    /// No agent browsers, so no dialog.
+    pub fn ask(&mut self, _browser: &str) -> Result<super::Ask, String> {
+        Err(UNAVAILABLE.into())
     }
 
-    /// No agent browsers: never called with one.
-    pub fn agent_header(&self, _node: &str, header: AnyElement) -> AnyElement {
-        header
-    }
-
-    /// Only "Stop agent" would count; there is no button to click here.
-    pub fn may_click(&self, _node: &str, _browser: &str, sets: bool, _click_count: usize) -> bool {
-        !sets
+    /// Never asked: nothing turns access on.
+    pub fn answer(&mut self, _ask: &super::Ask, _reply: super::Reply) -> Result<bool, String> {
+        Err(UNAVAILABLE.into())
     }
 
     pub fn element(&self, _node: &str, browser: &str, url: &str, look: super::Look) -> AnyElement {

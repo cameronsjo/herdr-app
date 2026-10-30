@@ -55,7 +55,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("browser.close", &[req("browser")], "Close a browser and its pane."),
     cmd("browser.devtools", &[req("browser"), opt("open")], "Open or close Chromium's DevTools window for a browser (no open: toggle)."),
     cmd("browser.agent_access", &[req("browser"), req("on")],
-        "Turn agent access off for a browser (on: false): its agent's connection ends and the page reopens. Turning it on is only for the person, with the \"Allow agent\" button in an agent-profile browser's header; this command refuses on: true."),
+        "Turn agent access off for a browser (on: false): its agent's connection ends and the page reopens. Turning it on is only for the person: \"Allow agent…\" in an agent-profile browser's header opens a macOS dialog, and only its Allow turns it on; this command refuses on: true."),
     // What you see.
     cmd("space.select", &[opt("index"), opt("id")], "Show a space (by position or id)."),
     cmd("space.next", &[], "Show the next space."),

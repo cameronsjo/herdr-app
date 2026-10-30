@@ -23,7 +23,7 @@ use objc2_foundation::{NSPoint, NSRect, NSSize};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use super::keys::{self, Native, Press};
-use super::{AllowGuard, Rect, Responder, runtime};
+use super::{Rect, Responder, runtime};
 
 struct Container {
     view: Retained<NSView>,
@@ -52,10 +52,6 @@ thread_local! {
     /// The page the window last gave the keyboard (inner None: Herdr);
     /// None until it first decided. CEF's focus requests are checked against it.
     static WANTED: RefCell<Option<Option<String>>> = const { RefCell::new(None) };
-    /// The agent access buttons' input protection (`super::AllowGuard`).
-    static ALLOW: RefCell<AllowGuard> = RefCell::new(AllowGuard::default());
-    /// The agent headers not drawn last time, by node: the overlay over each (for the log).
-    static HEADERS_UNDER: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
 }
 
 /// How long after a press in a page CEF's "got focus" still counts as that click.
@@ -101,45 +97,10 @@ fn rect(bounds: Bounds<Pixels>) -> Rect {
     }
 }
 
-/// An overlay drawn this frame over these bounds (window points, top
-/// left): a page it overlaps hides at the frame's end (`end_frame`), and an
-/// agent header it overlaps isn't drawn (`agent_header`).
+/// An overlay painted this frame over these bounds (window points, top
+/// left): a page it overlaps hides at the frame's end (`end_frame`).
 pub fn cover(label: &str, bounds: Bounds<Pixels>) {
     COVERS.with_borrow_mut(|c| c.push((label.to_owned(), rect(bounds))));
-}
-
-/// Block `node`'s agent header, laid out this frame over these bounds, as
-/// the top layer prepares it (after every cover this frame): whether it may
-/// draw. Not while any of Herdr's overlays overlaps any part of it.
-pub fn agent_header(node: &str, bounds: Bounds<Pixels>) -> bool {
-    let at = rect(bounds);
-    ALLOW.with_borrow_mut(|g| g.header(node, at));
-    let under = COVERS.with_borrow(|c| super::over(&at, c).map(str::to_owned));
-    HEADERS_UNDER.with_borrow_mut(|h| {
-        if h.get(node) != under.as_ref() {
-            match &under {
-                Some(label) => tracing::debug!("browser: {node}'s agent header is under overlay {label}; not drawn, and Allow agent waits"),
-                None => tracing::debug!("browser: {node}'s agent header is drawn again"),
-            }
-        }
-        match &under {
-            Some(label) => h.insert(node.to_owned(), label.clone()),
-            None => h.remove(node),
-        };
-    });
-    under.is_none()
-}
-
-/// An agent access button drawn this frame over these bounds, in block
-/// `node`, for `browser`; `sets`: what a click on it sets. `end_frame`
-/// checks it against this frame's overlays and last frame's place.
-pub fn access_button(node: &str, browser: &str, sets: bool, bounds: Bounds<Pixels>) {
-    ALLOW.with_borrow_mut(|g| g.painted(node, browser, sets, rect(bounds)));
-}
-
-/// Whether a click on `node`'s access button for `browser` counts (`AllowGuard::may_click`).
-pub fn may_click(node: &str, browser: &str, sets: bool, click_count: usize) -> bool {
-    ALLOW.with_borrow(|g| g.may_click(node, browser, sets, click_count, Instant::now()))
 }
 
 /// The pages hidden under an overlay now: they can't have the keyboard.
@@ -190,10 +151,8 @@ pub fn place(id: &str, bounds: Bounds<Pixels>, window: &Window) {
 /// other placed view shows. A page that had the keyboard and hides hands it
 /// to Herdr now (typing never goes into a hidden page); when the set of
 /// covered pages changes, the window decides again who has the keyboard.
-pub fn end_frame(window: &Window, dragging: bool) {
+pub fn end_frame(window: &Window) {
     let covers = COVERS.with_borrow_mut(std::mem::take);
-    // A drag's preview is drawn after every layer: no click counts meanwhile.
-    ALLOW.with_borrow_mut(|g| g.end_frame(&covers, window.is_window_active() && !dragging, Instant::now()));
     let holder = match responder(window) {
         Responder::Page(id) => Some(id),
         _ => None,

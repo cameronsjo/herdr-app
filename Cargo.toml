@@ -77,8 +77,8 @@ libc = "0.2"
 cef = { version = "=156.2.0", default-features = false, features = ["sandbox"], optional = true }
 block2 = { version = "0.6", optional = true }
 objc2 = { version = "0.6", optional = true }
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSApplication", "NSEvent", "NSGraphics", "NSResponder", "NSView", "NSWindow", "block2", "objc2-core-foundation"], optional = true }
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSGeometry", "NSObject", "NSString", "objc2-core-foundation", "std"], optional = true }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSAlert", "NSApplication", "NSButton", "NSControl", "NSEvent", "NSGraphics", "NSResponder", "NSView", "NSWindow", "block2", "objc2-core-foundation"], optional = true }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSDate", "NSGeometry", "NSObjCRuntime", "NSObject", "NSRunLoop", "NSString", "NSTimer", "block2", "objc2-core-foundation", "std"], optional = true }
 raw-window-handle = { version = "0.6", optional = true }
 # The agent proxy's loopback websocket (src/browser/proxy.rs); already locked for gpui-shell.
 tungstenite = { version = "0.29", default-features = false, features = ["handshake"], optional = true }

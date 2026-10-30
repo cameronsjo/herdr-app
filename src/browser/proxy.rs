@@ -18,7 +18,7 @@ use serde_json::Value;
 use tungstenite::Message;
 use tungstenite::protocol::WebSocketConfig;
 
-use super::agent::{self, FromAgent, Link, Tokens, Upgrade};
+use super::agent::{self, FromAgent, Link, Tokens};
 use super::runtime;
 
 /// Messages from a page waiting for an agent that isn't reading: past
@@ -312,26 +312,6 @@ fn peek_head(stream: &TcpStream) -> Option<String> {
     }
 }
 
-/// What `agent::check_upgrade` needs from a request head.
-fn upgrade(head: &str) -> Upgrade<'_> {
-    let mut lines = head.split("\r\n");
-    let mut first = lines.next().unwrap_or_default().split(' ');
-    let (method, path) = (first.next().unwrap_or_default(), first.next().unwrap_or_default());
-    let mut header = HashMap::new();
-    for line in lines {
-        if let Some((k, v)) = line.split_once(':') {
-            header.entry(k.trim().to_ascii_lowercase()).or_insert(v.trim());
-        }
-    }
-    let has = |k: &str, word: &str| header.get(k).is_some_and(|v| v.to_ascii_lowercase().contains(word));
-    Upgrade {
-        websocket: method == "GET" && has("upgrade", "websocket") && has("connection", "upgrade"),
-        path,
-        host: header.get("host").copied(),
-        origin: header.get("origin").copied(),
-    }
-}
-
 /// A bare status: no body, no CORS headers, nothing a page can read.
 fn refuse(mut stream: TcpStream, code: u16) {
     let reason = match code {
@@ -386,7 +366,7 @@ fn serve(stream: TcpStream, port: u16, slot: Slot<'static>) {
     let Ok(socket) = stream.try_clone() else { return };
     let (browser, id, rx, queued) = {
         let mut h = hub();
-        let checked = agent::check_upgrade(&upgrade(&head), port, &h.tokens, |b| h.conns.contains_key(b));
+        let checked = agent::check_upgrade(&agent::read_upgrade(&head), port, &h.tokens, |b| h.conns.contains_key(b));
         let browser = match checked {
             Ok(b) => b,
             Err(code) => {

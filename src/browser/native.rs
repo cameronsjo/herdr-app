@@ -32,13 +32,15 @@ pub struct Browsers {
     holder: Option<Responder>,
     /// Why CEF can't run, shown in every browser block.
     error: Option<String>,
+    /// The browser a native agent-access dialog is open for.
+    asking: Option<String>,
 }
 
 impl Browsers {
     pub fn new() -> Self {
         let (tx, rx) = async_channel::unbounded();
         runtime::set_events(tx);
-        Browsers { registry: Registry::default(), events: Some(rx), wanted: None, holder: None, error: None }
+        Browsers { registry: Registry::default(), events: Some(rx), wanted: None, holder: None, error: None, asking: None }
     }
 
     pub fn events(&mut self) -> Option<async_channel::Receiver<Event>> {
@@ -247,34 +249,37 @@ impl Browsers {
     }
 
     /// Goes inside an overlay (absolute, its full size): reports its bounds
-    /// while the frame is prepared, so a page under it hides (`label` names
-    /// it in the log) and an agent header under it isn't drawn
-    /// (`agent_header`, prepared after every cover).
+    /// while painting, so a page under it hides (`label` names it in the log).
     pub fn cover(&self, label: String) -> Option<AnyElement> {
-        Some(canvas(move |bounds, _, _| view::cover(&label, bounds), |_, _, _, _| {}).absolute().size_full().into_any_element())
+        Some(canvas(|_, _, _| {}, move |bounds, _, _, _| view::cover(&label, bounds)).absolute().size_full().into_any_element())
     }
 
-    /// An agent browser's header, in Herdr's top layer (`super::layer`):
-    /// drawn after everything a mod or layout draws, and not at all while
-    /// one of Herdr's overlays overlaps any part of it.
-    pub fn agent_header(&self, node: &str, header: AnyElement) -> AnyElement {
-        let node = node.to_owned();
-        super::layer::top(header, move |bounds| view::agent_header(&node, bounds))
+    /// The native dialog for "Allow agent…" on `browser`, if it may open now
+    /// (`agent::may_ask`: the app active, no other dialog open; an open
+    /// agent-profile browser). Marks it open until `answer`.
+    pub fn ask(&mut self, browser: &str) -> Result<super::Ask, String> {
+        agent::may_ask(super::confirm::app_active(), self.asking.as_deref()).map_err(str::to_owned)?;
+        let e = self.registry.get(browser).ok_or_else(|| format!("no open browser {browser:?}"))?;
+        agent::needs_agent_profile(e.agent_profile).map_err(str::to_owned)?;
+        let site = agent::site(&e.page.url);
+        let (title, body) = agent::consent_text(browser, &site);
+        self.asking = Some(browser.to_owned());
+        Ok(super::Ask { browser: browser.to_owned(), site, title, body })
     }
 
-    /// Goes inside an agent access button (absolute, its full size): reports
-    /// its bounds as it's drawn, for its input protection.
-    pub fn access_button(&self, node: &str, browser: &str, sets: bool) -> Option<AnyElement> {
-        let (node, browser) = (node.to_owned(), browser.to_owned());
-        Some(canvas(move |bounds, _, _| view::access_button(&node, &browser, sets, bounds), |_, _, _, _| {}).absolute().size_full().into_any_element())
-    }
-
-    /// Whether a click on `node`'s access button counts: "Allow agent" only
-    /// after it showed unchanged (label, place, browser) and uncovered for
-    /// `super::ALLOW_AFTER`, and never a double click's second click; "Stop
-    /// agent" always.
-    pub fn may_click(&self, node: &str, browser: &str, sets: bool, click_count: usize) -> bool {
-        view::may_click(node, browser, sets, click_count)
+    /// The dialog's reply: access turns on only if `agent::turns_access_on`
+    /// says so, for a browser still open on the agent profile at the site
+    /// the dialog named. Ok(true): it is on now. Every refusal is logged.
+    pub fn answer(&mut self, ask: &super::Ask, reply: super::Reply) -> Result<bool, String> {
+        self.asking = None;
+        let b = &ask.browser;
+        let unchanged = self.registry.get(b).is_some_and(|e| e.agent_profile && agent::site(&e.page.url) == ask.site);
+        if let Err(why) = agent::turns_access_on(&reply, unchanged) {
+            tracing::info!("browser: agent access stays off browser={b}: {why}");
+            return Ok(false);
+        }
+        self.set_agent_access(b, true, Source::NativeConfirm)?;
+        Ok(true)
     }
 
     pub fn set_bindings(&mut self, bindings: Vec<(String, String)>) {
@@ -316,6 +321,6 @@ impl Browsers {
 
     /// Painted after everything else: hides the pages whose block wasn't painted this frame.
     pub fn frame_end(&self) -> Option<AnyElement> {
-        Some(canvas(|_, _, _| {}, |_, _, window, cx| view::end_frame(window, cx.has_active_drag())).absolute().size_0().into_any_element())
+        Some(canvas(|_, _, _| {}, |_, _, window, _| view::end_frame(window)).absolute().size_0().into_any_element())
     }
 }

@@ -543,11 +543,11 @@ The main ones:
   `browser.devtools {browser, open?}`. `herdr-app ls` and `browsers()` list them;
   a pane's `browser` names its page. Click a page to type in it; global keys still work.
   Pages are http, https or about:blank. `profile: "agent"` opens a separate test
-  profile; the person can let agents drive it (`agent-browser`) with the
-  pane header's "Allow agent". `browser.agent_access {browser, on: false}` turns
-  that off; nothing but the person's click turns it on (not `run()`, not the socket;
-  a `dev-agent-access` test build, which says so in the pane, also takes the socket).
-  Herdr draws that header above anything a mod draws, in its own fixed colors; it takes every click on it.
+  profile; the person can let agents drive it (`agent-browser`): the pane header's
+  "Allow agent…" opens a macOS dialog, and only its Allow turns access on.
+  `browser.agent_access {browser, on: false}` turns it off; nothing else turns it on
+  (not `run()`, not the socket, not the header alone; a `dev-agent-access` test build,
+  which says so in the pane, also takes the socket). The header is a status marker only.
 - Agents: `agent.next`, `agent.prev`, `agent.focus {terminal}`.
 - Layout: `layout.switch {name?}`, `layout.toggle {id}`, `layout.show {id}`, `layout.hide {id}`,
   `layout.resize {id, px | weight}`, `layout.select {stack, child}`, `layout.set {layout}`

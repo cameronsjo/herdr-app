@@ -71,9 +71,8 @@ fn separator_line(row: bool, width: f32, color: Hsla, top: f32) -> Div {
 
 /// Whether a pane frame's header is drawn over the pane (`reveal: "hover"`)
 /// rather than beside it. Never over a browser pane: GPUI can't draw over
-/// the page's native view, and the agent header is drawn above every mod
-/// (`Browsers::agent_header`), so over a browser pane it would show only in
-/// strips and never be clickable where the agent header is.
+/// the page's native view, so it would show only where Herdr draws (an
+/// agent browser's header, which it would hide on hover).
 fn header_over(hover: bool, content: Option<&Content>) -> bool {
     hover && !matches!(content, Some(Content::Browser { .. }))
 }
@@ -81,29 +80,6 @@ fn header_over(hover: bool, content: Option<&Content>) -> bool {
 fn c(name: &str) -> Hsla {
     settings::color_or_literal(name)
 }
-
-/// The colors of the agent header ("Allow agent") and the agent-access strip.
-/// Fixed and opaque, never the theme's: an agent can set a layout's colors,
-/// alpha included, and a see-through header would show a mod's decoy under
-/// a button that still takes the click.
-struct ConsentLook {
-    bar: Hsla,
-    text: Hsla,
-    button: Hsla,
-    button_text: Hsla,
-}
-
-fn consent_look(on: bool) -> ConsentLook {
-    ConsentLook {
-        bar: gpui::rgb(if on { 0x8f1d1d } else { 0x2e3440 }).into(),
-        text: gpui::rgb(0xf5f5f5).into(),
-        button: gpui::rgb(0x1d5fd1).into(),
-        button_text: gpui::rgb(0xffffff).into(),
-    }
-}
-
-/// The agent header's font: Herdr's bundled UI font, never a layout's.
-const CONSENT_FONT: &str = "Geist";
 
 fn file(name: &str) -> PathBuf {
     mods::app_dir().join(name)
@@ -1611,12 +1587,10 @@ impl AppWindow {
 
     /// The header of an agent-profile browser block: a warning that this is
     /// a test profile, whether agent access is on (and which terminal last
-    /// attached, as it claimed), and the button that turns it on or off.
-    /// The live header is drawn in Herdr's top layer (`Browsers::agent_header`):
-    /// after everything a mod or a layout draws, occluding, so nothing can sit
-    /// over "Allow agent" or take or pass on its clicks; it isn't drawn while
-    /// one of Herdr's own overlays overlaps it. Under it, in the layout, a copy
-    /// without the button holds its place and shows under such an overlay.
+    /// attached, as it claimed), and its button. It is a status marker, not
+    /// the control: "Allow agent…" only opens the native macOS dialog
+    /// (`ask_agent_access`), and access turns on only from that dialog's
+    /// Allow. "Stop agent" turns access off at once.
     fn agent_bar(&self, node: &str, browser: &str, cx: &mut Context<Self>) -> AnyElement {
         let (on, last) = self.browsers.agent_state(browser).unwrap_or((false, None));
         let state = match (on, last) {
@@ -1624,82 +1598,85 @@ impl AppWindow {
             (true, None) => "Agent access ON".to_owned(),
             (true, Some(t)) => format!("Agent access ON · last: terminal {t} (claimed)"),
         };
-        let (b, node_id) = (browser.to_owned(), node.to_owned());
+        let b = browser.to_owned();
         let (label, sets) = crate::browser::access_button(on);
-        let k = consent_look(on);
-        let look = || {
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_2()
-                .px_2()
-                .size_full()
-                .bg(k.bar)
-                .font_family(CONSENT_FONT)
-                .text_size(settings::z(12.0))
-                .text_color(k.text)
-                .child(div().flex_1().overflow_hidden().whitespace_nowrap().child(crate::browser::dev_switch_note().unwrap_or("Test profile: don't sign into real accounts.")))
-                .child(div().whitespace_nowrap().child(state.clone()))
-        };
-        let live = look()
-            .id(SharedString::from(format!("agent-header-{node}")))
-            .absolute()
-            .inset_0()
-            // Nothing under it gets the pointer: no click on it reaches a mod, and none passes on.
-            .occlude()
+        div()
+            .flex_none()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .h(settings::z(AGENT_HEADER))
+            .bg(if on { c("blocked") } else { c("raised") })
+            .text_size(settings::z(12.0))
+            .text_color(c("foreground"))
+            .child(div().flex_1().overflow_hidden().whitespace_nowrap().child(crate::browser::dev_switch_note().unwrap_or("Test profile: don't sign into real accounts.")))
+            .child(div().whitespace_nowrap().child(state))
             .child(
                 div()
                     .id(SharedString::from(format!("agent-access-{node}")))
                     .px_2()
                     .rounded_sm()
-                    .bg(k.button)
-                    .text_color(k.button_text)
+                    .bg(c("accent"))
+                    .text_color(c("accent_foreground"))
                     .cursor_pointer()
-                    .relative()
                     .child(label)
-                    // Reports where it is drawn, for the input protection below.
-                    .children(self.browsers.access_button(node, browser, sets))
-                    // A person's click: the one path that turns agent access on.
                     // It does what the label said, not a toggle of the live state.
-                    // "Allow agent" counts only once it has shown unchanged, in the
-                    // same place, with nothing over its header, for half a second,
-                    // and never as a double click's second click
-                    // (`browser::AllowGuard`); "Stop agent" at once.
                     .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
-                        if !this.browsers.may_click(&node_id, &b, sets, ev.click_count()) {
-                            tracing::info!("browser: ignored an Allow agent click on {b} (it changed, moved or was covered under 500 ms ago, or a double click)");
-                            cx.notify();
+                        if sets {
+                            // A double click's second click opens nothing.
+                            if ev.click_count() <= 1 {
+                                this.ask_agent_access(&b, window, cx);
+                            }
                             return;
                         }
-                        let r = this.set_agent_access(&b, sets, crate::browser::Source::PaneControl);
-                        if let Err(e) = r {
-                            let spec = json!({"kind":"toast", "notification":{"title":"agent access","body":e,"level":"error"}});
-                            this.open_overlay(mods::new_overlay_id(), spec, window, cx);
-                        }
+                        let _ = this.set_agent_access(&b, false, crate::browser::Source::PaneControl);
                         this.publish(cx);
                         cx.notify();
                     })),
-            );
-        div()
-            .flex_none()
-            .relative()
-            .h(settings::z(AGENT_HEADER))
-            .child(look())
-            .child(self.browsers.agent_header(node, live.into_any_element()))
+            )
             .into_any_element()
+    }
+
+    /// "Allow agent…": the native macOS dialog asking whether agents may
+    /// drive `browser` (`browser::confirm`). Only its Allow turns access on
+    /// (`Browsers::answer`). It runs from a foreground task, outside every
+    /// borrow of the window: AppKit's modal loop runs inside the call.
+    fn ask_agent_access(&mut self, browser: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let ask = match self.browsers.ask(browser) {
+            Ok(ask) => ask,
+            Err(e) => {
+                tracing::info!("browser: no agent access dialog for {}: {e}", crate::browser::log_safe(browser));
+                let spec = json!({"kind":"toast", "notification":{"title":"agent access","body":e,"level":"error"}});
+                self.open_overlay(mods::new_overlay_id(), spec, window, cx);
+                return;
+            }
+        };
+        cx.spawn_in(window, async move |this, cx| {
+            let reply = crate::browser::confirm(&ask);
+            let _ = this.update_in(cx, |this, window, cx| {
+                if let Err(e) = this.browsers.answer(&ask, reply) {
+                    let spec = json!({"kind":"toast", "notification":{"title":"agent access","body":e,"level":"error"}});
+                    this.open_overlay(mods::new_overlay_id(), spec, window, cx);
+                }
+                this.publish(cx);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// While any browser has agent access on, a strip along the bottom of the
     /// window names each one, with a Stop button. It sits outside the layout,
     /// so hiding, moving or editing a block, or switching tab or space, can't
-    /// hide it, and no page's view covers it.
+    /// hide it. It is informational: a mod, a theme or a page can still
+    /// cover or recolor it.
     fn agent_watch(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let on = self.browsers.agents_on();
         if on.is_empty() {
             return None;
         }
-        let k = consent_look(true);
         let mut strip = div()
             .id("agent-watch")
             .flex_none()
@@ -1711,10 +1688,9 @@ impl AppWindow {
             .px_2()
             .h(settings::z(24.0))
             .overflow_hidden()
-            .bg(k.bar)
-            .font_family(CONSENT_FONT)
+            .bg(c("blocked"))
             .text_size(settings::z(12.0))
-            .text_color(k.text);
+            .text_color(c("foreground"));
         if let Some(note) = crate::browser::dev_switch_note() {
             strip = strip.child(div().whitespace_nowrap().child(note));
         }
@@ -1729,8 +1705,8 @@ impl AppWindow {
                     .id(SharedString::from(format!("agent-watch-stop-{browser}")))
                     .px_2()
                     .rounded_sm()
-                    .bg(k.button)
-                    .text_color(k.button_text)
+                    .bg(c("accent"))
+                    .text_color(c("accent_foreground"))
                     .cursor_pointer()
                     .child("Stop agent")
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -1744,7 +1720,8 @@ impl AppWindow {
     }
 
     /// Turns agent access for `browser` on or off (plan Task 5). On only
-    /// from Herdr's own pane control (or the debug-build dev switch); off
+    /// from the native dialog's Allow (or the dev switch of a dev-agent-access
+    /// test build); off
     /// from anywhere, and off revokes the agent's token and ends its
     /// connection, which reopens the page (nothing the agent set survives).
     fn set_agent_access(&mut self, browser: &str, on: bool, from: crate::browser::Source) -> Result<Value, String> {
@@ -4119,9 +4096,7 @@ impl AppWindow {
         el = shadow(el, f.shadow.as_deref());
         let body = div().flex_1().min_h_0().flex().child(inner);
         let Some(h) = &f.header else { return el.child(body).into_any_element() };
-        // Clipped to its own box: a mod's content can't spill over the pane, and
-        // GPUI clips hit testing with it.
-        let head = div().flex_none().h(settings::z(h.height.unwrap_or(HEADER_HEIGHT))).w_full().flex().overflow_hidden()
+        let head = div().flex_none().h(settings::z(h.height.unwrap_or(HEADER_HEIGHT))).w_full().flex()
             .child(self.render_slot(&format!("{}#frame", n.id), cx));
         if header_over(h.hover(), n.content()) {
             let head = head.absolute().left_0().right_0().opacity(0.).group_hover(group, |s| s.opacity(1.));
@@ -4198,15 +4173,7 @@ impl AppWindow {
             }
         };
         let row = frame.and_then(|f| f.header.as_ref()).filter(|h| !h.bottom() && !h.hover()).map(|h| h.height.unwrap_or(HEADER_HEIGHT));
-        // Where an agent browser's header starts: under a top frame header,
-        // which a browser pane always has in the flow (`header_over`).
-        let agent = match n.content() {
-            Some(Content::Browser { browser, .. }) if self.browsers.agent_state(browser).is_some() => {
-                Some(frame.and_then(|f| f.header.as_ref()).filter(|h| !h.bottom()).map_or(0., |h| h.height.unwrap_or(HEADER_HEIGHT)))
-            }
-            _ => None,
-        };
-        el.children(self.render_floats(n, cx)).children(self.pane_grip(&n.id, row, agent, cx)).into_any_element()
+        el.children(self.render_floats(n, cx)).children(self.pane_grip(&n.id, row, cx)).into_any_element()
     }
 
     fn render_block(&self, n: &Node, content: &Content, focused: &HashSet<String>, cx: &mut Context<Self>) -> AnyElement {
@@ -4238,8 +4205,8 @@ impl AppWindow {
             Content::Browser { browser, url, .. } => {
                 let id = n.id.clone();
                 // An agent-profile browser gets Herdr's own header: the test-profile
-                // warning and the agent-access switch. Herdr draws it (no mod), and
-                // its button is the only way agent access turns on (plan Task 5).
+                // warning, the agent-access state, and the button that opens the
+                // native dialog (the only way agent access turns on, plan Task 5).
                 // Whether to draw it comes from the open browser (fixed when it
                 // opened), never the block's `profile`: agents can edit layouts, and
                 // removing the field must not hide the marker while access is on.
@@ -5087,27 +5054,6 @@ mod tests {
         assert_eq!(super::browser_status(None, "b1", "p1", with_user)["url"], "https://example.test/cb");
         let open = serde_json::json!({ "url": "https://example.test/cb?step=2", "title": "T" });
         assert_eq!(super::browser_status(Some(open), "b1", "p1", saved)["url"], "https://example.test/cb?step=2");
-    }
-
-    #[test]
-    fn the_agent_header_keeps_its_own_opaque_colors_and_font_whatever_a_layout_sets() {
-        use crate::settings::{self, Person, Settings};
-        let before = [super::consent_look(false), super::consent_look(true)].map(|k| [k.bar, k.text, k.button, k.button_text]);
-        // What an agent's `layout.set` can do: every color the header used, see-through.
-        let clear = "#00000000".to_owned();
-        let colors = ["raised", "blocked", "foreground", "accent", "accent_foreground", "background"].map(|n| (n.to_owned(), clear.clone()));
-        let look = crate::layout::Look { colors: Some(colors.into_iter().collect()), ui_font: Some("Blank".into()), ..Default::default() };
-        settings::set(Settings::compose(&Person::default(), &look, true));
-        // The override is live: a themed control would now be invisible.
-        assert_eq!(super::c("accent").a, 0.0);
-        assert_eq!(settings::get().ui_font_family, "Blank");
-        let after = [super::consent_look(false), super::consent_look(true)].map(|k| [k.bar, k.text, k.button, k.button_text]);
-        assert_eq!(before, after);
-        for color in after.iter().flatten() {
-            assert_eq!(color.a, 1.0, "{color:?}");
-        }
-        assert_eq!(super::CONSENT_FONT, Settings::default().ui_font_family, "the bundled UI font");
-        settings::set(Settings::default());
     }
 
     #[test]

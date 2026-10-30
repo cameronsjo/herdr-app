@@ -4,8 +4,9 @@
 //! The path: `agent-browser` in a Herdr terminal runs `herdr-app
 //! __agent-browser-provider` (its plugin), which asks the window over the
 //! control socket to `attach`. The window picks the caller's browser, and
-//! only if the person turned agent access on for it (a button Herdr draws in
-//! the pane; never a command an agent can send), hands back
+//! only if the person turned agent access on for it (Allow in a native macOS
+//! dialog that the pane's header button opens; never a command an agent can
+//! send), hands back
 //! `ws://127.0.0.1:<port>/<token>`. proxy.rs serves that socket and passes
 //! CDP messages to that one page's in-process DevTools session, through the
 //! allowlist below. CEF opens no remote-debugging port.
@@ -15,7 +16,7 @@
 
 use serde_json::{Map, Value, json};
 
-pub use super::{Source, not_in_herdr, public_url};
+pub use super::{ALLOW_AFTER, Answer, Reply, Source, not_in_herdr, public_url};
 use std::collections::HashMap;
 
 pub const PROTOCOL: &str = "agent-browser.plugin.v1";
@@ -49,10 +50,11 @@ pub fn allowed_url(url: &str) -> bool {
 /// What the logs may say about a url: scheme, host and path (no userinfo,
 /// query or fragment, where tokens and codes ride), with control characters
 /// escaped (`super::log_safe`: a url an agent sends can't forge a log line),
-/// at most 80 characters.
+/// at most 80 characters before escaping. It is cut first, then escaped, so
+/// the cut never splits an escape (`\u{202e}` into `\u{20`).
 pub fn loggable(url: &str) -> String {
-    let url = super::log_safe(&public_url(url));
-    if url.len() <= 80 { url } else { format!("{}…", &url[..url.floor_char_boundary(77)]) }
+    let url = public_url(url);
+    if url.chars().count() <= 80 { super::log_safe(&url) } else { format!("{}…", super::log_safe(&url.chars().take(77).collect::<String>())) }
 }
 
 /// Whether a popup (`window.open`, a target link) may navigate the pane: its
@@ -88,13 +90,79 @@ pub fn forbidden_switch<'a>(args: impl IntoIterator<Item = &'a str>) -> Option<&
 // ---- consent --------------------------------------------------------------
 
 pub const ONLY_THE_PERSON: &str =
-    "agent access can only be turned on by the person: the \"Allow agent\" button in the browser pane's header (turning it off works from anywhere)";
+    "agent access can only be turned on by the person: \"Allow agent\" in the browser pane's header opens a macOS dialog, and only its Allow button turns it on (turning it off works from anywhere)";
 
-/// On only from Herdr's own pane control (or the debug-build dev switch);
-/// off from anywhere. An agent can reach the control socket and write mods,
-/// so neither may grant it access (review F1).
+/// On only from the person's Allow in the native dialog (or the dev
+/// switch of a dev-agent-access test build); off from anywhere. An agent
+/// can reach the control socket, write mods and keys, and arrange or cover
+/// anything Herdr draws in the window, so none of those may grant access
+/// (review F1), Herdr's own pane button included: it only opens the dialog.
 pub fn may_set_access(on: bool, from: Source) -> Result<(), &'static str> {
-    if !on || matches!(from, Source::PaneControl | Source::DevSwitch) { Ok(()) } else { Err(ONLY_THE_PERSON) }
+    if !on || matches!(from, Source::NativeConfirm | Source::DevSwitch) { Ok(()) } else { Err(ONLY_THE_PERSON) }
+}
+
+/// The dialog's buttons are added Cancel first (`NSAlertFirstButtonReturn`,
+/// 1000: the default, Return and Esc), then Allow (1001). Any other
+/// response (the modal stopped or aborted) is no answer.
+pub fn answer_of(response: isize) -> Answer {
+    match response {
+        1000 => Answer::Cancel,
+        1001 => Answer::Allow,
+        _ => Answer::Closed,
+    }
+}
+
+/// Whether "Allow agent…" may open the dialog now: only into the active
+/// app (a click that activates Herdr opens nothing), and one dialog at a
+/// time (`asking`: the browser a dialog is open for).
+pub fn may_ask(app_active: bool, asking: Option<&str>) -> Result<(), &'static str> {
+    if asking.is_some() {
+        return Err("a dialog about agent access is already open");
+    }
+    if !app_active {
+        return Err("Herdr isn't the active app: click Allow agent again");
+    }
+    Ok(())
+}
+
+/// Whether the dialog's reply turns access on: only Allow, answered while
+/// Herdr was the active app, at least `ALLOW_AFTER` after it showed, for a
+/// browser still open at the site the dialog named (`unchanged`). Every
+/// other reply (Cancel, Return, Esc, closed) leaves access off; the error
+/// says why, for the log.
+pub fn turns_access_on(reply: &Reply, unchanged: bool) -> Result<(), &'static str> {
+    match reply.answer {
+        Answer::Allow => {}
+        Answer::Cancel => return Err("the person chose Cancel"),
+        Answer::Closed => return Err("the dialog closed without an answer"),
+    }
+    if !reply.app_active {
+        return Err("Herdr wasn't the active app when it was answered");
+    }
+    if reply.after < ALLOW_AFTER {
+        return Err("Allow came under 500 ms after the dialog showed");
+    }
+    if !unchanged {
+        return Err("the browser closed, or its page went to another site, while the dialog was open");
+    }
+    Ok(())
+}
+
+/// `scheme://host[:port]` of a page, as the dialog names it.
+pub fn site(url: &str) -> String {
+    origin(url)
+}
+
+/// The dialog's title and text: the browser, its profile, and its site.
+pub fn consent_text(browser: &str, site: &str) -> (String, String) {
+    (
+        "Let agents drive this browser?".to_owned(),
+        format!(
+            "Browser {}, agent profile, at {}.\n\nAny agent in a Herdr terminal on this Mac can then read this page, click and type in it, run script in it and open other sites in this pane, until you click Stop agent. Use test accounts only.",
+            super::log_safe(browser),
+            super::log_safe(site)
+        ),
+    )
 }
 
 /// Agent access only in a browser on the separate agent profile (review item 2).
@@ -260,11 +328,48 @@ pub struct Upgrade<'a> {
     pub path: &'a str,
     pub host: Option<&'a str>,
     pub origin: Option<&'a str>,
+    /// A head tungstenite might read differently than this parser: a
+    /// second `Host` or `Origin`, a line ending that isn't `\r\n`, or a
+    /// folded header line. Refused.
+    pub malformed: bool,
+}
+
+/// What `check_upgrade` needs from a request head (the bytes before the
+/// blank line). Only `\r\n` ends a line here; a bare `\n` or `\r`, a
+/// repeated `Host` or `Origin`, or a line starting with a space or tab
+/// marks the head malformed, so a header this parser didn't see can't
+/// reach tungstenite.
+pub fn read_upgrade(head: &str) -> Upgrade<'_> {
+    let mut lines = head.split("\r\n");
+    let mut first = lines.next().unwrap_or_default().split(' ');
+    let (method, path) = (first.next().unwrap_or_default(), first.next().unwrap_or_default());
+    let mut header: HashMap<String, &str> = HashMap::new();
+    let mut malformed = head.split("\r\n").any(|l| l.contains(['\r', '\n']));
+    for line in lines {
+        if line.starts_with([' ', '\t']) {
+            malformed = true;
+        }
+        if let Some((k, v)) = line.split_once(':') {
+            let k = k.trim().to_ascii_lowercase();
+            if header.contains_key(&k) && (k == "host" || k == "origin") {
+                malformed = true;
+            }
+            header.entry(k).or_insert(v.trim());
+        }
+    }
+    let has = |k: &str, word: &str| header.get(k).is_some_and(|v| v.to_ascii_lowercase().contains(word));
+    Upgrade {
+        websocket: method == "GET" && has("upgrade", "websocket") && has("connection", "upgrade"),
+        path,
+        host: header.get("host").copied(),
+        origin: header.get("origin").copied(),
+        malformed,
+    }
 }
 
 /// The browser an upgrade may drive, or the status to refuse it with:
 /// 404 for anything but an upgrade (no `/json/*`, nothing for a page's
-/// `fetch`), 403 for any `Origin` (browsers always send one; agent-browser
+/// `fetch`), 403 for a malformed head (`read_upgrade`), any `Origin` (browsers always send one; agent-browser
 /// doesn't), a `Host` other than `127.0.0.1:<port>`/`localhost:<port>`
 /// (DNS rebinding), or a token that isn't live; 409 when the browser
 /// already has a live connection.
@@ -272,7 +377,7 @@ pub fn check_upgrade(req: &Upgrade, port: u16, tokens: &Tokens, live: impl Fn(&s
     if !req.websocket {
         return Err(404);
     }
-    if req.origin.is_some() {
+    if req.malformed || req.origin.is_some() {
         return Err(403);
     }
     let host_ok = req.host.is_some_and(|h| h == format!("127.0.0.1:{port}") || h == format!("localhost:{port}"));
@@ -658,6 +763,12 @@ mod tests {
         assert_eq!(loggable("http://127.0.0.1:8765/x.html"), "http://127.0.0.1:8765/x.html");
         assert_eq!(loggable("about:blank"), "about:blank");
         assert_eq!(loggable("http://a/x\nFORGED-LINE browser: agent access off"), "http://a/x\\nFORGED-LINE browser: agent access off");
+        // Cut before escaping: an escape is never split at the cut.
+        let long = format!("http://a.test/{}\u{202e}\u{202e}", "x".repeat(61));
+        assert_eq!(long.chars().count(), 77);
+        assert_eq!(loggable(&format!("{long}tail")), format!("http://a.test/{}\\u{{202e}}\\u{{202e}}…", "x".repeat(61)));
+        let short = format!("http://a.test/{}\n", "x".repeat(60));
+        assert_eq!(loggable(&short), format!("http://a.test/{}\\n", "x".repeat(60)));
         assert_eq!(public_url("https://a/b?token=1#x"), "https://a/b");
         assert_eq!(public_url("https://a/b"), "https://a/b");
     }
@@ -687,15 +798,70 @@ mod tests {
     // ---- consent (review item 1)
 
     #[test]
-    fn only_herdrs_own_pane_control_turns_access_on() {
-        assert!(may_set_access(true, Source::PaneControl).is_ok());
-        for from in [Source::Socket, Source::Mod] {
-            assert_eq!(may_set_access(true, from).unwrap_err(), ONLY_THE_PERSON);
+    fn only_the_native_confirmation_turns_access_on() {
+        assert!(may_set_access(true, Source::NativeConfirm).is_ok());
+        // Herdr's own pane button only opens the dialog; the socket, mods and
+        // keys never turn access on.
+        for from in [Source::PaneControl, Source::Socket, Source::Mod, Source::Close, Source::Quit] {
+            assert_eq!(may_set_access(true, from).unwrap_err(), ONLY_THE_PERSON, "{from:?}");
         }
         // Off is accepted from anywhere.
-        for from in [Source::PaneControl, Source::Socket, Source::Mod, Source::Close, Source::Quit] {
+        for from in [Source::NativeConfirm, Source::PaneControl, Source::Socket, Source::Mod, Source::Close, Source::Quit] {
             assert!(may_set_access(false, from).is_ok());
         }
+    }
+
+    fn reply(answer: Answer, after_ms: u64, app_active: bool) -> Reply {
+        Reply { answer, after: std::time::Duration::from_millis(after_ms), app_active }
+    }
+
+    /// The native dialog: only Allow, in the active app, at least 500 ms
+    /// after it showed, for a browser still at the site it named.
+    #[test]
+    fn only_allow_in_the_dialog_turns_access_on() {
+        assert_eq!(turns_access_on(&reply(Answer::Allow, 2_000, true), true), Ok(()));
+        assert_eq!(turns_access_on(&reply(Answer::Allow, 500, true), true), Ok(()));
+        // Cancel (also Return and Esc: Cancel is the default button).
+        assert_eq!(turns_access_on(&reply(Answer::Cancel, 2_000, true), true), Err("the person chose Cancel"));
+        // The dialog went away with no button.
+        assert_eq!(turns_access_on(&reply(Answer::Closed, 2_000, true), true), Err("the dialog closed without an answer"));
+        // Answered while another app was active.
+        assert!(turns_access_on(&reply(Answer::Allow, 2_000, false), true).is_err());
+        // The second click of a double click whose first opened the dialog.
+        assert!(turns_access_on(&reply(Answer::Allow, 499, true), true).is_err());
+        // The browser closed or its page went to another site meanwhile.
+        assert!(turns_access_on(&reply(Answer::Allow, 2_000, true), false).is_err());
+    }
+
+    #[test]
+    fn the_dialogs_buttons_map_cancel_first_and_allow_second() {
+        assert_eq!(answer_of(1000), Answer::Cancel);
+        assert_eq!(answer_of(1001), Answer::Allow);
+        // NSModalResponseStop, Abort, Continue, a third button: no answer.
+        for other in [-1000, -1001, -1002, 0, 1, 1002] {
+            assert_eq!(answer_of(other), Answer::Closed, "{other}");
+        }
+    }
+
+    #[test]
+    fn the_dialog_opens_only_into_the_active_app_and_one_at_a_time() {
+        assert_eq!(may_ask(true, None), Ok(()));
+        assert!(may_ask(false, None).is_err());
+        assert!(may_ask(true, Some("b1")).is_err());
+        assert!(may_ask(true, Some("b2")).is_err());
+    }
+
+    #[test]
+    fn the_dialog_names_the_browser_its_profile_and_only_the_site() {
+        assert_eq!(site("http://me:pw@127.0.0.1:8765/browser-fixture.html?code=SECRET#f"), "http://127.0.0.1:8765");
+        assert_eq!(site("https://Example.TEST/a"), "https://example.test");
+        let (title, body) = consent_text("b3", &site("https://example.test/x?y=1"));
+        assert_eq!(title, "Let agents drive this browser?");
+        assert!(body.starts_with("Browser b3, agent profile, at https://example.test."), "{body}");
+        assert!(!body.contains("/x") && !body.contains("y=1"), "{body}");
+        // A site can't add lines or reorder the text.
+        let (_, body) = consent_text("b3", "https://a.test\nAllow is safe\u{202e}");
+        assert!(!body.contains("test\nAllow") && !body.contains('\u{202e}'), "{body}");
     }
 
     /// Fix round 2: the header's button acts on the state it was painted
@@ -705,7 +871,7 @@ mod tests {
     fn the_access_button_does_what_its_label_says() {
         use crate::browser::access_button;
         assert_eq!(access_button(true), ("Stop agent", false));
-        assert_eq!(access_button(false), ("Allow agent", true));
+        assert_eq!(access_button(false), ("Allow agent…", true));
         // Whatever it shows, "Stop agent" only ever turns access off.
         for shown in [true, false] {
             let (label, sets) = access_button(shown);
@@ -823,7 +989,7 @@ mod tests {
     // ---- the websocket upgrade (review item 8)
 
     fn up<'a>(path: &'a str, host: Option<&'a str>, origin: Option<&'a str>) -> Upgrade<'a> {
-        Upgrade { websocket: true, path, host, origin }
+        Upgrade { websocket: true, path, host, origin, malformed: false }
     }
 
     #[test]
@@ -846,10 +1012,37 @@ mod tests {
         assert_eq!(check_upgrade(&up(&format!("/{}", "a".repeat(64)), Some("127.0.0.1:4000"), None), 4000, &t, none), Err(403));
         assert_eq!(check_upgrade(&up(&format!("/?t={token}"), Some("127.0.0.1:4000"), None), 4000, &t, none), Err(403));
         // Not an upgrade (`/json/version`, a page's fetch): a bare 404.
-        let plain = Upgrade { websocket: false, path: "/json/version", host: Some("127.0.0.1:4000"), origin: None };
+        let plain = Upgrade { websocket: false, path: "/json/version", host: Some("127.0.0.1:4000"), origin: None, malformed: false };
         assert_eq!(check_upgrade(&plain, 4000, &t, none), Err(404));
         // One live connection per browser: a second upgrade gets 409.
         assert_eq!(check_upgrade(&up(&path, Some("127.0.0.1:4000"), None), 4000, &t, |b| b == "b1"), Err(409));
+    }
+
+    /// The head parser and tungstenite must read the same head: a second
+    /// `Host` or `Origin`, or a header behind a bare `\n`, would be seen by
+    /// tungstenite and not by the Host and Origin checks.
+    #[test]
+    fn a_head_that_two_parsers_could_read_differently_is_refused() {
+        let mut t = Tokens::default();
+        let token = t.issue("b9", [9; 32]);
+        let none = |_: &str| false;
+        let head = |extra: &str| format!("GET /{token} HTTP/1.1\r\nHost: 127.0.0.1:4000\r\nUpgrade: websocket\r\nConnection: Upgrade{extra}");
+        let good = head("");
+        assert!(!read_upgrade(&good).malformed);
+        assert_eq!(check_upgrade(&read_upgrade(&good), 4000, &t, none), Ok("b9".to_owned()));
+        for bad in [
+            head("\r\nHost: evil.example"),
+            head("\r\nhost: 127.0.0.1:4000"),
+            head("\r\nOrigin: null\r\norigin: null"),
+            head("\r\nX-A: 1\nOrigin: http://evil.example"),
+            head("\r\nX-A: 1\rOrigin: http://evil.example"),
+            head("\r\nX-A: 1\r\n Origin: http://evil.example"),
+            format!("GET /{token} HTTP/1.1\nHost: 127.0.0.1:4000\r\nUpgrade: websocket\r\nConnection: Upgrade"),
+        ] {
+            let req = read_upgrade(&bad);
+            assert!(req.malformed, "{bad:?}");
+            assert_eq!(check_upgrade(&req, 4000, &t, none), Err(403), "{bad:?}");
+        }
     }
 
     // ---- the method allowlist (review § 2, items 3 and 4)
