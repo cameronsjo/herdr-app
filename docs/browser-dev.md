@@ -115,6 +115,7 @@ herdr-app do browser.navigate --browser b1 --url https://example.com/
 herdr-app do browser.devtools --browser b1
 herdr-app do browser.zoom --browser b1 --step in
 herdr-app do browser.viewport --browser b1 --preset phone
+herdr-app do browser.open_external --browser b1
 herdr-app do browser.close --browser b2
 ```
 
@@ -416,3 +417,38 @@ Smaller ones:
   draws its narrow form (no `-`/`+`, a bare zoom number, the viewport icon
   without its name). The address keeps at least 64 px; in a pane under about
   220 pt what's right of it (zoom, viewport, DevTools) clips instead.
+- **No passkeys or security keys yet.** macOS lets an app run WebAuthn for
+  any site only with an Apple-managed entitlement
+  (`com.apple.developer.web-browser.public-key-credential`) that Herdr's
+  team would request. Without it, both engines refuse at once; measured on
+  macOS 27.2 with dev builds, `http://127.0.0.1` pages, person and agent
+  profiles (`scripts/browser-passkey-probe.html` writes them into its title;
+  `?get` adds a timed `get`):
+  - **WebKit** reports `isUserVerifyingPlatformAuthenticatorAvailable()` and
+    `isConditionalMediationAvailable()` as `false`, and
+    `navigator.credentials.get` rejects in 0 ms (`NotAllowedError` on the
+    person's profile, `SecurityError` on the agent profile), with no sheet.
+    Its `getClientCapabilities()` still says `passkeyPlatformAuthenticator`
+    and `hybridTransport` are true, so a site that trusts that call alone
+    offers a passkey button that then fails. WebKit has no public API to turn
+    WebAuthn off.
+  - **CEF** starts with `--disable-blink-features=WebAuth`
+    (`LIST_SWITCHES` in `src/browser/runtime.rs`): pages have no
+    `PublicKeyCredential`, so sites offer passwords, and
+    `navigator.credentials.get` rejects in under 25 ms. Without the switch
+    CEF said conditional mediation was available, and a passkey request
+    would run with no dialog (CEF in a native parent view has no dialog
+    host) until the site's timeout. The switch is process-wide, so it covers
+    agent-profile pages too.
+
+  `browser.open_external` (the bar's open-in-browser button, shown on
+  hover) opens the page in the default browser, where passkeys work. It
+  takes the url from Herdr's record of the page, http or https only. Agents
+  can call it too; that gives them nothing new, since a Herdr terminal can
+  already run `open <url>`.
+
+  Refusing passkeys on agent-profile pages, once they work, belongs in a
+  native WebAuthn bridge, where Herdr's own code decides before any sheet
+  shows. A script in the page can't do it: an agent's `eval` runs in that
+  page and could undo it. Until the bridge exists, nothing can raise a
+  passkey sheet on either engine (above).
