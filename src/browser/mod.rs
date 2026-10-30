@@ -240,13 +240,15 @@ pub fn over<'a>(target: &Rect, covers: &'a [(String, Rect)]) -> Option<&'a str> 
 /// click at once. Keyed by the block (node) the button is in.
 ///
 /// What can be over the header: the header is drawn in Herdr's top layer
-/// (`layer::top`), after every element and every deferred draw a mod can
-/// make, and occludes, so mod and layout content is always under it and
-/// gets none of its clicks. Only Herdr's own overlays (`Browsers::cover`:
-/// palette, dialogs, popups, menus, toasts, floats, the drag grip and drop
-/// preview, the update pill) are drawn above it; where one overlaps any part
-/// of the header, the header isn't drawn and its button starts its wait
-/// again (`over`).
+/// (`layer::top`), painted and hit-tested after every element and every
+/// deferred draw a mod can make, nested ones included, and occludes, so mod
+/// and layout content is always under it and gets none of its clicks. Its
+/// colors are fixed and opaque, so none of that content shows through it.
+/// Only Herdr's own overlays (`Browsers::cover`: palette, dialogs, popups,
+/// menus, toasts, floats, the drop preview, the update pill) are drawn above
+/// it; where one overlaps any part of the header, the header isn't drawn
+/// and its button starts its wait again (`over`). The drag grip is left out
+/// of a pane where it would meet the header.
 #[derive(Default)]
 pub struct AllowGuard {
     shown: std::collections::HashMap<String, Shown>,
@@ -380,8 +382,10 @@ pub fn public_url(url: &str) -> String {
 
 /// A page's title wherever its url goes out as `public_url`. Chromium titles
 /// a page that has none with its url ("127.0.0.1:8765/cb?code=…", no scheme
-/// or userinfo, maybe unescaped), so a title that starts with the page's
-/// host, or carries its query, is cut the same way. Other titles pass.
+/// or userinfo, maybe unescaped, the host maybe in Unicode), so a title
+/// that starts with the page's host, carries its query, or reads as a url
+/// (a host with a `.` or `:`, then `/`, then `?` or `#`, and no space before
+/// those) is cut the same way. Other titles pass.
 #[cfg_attr(not(all(target_os = "macos", feature = "browser")), allow(dead_code))]
 pub fn public_title(title: &str, url: &str) -> String {
     let (before, query) = url.split_once('?').map_or((url, ""), |(b, q)| (b, q.split('#').next().unwrap_or_default()));
@@ -394,7 +398,11 @@ pub fn public_title(title: &str, url: &str) -> String {
     let shown = shown.split_once('@').filter(|(user, _)| !user.contains(['/', ' '])).map_or(shown, |(_, rest)| rest).to_ascii_lowercase();
     let hosts = [host.as_str(), host.strip_prefix("www.").unwrap_or_default()];
     let carries_query = !query.is_empty() && title.contains(query);
-    if !carries_query && !hosts.iter().any(|h| !h.is_empty() && shown.starts_with(h)) {
+    let head = shown.split(['?', '#']).next().unwrap_or_default();
+    let reads_as_url = head.len() < shown.len()
+        && !head.contains(char::is_whitespace)
+        && head.split_once('/').is_some_and(|(host, _)| host.contains(['.', ':']));
+    if !carries_query && !reads_as_url && !hosts.iter().any(|h| !h.is_empty() && shown.starts_with(h)) {
         return title.to_owned();
     }
     let title = if carries_query { title.replace(query, "") } else { title.to_owned() };
@@ -653,9 +661,17 @@ mod tests {
         // A title that carries the query, however it starts.
         assert_eq!(public_title("Signed in: code=SECRETQ3", "https://a.test/cb?code=SECRETQ3"), "Signed in: ");
         assert!(!public_title("x ?code=SECRETQ3", "https://a.test/cb?code=SECRETQ3").contains("SECRET"));
+        // A Unicode host and an unescaped query: the host and query differ
+        // from the url's, but the title still reads as a url.
+        let idn = "http://xn--bcher-kva.localhost:18791/notitle.html?code=SECRET%20C1#fragSECRET";
+        assert_eq!(public_title("bücher.localhost:18791/notitle.html?code=SECRET C1", idn), "bücher.localhost:18791/notitle.html");
+        assert_eq!(public_title(" bücher.localhost:18791/notitle.html?code=SECRETH1é", idn), " bücher.localhost:18791/notitle.html");
+        assert_eq!(public_title("bücher.localhost:18791/notitle.html#fragSECRET", idn), "bücher.localhost:18791/notitle.html");
         // A page's own title passes, question marks and all.
         assert_eq!(public_title("What is a pane? · Docs", "https://docs.test/panes?x=1"), "What is a pane? · Docs");
         assert_eq!(public_title("Herdr fixture", "http://127.0.0.1:8765/browser-fixture.html"), "Herdr fixture");
+        assert_eq!(public_title("Input/output? A primer", "https://docs.test/io?x=1"), "Input/output? A primer");
+        assert_eq!(public_title("C# in 10 minutes", "https://docs.test/cs"), "C# in 10 minutes");
         assert_eq!(public_title("", "about:blank"), "");
     }
 

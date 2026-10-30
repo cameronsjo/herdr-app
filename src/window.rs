@@ -29,6 +29,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 const HEADER_HEIGHT: f32 = 30.0;
+/// The height of an agent browser's header (`AppWindow::agent_bar`).
+const AGENT_HEADER: f32 = 26.0;
 const HANDLE: f32 = 6.0;
 
 // The three native buttons plus their trailing breathing room (also used by the tabs mod).
@@ -79,6 +81,29 @@ fn header_over(hover: bool, content: Option<&Content>) -> bool {
 fn c(name: &str) -> Hsla {
     settings::color_or_literal(name)
 }
+
+/// The colors of the agent header ("Allow agent") and the agent-access strip.
+/// Fixed and opaque, never the theme's: an agent can set a layout's colors,
+/// alpha included, and a see-through header would show a mod's decoy under
+/// a button that still takes the click.
+struct ConsentLook {
+    bar: Hsla,
+    text: Hsla,
+    button: Hsla,
+    button_text: Hsla,
+}
+
+fn consent_look(on: bool) -> ConsentLook {
+    ConsentLook {
+        bar: gpui::rgb(if on { 0x8f1d1d } else { 0x2e3440 }).into(),
+        text: gpui::rgb(0xf5f5f5).into(),
+        button: gpui::rgb(0x1d5fd1).into(),
+        button_text: gpui::rgb(0xffffff).into(),
+    }
+}
+
+/// The agent header's font: Herdr's bundled UI font, never a layout's.
+const CONSENT_FONT: &str = "Geist";
 
 fn file(name: &str) -> PathBuf {
     mods::app_dir().join(name)
@@ -1601,6 +1626,7 @@ impl AppWindow {
         };
         let (b, node_id) = (browser.to_owned(), node.to_owned());
         let (label, sets) = crate::browser::access_button(on);
+        let k = consent_look(on);
         let look = || {
             div()
                 .flex()
@@ -1609,9 +1635,10 @@ impl AppWindow {
                 .gap_2()
                 .px_2()
                 .size_full()
-                .bg(if on { c("blocked") } else { c("raised") })
+                .bg(k.bar)
+                .font_family(CONSENT_FONT)
                 .text_size(settings::z(12.0))
-                .text_color(c("foreground"))
+                .text_color(k.text)
                 .child(div().flex_1().overflow_hidden().whitespace_nowrap().child(crate::browser::dev_switch_note().unwrap_or("Test profile: don't sign into real accounts.")))
                 .child(div().whitespace_nowrap().child(state.clone()))
         };
@@ -1626,8 +1653,8 @@ impl AppWindow {
                     .id(SharedString::from(format!("agent-access-{node}")))
                     .px_2()
                     .rounded_sm()
-                    .bg(c("accent"))
-                    .text_color(c("accent_foreground"))
+                    .bg(k.button)
+                    .text_color(k.button_text)
                     .cursor_pointer()
                     .relative()
                     .child(label)
@@ -1657,7 +1684,7 @@ impl AppWindow {
         div()
             .flex_none()
             .relative()
-            .h(settings::z(26.0))
+            .h(settings::z(AGENT_HEADER))
             .child(look())
             .child(self.browsers.agent_header(node, live.into_any_element()))
             .into_any_element()
@@ -1672,6 +1699,7 @@ impl AppWindow {
         if on.is_empty() {
             return None;
         }
+        let k = consent_look(true);
         let mut strip = div()
             .id("agent-watch")
             .flex_none()
@@ -1683,9 +1711,10 @@ impl AppWindow {
             .px_2()
             .h(settings::z(24.0))
             .overflow_hidden()
-            .bg(c("blocked"))
+            .bg(k.bar)
+            .font_family(CONSENT_FONT)
             .text_size(settings::z(12.0))
-            .text_color(c("foreground"));
+            .text_color(k.text);
         if let Some(note) = crate::browser::dev_switch_note() {
             strip = strip.child(div().whitespace_nowrap().child(note));
         }
@@ -1700,8 +1729,8 @@ impl AppWindow {
                     .id(SharedString::from(format!("agent-watch-stop-{browser}")))
                     .px_2()
                     .rounded_sm()
-                    .bg(c("accent"))
-                    .text_color(c("accent_foreground"))
+                    .bg(k.button)
+                    .text_color(k.button_text)
                     .cursor_pointer()
                     .child("Stop agent")
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -4169,7 +4198,15 @@ impl AppWindow {
             }
         };
         let row = frame.and_then(|f| f.header.as_ref()).filter(|h| !h.bottom() && !h.hover()).map(|h| h.height.unwrap_or(HEADER_HEIGHT));
-        el.children(self.render_floats(n, cx)).children(self.pane_grip(&n.id, row, cx)).into_any_element()
+        // Where an agent browser's header starts: under a top frame header,
+        // which a browser pane always has in the flow (`header_over`).
+        let agent = match n.content() {
+            Some(Content::Browser { browser, .. }) if self.browsers.agent_state(browser).is_some() => {
+                Some(frame.and_then(|f| f.header.as_ref()).filter(|h| !h.bottom()).map_or(0., |h| h.height.unwrap_or(HEADER_HEIGHT)))
+            }
+            _ => None,
+        };
+        el.children(self.render_floats(n, cx)).children(self.pane_grip(&n.id, row, agent, cx)).into_any_element()
     }
 
     fn render_block(&self, n: &Node, content: &Content, focused: &HashSet<String>, cx: &mut Context<Self>) -> AnyElement {
@@ -5050,6 +5087,27 @@ mod tests {
         assert_eq!(super::browser_status(None, "b1", "p1", with_user)["url"], "https://example.test/cb");
         let open = serde_json::json!({ "url": "https://example.test/cb?step=2", "title": "T" });
         assert_eq!(super::browser_status(Some(open), "b1", "p1", saved)["url"], "https://example.test/cb?step=2");
+    }
+
+    #[test]
+    fn the_agent_header_keeps_its_own_opaque_colors_and_font_whatever_a_layout_sets() {
+        use crate::settings::{self, Person, Settings};
+        let before = [super::consent_look(false), super::consent_look(true)].map(|k| [k.bar, k.text, k.button, k.button_text]);
+        // What an agent's `layout.set` can do: every color the header used, see-through.
+        let clear = "#00000000".to_owned();
+        let colors = ["raised", "blocked", "foreground", "accent", "accent_foreground", "background"].map(|n| (n.to_owned(), clear.clone()));
+        let look = crate::layout::Look { colors: Some(colors.into_iter().collect()), ui_font: Some("Blank".into()), ..Default::default() };
+        settings::set(Settings::compose(&Person::default(), &look, true));
+        // The override is live: a themed control would now be invisible.
+        assert_eq!(super::c("accent").a, 0.0);
+        assert_eq!(settings::get().ui_font_family, "Blank");
+        let after = [super::consent_look(false), super::consent_look(true)].map(|k| [k.bar, k.text, k.button, k.button_text]);
+        assert_eq!(before, after);
+        for color in after.iter().flatten() {
+            assert_eq!(color.a, 1.0, "{color:?}");
+        }
+        assert_eq!(super::CONSENT_FONT, Settings::default().ui_font_family, "the bundled UI font");
+        settings::set(Settings::default());
     }
 
     #[test]

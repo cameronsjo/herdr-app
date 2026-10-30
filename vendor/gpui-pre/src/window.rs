@@ -3756,12 +3756,32 @@ impl Window {
         // slices on the next frame. Moving the draws out and re-appending them
         // shifts the indices of nested draws, causing reused subtrees to graft
         // the wrong deferred draws and panic in the dispatch tree.
+        //
+        // HERDR: a draw at priority `usize::MAX` (the topmost layer) is held
+        // back until no other draw is left, nested ones included, then
+        // prepainted. Paint puts it above every draw, so its hitboxes must
+        // come after theirs too: a draw nested in another one is prepainted
+        // a round later, and would otherwise take the clicks aimed at a
+        // topmost draw it paints under.
         let mut round_start = 0;
         let mut depth = 0;
+        let mut topmost = SmallVec::<[usize; 4]>::new();
+        let mut topmost_depth = 0;
         loop {
             let round_end = self.next_frame.deferred_draws.len();
             if round_start == round_end {
-                break;
+                if topmost.is_empty() {
+                    break;
+                }
+                // HERDR: every other draw is prepainted; now the topmost.
+                assert!(topmost_depth < 10, "Exceeded maximum (10) topmost deferred depth");
+                topmost_depth += 1;
+                for deferred_draw_ix in mem::take(&mut topmost) {
+                    self.prepaint_deferred_draw(deferred_draw_ix, cx);
+                }
+                self.element_id_stack.clear();
+                self.text_style_stack.clear();
+                continue;
             }
             // Limit maximum nesting depth to prevent infinite loops.
             assert!(depth < 10, "Exceeded maximum (10) deferred depth");
@@ -3772,45 +3792,55 @@ impl Window {
             traversal_order.sort_by_key(|ix| self.next_frame.deferred_draws[*ix].priority);
 
             for deferred_draw_ix in traversal_order {
-                let (element, parent_node, current_view, rem_size, absolute_offset, prepaint_range) = {
-                    let deferred_draw = &mut self.next_frame.deferred_draws[deferred_draw_ix];
-                    self.element_id_stack
-                        .clone_from(&deferred_draw.element_id_stack);
-                    self.text_style_stack
-                        .clone_from(&deferred_draw.text_style_stack);
-                    (
-                        deferred_draw.element.take(),
-                        deferred_draw.parent_node,
-                        deferred_draw.current_view,
-                        deferred_draw.rem_size,
-                        deferred_draw.absolute_offset,
-                        deferred_draw.prepaint_range.clone(),
-                    )
-                };
-                self.next_frame.dispatch_tree.set_active_node(parent_node);
-
-                let prepaint_start = self.prepaint_index();
-                if let Some(mut element) = element {
-                    self.with_rendered_view(current_view, |window| {
-                        window.with_rem_size(Some(rem_size), |window| {
-                            window.with_absolute_element_offset(absolute_offset, |window| {
-                                element.prepaint(window, cx);
-                            });
-                        });
-                    });
-                    self.next_frame.deferred_draws[deferred_draw_ix].element = Some(element);
-                } else {
-                    self.reuse_prepaint(prepaint_range);
+                // HERDR: the topmost layer waits for everything else.
+                if self.next_frame.deferred_draws[deferred_draw_ix].priority == usize::MAX {
+                    topmost.push(deferred_draw_ix);
+                    continue;
                 }
-                let prepaint_end = self.prepaint_index();
-                self.next_frame.deferred_draws[deferred_draw_ix].prepaint_range =
-                    prepaint_start..prepaint_end;
+                self.prepaint_deferred_draw(deferred_draw_ix, cx);
             }
 
             self.element_id_stack.clear();
             self.text_style_stack.clear();
             round_start = round_end;
         }
+    }
+
+    // HERDR: one deferred draw's prepaint, shared by the rounds and the topmost layer.
+    fn prepaint_deferred_draw(&mut self, deferred_draw_ix: usize, cx: &mut App) {
+        let (element, parent_node, current_view, rem_size, absolute_offset, prepaint_range) = {
+            let deferred_draw = &mut self.next_frame.deferred_draws[deferred_draw_ix];
+            self.element_id_stack
+                .clone_from(&deferred_draw.element_id_stack);
+            self.text_style_stack
+                .clone_from(&deferred_draw.text_style_stack);
+            (
+                deferred_draw.element.take(),
+                deferred_draw.parent_node,
+                deferred_draw.current_view,
+                deferred_draw.rem_size,
+                deferred_draw.absolute_offset,
+                deferred_draw.prepaint_range.clone(),
+            )
+        };
+        self.next_frame.dispatch_tree.set_active_node(parent_node);
+
+        let prepaint_start = self.prepaint_index();
+        if let Some(mut element) = element {
+            self.with_rendered_view(current_view, |window| {
+                window.with_rem_size(Some(rem_size), |window| {
+                    window.with_absolute_element_offset(absolute_offset, |window| {
+                        element.prepaint(window, cx);
+                    });
+                });
+            });
+            self.next_frame.deferred_draws[deferred_draw_ix].element = Some(element);
+        } else {
+            self.reuse_prepaint(prepaint_range);
+        }
+        let prepaint_end = self.prepaint_index();
+        self.next_frame.deferred_draws[deferred_draw_ix].prepaint_range =
+            prepaint_start..prepaint_end;
     }
 
     fn paint_deferred_draws(&mut self, cx: &mut App) {

@@ -6,11 +6,16 @@
 //! order of priority (gpui-kit's popups, dialogs, toasts and tooltips are
 //! `deferred` at 200 or less). The header goes in a deferred draw at
 //! [`TOP`], above all of them, and occludes: no element under it gets the
-//! pointer. Herdr's own overlays (palette, dialogs, menus, toasts, floats,
-//! the drag grip) are drawn before it, so where one overlaps the header the
-//! header isn't drawn at all that frame (`may_draw` says no): the overlay
-//! shows as it should, and the button has no place on screen, so "Allow
-//! agent" starts its wait again (`super::AllowGuard`).
+//! pointer. Hit testing follows the order draws are prepared in, and GPUI
+//! prepares a draw nested in another (a popover in a mod's dialog) a round
+//! later; a `HERDR:` patch in `vendor/gpui-pre` (`prepaint_deferred_draws`)
+//! prepares draws at `usize::MAX` after all others, nested ones included,
+//! so the header is on top for clicks as it is for paint. Herdr's own
+//! overlays (palette, dialogs, menus, toasts, floats) are drawn before it,
+//! so where one overlaps the header the header isn't drawn at all that
+//! frame (`may_draw` says no): the overlay shows as it should, and the
+//! button has no place on screen, so "Allow agent" starts its wait again
+//! (`super::AllowGuard`).
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -19,7 +24,8 @@ use gpui::{AnyElement, App, Bounds, ContentMask, Element, ElementId, GlobalEleme
 
 /// The deferred-draw priority of the agent header: above every priority a
 /// mod's content can get (gpui-kit: dialogs `10 + depth`, popups 100,
-/// toasts 101, tooltips 200).
+/// toasts 101, tooltips 200). GPUI (with Herdr's patch) prepares draws at
+/// this priority last, so they are hit-tested above every other draw.
 pub const TOP: usize = usize::MAX;
 
 /// `child`, drawn in Herdr's top layer, inside the clip of where it is laid
@@ -225,5 +231,73 @@ mod tests {
     fn a_header_that_may_not_draw_has_no_paint_and_no_hitbox(cx: &mut TestAppContext) {
         let out = run(cx, true, false);
         assert!(!out.contains(&"header") && !out.contains(&"allow clicked"), "{out:?}");
+    }
+
+    /// A mod's dialog (deferred, priority 10) holding an open popover
+    /// (deferred again, priority 100) over the header: a draw nested in a
+    /// draw, which GPUI prepares a round after the header's.
+    struct Nested {
+        occlude: bool,
+        log: Rc<RefCell<Vec<&'static str>>>,
+    }
+
+    impl Render for Nested {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let log = self.log.clone();
+            let mark = move |name: &'static str| {
+                let log = log.clone();
+                canvas(|_, _, _| {}, move |_, _, _, _| log.borrow_mut().push(name)).absolute().size_full()
+            };
+            let header = div()
+                .id("header")
+                .absolute()
+                .top_0()
+                .left_0()
+                .w(px(300.0))
+                .h(px(26.0))
+                .occlude()
+                .child(mark("header"))
+                .child(div().id("allow").w(px(80.0)).h(px(20.0)).on_click(cx.listener(|this: &mut Self, _, _, _| this.log.borrow_mut().push("allow clicked"))));
+            let popover = div()
+                .id("popover")
+                .absolute()
+                .top_0()
+                .left_0()
+                .w(px(300.0))
+                .h(px(200.0))
+                .when(self.occlude, |d| d.occlude())
+                .child(mark("popover"))
+                .on_click(cx.listener(|this: &mut Self, _, _, _| this.log.borrow_mut().push("popover clicked")));
+            let dialog = div().absolute().top_0().left_0().size_full().child(deferred(popover).with_priority(100));
+            div()
+                .size_full()
+                .relative()
+                .child(div().size_full().relative().child(super::top(header.into_any_element(), |_| true)))
+                .child(deferred(dialog).with_priority(10))
+        }
+    }
+
+    fn run_nested(cx: &mut TestAppContext, occlude: bool) -> Vec<&'static str> {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let (_, cx) = cx.add_window_view(|_, _| Nested { occlude, log: log.clone() });
+        cx.run_until_parked();
+        let painted = log.borrow().clone();
+        log.borrow_mut().clear();
+        cx.simulate_click(point(px(10.0), px(10.0)), Modifiers::none());
+        cx.run_until_parked();
+        let clicked: Vec<_> = log.borrow().iter().copied().filter(|e| e.ends_with("clicked")).collect();
+        painted.iter().copied().take(2).chain(clicked).collect()
+    }
+
+    #[gpui::test]
+    fn a_mods_nested_popover_paints_and_hit_tests_under_the_header(cx: &mut TestAppContext) {
+        // Hit order follows paint order: the click on the visible button
+        // reaches it, and nothing a mod nests under it gets the click.
+        assert_eq!(run_nested(cx, true), vec!["popover", "header", "allow clicked"]);
+    }
+
+    #[gpui::test]
+    fn a_mods_nested_popover_that_does_not_occlude_gets_no_click_through_the_header(cx: &mut TestAppContext) {
+        assert_eq!(run_nested(cx, false), vec!["popover", "header", "allow clicked"]);
     }
 }

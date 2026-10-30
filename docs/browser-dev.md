@@ -114,13 +114,17 @@ person allows it for that pane:
    are refused in it.
 2. Click **Allow agent** in that header. Herdr draws the header in its own
    top layer, after everything a layout or a mod draws (a mod's popups,
-   dialogs, toasts and tooltips included), and the header takes every
-   click on it. So no mod or layout content can sit over the button, and
-   none gets or passes on a click aimed at it. Only Herdr's own overlays
-   are drawn above it (dialogs, popups, menus, the palette, toasts,
-   floats, the pane grip and drop preview, the update pill; a mod's
-   overlay opened through Herdr is one of these), and while one overlaps
-   any part of the header the header isn't drawn at all. The button takes
+   dialogs, toasts and tooltips included, nested in each other or not),
+   and the header takes every click on it: GPUI hit-tests that layer after
+   all other drawing too (a `HERDR:` patch in `vendor/gpui-pre`). So no
+   mod or layout content can sit over the button, and none gets or passes
+   on a click aimed at it. The header's colors and font are Herdr's own,
+   opaque, and no theme or layout changes them, so nothing shows through
+   it. Only Herdr's own overlays are drawn above it (dialogs, popups,
+   menus, the palette, toasts, floats, the drop preview, the update pill;
+   a mod's overlay opened through Herdr is one of these), and while one
+   overlaps any part of the header the header isn't drawn at all. A pane
+   whose drag grip would overlap the header has no grip. The button takes
    a click only after it has shown for half a second with that label, in
    the same place, for the same browser, with nothing over its header,
    the window active and no drag going on, and never the second click of
@@ -221,8 +225,10 @@ shown):
 > type, and read what the page shows. Any process running as you can also
 > read this profile's cookies from disk, because the prototype encrypts
 > them with Chromium's public test key (`--use-mock-keychain`). It can also
-> hide or recolor the access marker (a mod's overlay over it, a theme
-> edit; the overlay also keeps **Allow agent** from taking a click), and if
+> hide the access marker with a mod's overlay over it (which also keeps
+> **Allow agent** from taking a click; theme and layout edits can't change
+> the marker's colors or font, but a font file that claims the bundled
+> Geist name might change its glyphs), and if
 > your terminal app has macOS Accessibility permission, click **Allow
 > agent** itself. Herdr's own agent connection needs a 256-bit token and
 > accepts only loopback connections without an `Origin` header. But while
