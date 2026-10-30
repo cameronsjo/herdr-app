@@ -1,8 +1,12 @@
 // A browser pane's header (the pane mod's, for a pane with PaneInfo.browser):
-// back, forward, reload, the address, DevTools. Only commands any mod may run.
-// The address is what browsers() gives (no query or fragment unless agent
-// access is on). Enter goes there and hands the keyboard back to the page;
-// Esc puts the page's address back.
+// back, forward, reload, the address, zoom, the viewport, DevTools. Only
+// commands any mod may run. The address is what browsers() gives (no query or
+// fragment unless agent access is on). Enter goes there and hands the keyboard
+// back to the page; Esc puts the page's address back. Zoom (- NN% +, the
+// percent resets it) and the viewport button (Fit, Phone, Tablet in turn)
+// show while the header is hovered, or while they aren't at their defaults.
+// In a narrow pane (measured while the pointer is over the bar) the percent
+// and the viewport's name go, so the address keeps its room.
 
 import { div, svg } from "gpui-kit";
 import { h_flex, InputState, Input } from "gpui-base";
@@ -22,12 +26,33 @@ export function address(text) {
   return search();
 }
 
+/** Below this bar width (px) the percent and the viewport's name hide. */
+export const NARROW = 340;
+
+/** The viewport button's order: each click moves to the next. */
+const VIEWPORTS = ["fit", "phone", "tablet"];
+
+/** The preset after `viewport` (BrowserInfo.viewport); a custom size goes back to fit. */
+export function nextViewport(viewport) {
+  const now = viewport ? viewport.preset : "fit";
+  const i = VIEWPORTS.indexOf(now);
+  return i < 0 ? "fit" : VIEWPORTS[(i + 1) % VIEWPORTS.length];
+}
+
+/** What the viewport button says: nothing at fit, the preset, or the size. */
+export function viewportLabel(viewport) {
+  if (!viewport) return null;
+  if (viewport.preset) return viewport.preset[0].toUpperCase() + viewport.preset.slice(1);
+  return `${viewport.width}×${viewport.height}`;
+}
+
 export default class BrowserBar {
   // Created from the pane mod's init: state can't be made during render.
   constructor() {
     this.input = InputState.new({ placeholder: "Search or enter an address" });
     this.editing = false;
     this.shown = null; // the url the field holds while nobody edits it
+    this.narrow = false; // the bar was narrower than NARROW when last measured
     this.input.on("focus", (_e, cx) => {
       this.editing = true;
       this.input.set_selected_range({ start: 0, end: this.input.value().length });
@@ -63,7 +88,7 @@ export default class BrowserBar {
     cx.timer.after(0, () => { if (!this.editing && this.shown === url) this.input.set_value(url); });
   }
 
-  button(t, id, icon, command, on) {
+  button(t, id, icon, command, on, args = {}) {
     const b = div().id(id).p(3).rounded(4).flex_none();
     if (!on) return b.text_color(t.dim).opacity(0.4).child(svg(`mods/pane/${icon}.svg`).size(14));
     return b
@@ -71,23 +96,68 @@ export default class BrowserBar {
       .hover((s) => s.bg(t.hover).text_color(t.foreground))
       .on_click((_e, cx) => {
         cx.stop_propagation();
-        run(command, { browser: this.browser });
+        run(command, { browser: this.browser, ...args });
       })
       .child(svg(`mods/pane/${icon}.svg`).size(14));
   }
 
-  render(t, p, cx) {
+  // The percent (click: back to 100%).
+  percent(t, pane, zoom) {
+    return div()
+      .id(`pb-zoom-${pane}`)
+      .flex_none()
+      .px(3)
+      .rounded(4)
+      .text_size(11)
+      .text_color(zoom === 100 ? t.dim : t.foreground)
+      .hover((s) => s.bg(t.hover))
+      .on_click((_e, cx) => {
+        cx.stop_propagation();
+        run("browser.zoom", { browser: this.browser, step: "reset" });
+      })
+      .child(`${zoom}%`);
+  }
+
+  // Fit, Phone, Tablet in turn; its label says which, unless it's fit.
+  viewport(t, pane, viewport) {
+    const label = this.narrow ? null : viewportLabel(viewport);
+    return h_flex()
+      .id(`pb-vp-${pane}`)
+      .flex_none()
+      .gap(2)
+      .items_center()
+      .p(3)
+      .rounded(4)
+      .text_color(viewport ? t.accent : t.dim)
+      .hover((s) => s.bg(t.hover).text_color(t.foreground))
+      .on_click((_e, cx) => {
+        cx.stop_propagation();
+        run("browser.viewport", { browser: this.browser, preset: nextViewport(viewport) });
+      })
+      .child(svg("mods/pane/viewport.svg").size(14))
+      .when(Boolean(label), (el) => el.child(div().text_size(11).child(label)));
+  }
+
+  render(t, p, cx, hovered) {
     const b = browsers().find((x) => x.browser === p.browser);
     this.browser = p.browser;
     this.pane = p.pane;
     this.url = b?.url ?? p.url ?? "";
     this.follow(this.url, cx);
     const pane = p.pane;
+    const zoom = b?.zoom ?? 100;
+    const viewport = b?.viewport ?? null;
     return h_flex()
+      .id(`pb-${pane}`)
       .flex_1()
       .min_w(0)
       .gap(2)
       .items_center()
+      // Only the pointer reports the bar's size: measured while it's over the bar.
+      .on_mouse_move((e, cx) => {
+        const narrow = e.bounds.width < NARROW;
+        if (narrow !== this.narrow) { this.narrow = narrow; cx.notify(); }
+      })
       .child(this.button(t, `pb-back-${pane}`, "back", "browser.back", b?.can_go_back))
       .child(this.button(t, `pb-fwd-${pane}`, "forward", "browser.forward", b?.can_go_forward))
       .child(this.button(t, `pb-reload-${pane}`, "reload", "browser.reload", Boolean(b)))
@@ -110,6 +180,10 @@ export default class BrowserBar {
         .on_key_down((e, cx) => this.key(e, cx))
         .child(Input.new(this.input).w_full().h_full().text_size(12).text_color(t.foreground)))
       .when(Boolean(b?.loading), (el) => el.child(svg("mods/workspace-chrome/spinner.svg").size(12).flex_none().text_color(t.dim).spin(900)))
+      .when(Boolean(b) && hovered, (el) => el.child(this.button(t, `pb-zout-${pane}`, "zoom-out", "browser.zoom", zoom > 25, { step: "out" })))
+      .when(Boolean(b) && !this.narrow && (hovered || zoom !== 100), (el) => el.child(this.percent(t, pane, zoom)))
+      .when(Boolean(b) && hovered, (el) => el.child(this.button(t, `pb-zin-${pane}`, "zoom-in", "browser.zoom", zoom < 500, { step: "in" })))
+      .when(Boolean(b) && (hovered || Boolean(viewport)), (el) => el.child(this.viewport(t, pane, viewport)))
       .child(this.button(t, `pb-dev-${pane}`, "devtools", "browser.devtools", Boolean(b)));
   }
 }

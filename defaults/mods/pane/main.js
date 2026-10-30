@@ -63,7 +63,7 @@ export default class Pane extends View {
       .text_size(12)
       .on_hover((hovered, cx) => { this.hovered = hovered; cx.notify(); })
       .on_click(() => run("pane.focus", { pane }));
-    return (p.browser && this.bar ? head.child(this.bar.render(t, p, cx)) : this.terminal(head, t, p))
+    return (p.browser && this.bar ? head.child(this.bar.render(t, p, cx, this.hovered)) : this.terminal(head, t, p))
       .when(this.hovered, el => el
         .child(this.button(t, `ph-r-${pane}`, "split-right", "pane.split", { direction: "right", pane }))
         .child(this.button(t, `ph-d-${pane}`, "split-down", "pane.split", { direction: "down", pane }))
