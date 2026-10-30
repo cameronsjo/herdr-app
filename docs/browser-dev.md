@@ -62,7 +62,9 @@ a new-window link.
 - Clicking a page gives it the keyboard and makes its pane the focused one.
   A layout block's page keeps the keyboard until a click elsewhere in Herdr
   or a focus change. A dialog or popup (the palette, a menu, a rename
-  prompt) takes the keyboard while it's open. A page that focuses itself
+  prompt) takes the keyboard while it's open. So does a control you click
+  (the Changes panel's commit box, a floating terminal), until it loses
+  focus, the focused pane changes, or you click a page. A page that focuses itself
   (CEF does when it creates one) doesn't keep it.
   While a page has the keyboard, keys bound in keys.json's `global` section
   (and the shown layout's), plus `ctrl-alt-shift-escape`, still go to Herdr.

@@ -41,11 +41,12 @@ pub struct Update {
 }
 
 /// Which page has the keyboard: none while a dialog or popup is open (it
-/// takes typing); else the layout block's page the person clicked into,
-/// while it shows; else the focused pane's page, while its tab shows.
-/// `None`: Herdr (GPUI) has it.
-pub fn keyboard_page<'a>(dialog: bool, layout_page: Option<&'a str>, pane_page: Option<&'a str>) -> Option<&'a str> {
-    if dialog { None } else { layout_page.or(pane_page) }
+/// takes typing) or while a Herdr control the person pressed has GPUI focus
+/// (a layout mod's input, a floating terminal); else the layout block's page
+/// the person clicked into, while it shows; else the focused pane's page,
+/// while its tab shows. `None`: Herdr (GPUI) has it.
+pub fn keyboard_page<'a>(dialog: bool, control: bool, layout_page: Option<&'a str>, pane_page: Option<&'a str>) -> Option<&'a str> {
+    if dialog || control { None } else { layout_page.or(pane_page) }
 }
 
 /// Whether browser panes work in this build.
@@ -57,19 +58,26 @@ mod tests {
 
     #[test]
     fn a_dialog_takes_the_keyboard_from_every_page() {
-        assert_eq!(keyboard_page(true, Some("b5"), Some("b1")), None);
-        assert_eq!(keyboard_page(true, None, Some("b1")), None);
+        assert_eq!(keyboard_page(true, false, Some("b5"), Some("b1")), None);
+        assert_eq!(keyboard_page(true, false, None, Some("b1")), None);
+    }
+
+    #[test]
+    fn a_control_the_person_pressed_keeps_the_keyboard_from_every_page() {
+        // The Changes panel's commit box, a floating terminal: typing goes there.
+        assert_eq!(keyboard_page(false, true, None, Some("b1")), None);
+        assert_eq!(keyboard_page(false, true, Some("b5"), Some("b1")), None);
     }
 
     #[test]
     fn a_clicked_layout_page_wins_over_the_focused_pane() {
-        assert_eq!(keyboard_page(false, Some("b5"), Some("b1")), Some("b5"));
-        assert_eq!(keyboard_page(false, Some("b5"), None), Some("b5"));
+        assert_eq!(keyboard_page(false, false, Some("b5"), Some("b1")), Some("b5"));
+        assert_eq!(keyboard_page(false, false, Some("b5"), None), Some("b5"));
     }
 
     #[test]
     fn otherwise_the_focused_panes_page_or_herdr() {
-        assert_eq!(keyboard_page(false, None, Some("b1")), Some("b1"));
-        assert_eq!(keyboard_page(false, None, None), None);
+        assert_eq!(keyboard_page(false, false, None, Some("b1")), Some("b1"));
+        assert_eq!(keyboard_page(false, false, None, None), None);
     }
 }
