@@ -27,8 +27,10 @@ has run outside this one Mac.
 
 ## Cost
 
-A build with the feature is 387 MB (172 MB compressed) against 62 MB
-without it, almost all of it CEF's framework; the default build is
+CEF is the prototype's engine, not the proposal: Herdr shouldn't have to
+own Chromium, and it doesn't have to ([Engine](#engine-herdr-shouldnt-own-chromium)).
+As built, a build with the feature is 387 MB (172 MB compressed) against
+62 MB without it, almost all of it CEF's framework; the default build is
 unchanged. The branch adds about 6,800 lines, about 5,360 of them in
 `src/browser/`. It is ad hoc signed only: Developer ID signing,
 notarization and CEF/Chromium license notices are not done. Measurements:
@@ -63,7 +65,8 @@ software running as you ([Security](#security-in-short)).
 
 ## What the core would need
 
-Three hooks:
+Three hooks, as the prototype has them. The second and third hold for any
+engine; the first is CEF's alone and goes away with another engine:
 
 1. **CEF's app-class hook.** CEF requires `NSApp` to report whether
    `sendEvent:` is running (`CefAppProtocol` in `cef_application_mac.h`).
@@ -84,7 +87,7 @@ Three hooks:
    native view, so Herdr's overlays report their rectangles each frame and a
    page under one is hidden (its block shows the title and url meanwhile).
 
-Besides the hooks, the CEF runtime ships in the app: starting CEF, its
+With CEF, besides the hooks, the CEF runtime ships in the app: starting CEF, its
 message pump (a 33 ms tick), the ordered close on quit and the key routing
 (about 3,200 lines of `src/browser/`, tests included), plus a bundle with
 CEF's framework and 5 helper apps.
@@ -93,6 +96,41 @@ Agent access, if wanted, is a fourth piece that has to sit in the app for
 the consent reason above: the native dialog, the per-page token proxy
 (`src/browser/proxy.rs`, `src/browser/agent.rs`, about 2,100 lines) and the
 provider that `agent-browser` calls. The rest stands without it.
+
+## Engine: Herdr shouldn't own Chromium
+
+The prototype embeds CEF because it was the fastest way to a page an agent
+can drive over CDP. Shipping it would make Herdr a Chromium vendor: macOS
+lets an app load code signed only by its own Apple team, so Herdr would sign,
+host and patch Chromium itself, and Chromium now ships security fixes about
+every two weeks.
+
+Making CEF an optional download doesn't change who owns it. A follow-up
+spike showed it works: a slim app with the browser code compiled in (about
+0.24 MB larger, gzip, and no CEF library linked) loaded CEF from
+`~/Library/Application Support` and rendered a page with every helper
+sandboxed. But it needs the engine re-signed under Herdr's team, hosted on
+Herdr's servers, and Herdr relaunched through a second app bundle, because
+Chromium's sandbox only lets helpers read inside the running app's bundle.
+We don't recommend it.
+
+Two directions keep Chromium out of Herdr entirely:
+
+- **The system web view:** WKWebView on macOS, WebView2 on Windows,
+  WebKitGTK on Linux. The OS vendor owns and patches the engine, and it
+  adds nothing to the app. WebView2 speaks CDP; on macOS and Linux agent
+  control needs a small translator from agent-browser's commands to the web
+  view's own calls (being prototyped now).
+- **A separate browser app** whose page Herdr shows in a block. It runs in
+  its own process, under its own signature and updates; Herdr never loads
+  Chromium. Herdr would need an "external surface" block (the app's frames
+  plus forwarded input) instead of a native view.
+
+Either way the core asks shrink to the two engine-neutral hooks above: a
+block that shows a view, and the overlay cover. The question for Can is
+which engine stance he'd accept, not whether Herdr ships Chromium.
+
+## The browser bar and the commands
 
 The pane header's browser bar (back, forward, reload, the address, zoom, a
 viewport button, DevTools) is a mod, `defaults/mods/pane/browser.js`: zero
