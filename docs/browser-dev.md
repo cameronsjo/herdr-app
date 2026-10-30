@@ -6,7 +6,7 @@ window. It's behind the Cargo feature `browser`, off by default; other
 builds show a placeholder where a browser block is.
 
 What the prototype is for, what it asks of the core, its measured size and
-signing, known gaps and a demo script: [browser-prototype.md](browser-prototype.md).
+signing, and its main gaps: [browser-prototype.md](browser-prototype.md).
 
 ## Build and run
 
@@ -18,8 +18,8 @@ just browser-dev     # the same, then runs it on a scratch home and its own core
 Both need `cmake` and `ninja` (`brew install cmake ninja`). CEF on macOS only
 starts from such a bundle, so `cargo run` can't show a page.
 
-`CEF_PATH` is where CEF's binary distribution (about 600 MB) is downloaded
-once and kept. It must be outside the repo; the recipes default to
+`CEF_PATH` is where CEF's binary distribution is downloaded once and kept
+(about 135 MB to download, about 470 MB once unpacked). It must be outside the repo; the recipes default to
 `~/.cache/herdr-app/cef`. A bare `cargo build --features browser` without it
 is refused: `build.rs` says why, and `.cargo/config.toml` points CEF's
 download at an address that doesn't resolve, so nothing lands in `target/`.
@@ -88,8 +88,9 @@ a new-window link.
   keys.json's `global` section (and the shown layout's) still go to Herdr,
   from the last keys.json that loaded. `send:` keys stay with the page;
   `app.hide` and friends hide the app as usual.
-- Browser ids (`b1`, `b2`, ...) are never reused while the app runs, so an id
-  you hold never names another page.
+- Herdr never gives out a browser id (`b1`, `b2`, ...) twice while the app
+  runs. A layout block can still open a page under any id, a closed
+  browser's included.
 - A popup or a `target="_blank"` link opens in the same pane.
 - No remote-debugging port is opened. `browser.devtools` opens CEF's own
   DevTools window.
@@ -244,7 +245,10 @@ shown):
 > attached, agent-browser's own stream server (a loopback websocket with no
 > token, in agent-browser's code, not Herdr's) lets any user on this
 > machine, and any page served from `localhost` or opened from a file in
-> any browser, watch the pane and click and type in it. Turning access off,
+> any browser, watch the pane and click and type in it. Every local Herdr
+> terminal points agent-browser at Herdr, so any agent-browser run there (a
+> project's test suite included) can drive a pane with access on;
+> `AGENT_BROWSER_PROVIDER=` opts a terminal out. Turning access off,
 > closing the browser, or quitting ends both. Use this browser only with
 > test accounts, never your own.
 
@@ -273,3 +277,20 @@ logged as `DEV SWITCH ON` at startup and on every use, and every agent
 header and the window's agent strip say "DEV SWITCH: the control socket can
 turn agent access on". Show the prototype on a bundle without it
 (`just browser-dev --release`).
+
+## Known gaps
+
+The main ones are in [browser-prototype.md](browser-prototype.md#known-gaps).
+Smaller ones:
+
+- **Takeover's first call fails.** When a second agent attaches to the same
+  page, the first agent's connection ends and the page reopens; the new
+  agent's first request gets `herdr: the page isn't there right now (opening
+  or reopening): try again`. A retry half a second later works.
+- **CEF logs "Timeout of new browser info response"** about 2 s after a
+  page fails to load (seen in two test runs' logs). Its effect was not
+  investigated.
+- **A frame of lag while resizing.** The view follows its block every frame;
+  GPUI has no layout-change event or hosted native view.
+- **`herdr-app shot` can't see pages.** It renders GPUI only, so a shot shows
+  the placeholder where a page is; a demo needs a screen recording.
