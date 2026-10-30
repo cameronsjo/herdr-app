@@ -58,15 +58,15 @@ impl Browsers {
             // focuses a page it just created, which must not move Herdr's focus
             // (sync_browser_keys then puts the keyboard back where it belongs).
             Event::Focused(browser) if view::clicked(&browser) => {
-                tracing::debug!("browser: the person clicked into {browser}");
+                tracing::debug!("browser: the person clicked into {browser}", browser = super::log_safe(&browser));
                 self.registry.focused(&browser, crate::model::now_ms());
                 Update { browser, focused: true, ..Update::default() }
             }
             Event::Focused(browser) => {
                 if self.wanted.as_ref().is_some_and(|w| w.as_deref() == Some(browser.as_str())) {
-                    tracing::debug!("browser: {browser} got focus (Herdr gave it the keyboard)");
+                    tracing::debug!("browser: {browser} got focus (Herdr gave it the keyboard)", browser = super::log_safe(&browser));
                 } else {
-                    tracing::debug!("browser: {browser} took focus on its own (not a click)");
+                    tracing::debug!("browser: {browser} took focus on its own (not a click)", browser = super::log_safe(&browser));
                 }
                 Update { browser, ..Update::default() }
             }
@@ -90,7 +90,7 @@ impl Browsers {
         for id in &changes.close {
             // Access on with no agent yet is logged off too.
             if proxy::close(id) {
-                tracing::info!("browser: agent access off browser={id} by={}", Source::Close.label());
+                tracing::info!("{}", super::access_line(false, id, Source::Close));
             }
             runtime::close(id);
             view::remove(id);
@@ -107,7 +107,7 @@ impl Browsers {
             let agent_profile = self.registry.get(&id).is_some_and(|e| e.agent_profile);
             match view::container(&id, window) {
                 Ok(parent) => runtime::open(&id, parent, url, agent_profile),
-                Err(e) => tracing::error!("browser: no view for {id}: {e:#}"),
+                Err(e) => tracing::error!("browser: no view for {id}: {e:#}", id = super::log_safe(&id)),
             }
         }
         view::install_monitor();
@@ -210,7 +210,7 @@ impl Browsers {
         if !on {
             proxy::revoke(browser);
         }
-        tracing::info!("browser: agent access {} browser={browser} by={}", if on { "on" } else { "off" }, from.label());
+        tracing::info!("{}", super::access_line(on, browser, from));
         Ok(())
     }
 
@@ -270,12 +270,16 @@ impl Browsers {
     /// The dialog's reply: access turns on only if `agent::turns_access_on`
     /// says so, for a browser still open on the agent profile at the site
     /// the dialog named. Ok(true): it is on now. Every refusal is logged.
+    /// The check reads the registry, which page events update through the
+    /// window's event channel; this runs as the dialog returns, before any
+    /// event from while it was open is applied, so a navigation during the
+    /// dialog isn't seen here (`docs/browser-dev.md` says so).
     pub fn answer(&mut self, ask: &super::Ask, reply: super::Reply) -> Result<bool, String> {
         self.asking = None;
         let b = &ask.browser;
         let unchanged = self.registry.get(b).is_some_and(|e| e.agent_profile && agent::site(&e.page.url) == ask.site);
         if let Err(why) = agent::turns_access_on(&reply, unchanged) {
-            tracing::info!("browser: agent access stays off browser={b}: {why}");
+            tracing::info!("browser: agent access stays off browser={}: {why}", super::log_safe(b));
             return Ok(false);
         }
         self.set_agent_access(b, true, Source::NativeConfirm)?;
@@ -297,7 +301,7 @@ impl Browsers {
             (None, Some(e)) if e.page.loading => (None, format!("Opening {}", e.page.url)),
             (None, Some(e)) => (Some(e.page.title.clone()).filter(|t| !t.is_empty()), e.page.url.clone()),
             (None, None) if self.registry.get(browser).is_some() => (None, format!("Browser {browser} shows in another block.")),
-            // An agent-profile block whose id Herdr didn't give out (`registry::blocks`).
+            // An agent-profile block whose id isn't shaped like Herdr's (`registry::blocks`).
             (None, None) if !registry::herdr_id(browser) => (None, "This browser doesn't open: an agent-profile browser needs an id Herdr gave out (b1, b2, …).".to_owned()),
             (None, None) => (None, format!("Opening {url}")),
         };

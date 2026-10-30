@@ -154,7 +154,7 @@ pub fn site(url: &str) -> String {
 }
 
 /// The dialog's title and text: the browser, its profile, and its site.
-/// Only a Herdr-issued id (`b1`, `b2`, …; `registry::herdr_id`) is named:
+/// Only an id shaped like Herdr's (`b1`, `b2`, …; `registry::herdr_id`) is named:
 /// an agent writes layout blocks, and the dialog must carry no sentence of
 /// its choosing (fix round 8).
 pub fn consent_text(browser: &str, site: &str) -> Result<(String, String), &'static str> {
@@ -870,7 +870,7 @@ mod tests {
     }
 
     /// Fix round 8: a layout block's browser id is agent-written text. The
-    /// dialog names only ids Herdr gives out, so an agent can't put a
+    /// dialog names only ids shaped like Herdr's, so an agent can't put a
     /// sentence of its own into the one surface consent rests on.
     #[test]
     fn the_dialog_names_only_an_id_herdr_gave_out() {

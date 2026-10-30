@@ -217,6 +217,14 @@ impl Source {
     }
 }
 
+/// The audit log line for an agent access change. A browser id can be
+/// agent text (a layout block's `browser`), so it is escaped (`log_safe`):
+/// an id can't add a line of its own.
+#[cfg_attr(not(all(target_os = "macos", feature = "browser")), allow(dead_code))]
+pub fn access_line(on: bool, browser: &str, by: Source) -> String {
+    format!("browser: agent access {} browser={} by={}", if on { "on" } else { "off" }, log_safe(browser), by.label())
+}
+
 /// The access button in an agent browser's header: its label and what a
 /// click asks for, both from the state it was painted with. The click acts
 /// on what the person saw: a "Stop agent" still on screen after a change it
@@ -475,7 +483,7 @@ pub const AVAILABLE: bool = cfg!(all(target_os = "macos", feature = "browser"));
 
 #[cfg(test)]
 mod tests {
-    use super::{Hand, Rect, Responder, covered, hand, keyboard_page, log_safe, may_focus, public_title, public_url};
+    use super::{Hand, Rect, Responder, Source, access_line, covered, hand, keyboard_page, log_safe, may_focus, public_title, public_url};
 
     #[test]
     fn public_urls_have_no_userinfo_query_or_fragment() {
@@ -540,6 +548,16 @@ mod tests {
             assert!(!out.contains(ch) && out.starts_with("a\\u{"), "{ch:?} → {out}");
         }
         assert_eq!(log_safe("bücher.localhost"), "bücher.localhost");
+    }
+
+    #[test]
+    fn an_agent_written_browser_id_cannot_forge_an_access_line() {
+        // A person-profile layout block may carry any id; its "off" is logged.
+        let forged = "x by=close\nbrowser: agent access on browser=b1 by=native confirm";
+        let line = access_line(false, forged, Source::Socket);
+        assert!(!line.contains('\n'), "{line}");
+        assert!(line.ends_with(" by=socket"), "{line}");
+        assert_eq!(access_line(true, "b1", Source::NativeConfirm), "browser: agent access on browser=b1 by=native confirm");
     }
 
     fn r(x: f32, y: f32, w: f32, h: f32) -> Rect {

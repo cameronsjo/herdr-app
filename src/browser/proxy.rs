@@ -166,7 +166,7 @@ pub fn attach(browser: &str) -> Result<String, String> {
     if h.end_conn(browser) {
         drop(h);
         runtime::wake();
-        tracing::info!("browser: agent session for {browser} replaced by a new attach");
+        tracing::info!("browser: agent session for {browser} replaced by a new attach", browser = super::log_safe(&browser));
     }
     Ok(format!("ws://127.0.0.1:{port}/{token}"))
 }
@@ -219,7 +219,7 @@ pub fn from_page(browser: &str, bytes: &[u8]) {
         h.end_agent(browser);
         drop(h);
         runtime::wake();
-        tracing::warn!("browser: the agent for {browser} stopped reading; its connection and token ended");
+        tracing::warn!("browser: the agent for {browser} stopped reading; its connection and token ended", browser = super::log_safe(&browser));
     }
 }
 
@@ -390,7 +390,7 @@ fn serve(stream: TcpStream, port: u16, slot: Slot<'static>) {
     let Ok(mut ws) = tungstenite::accept_with_config(stream, Some(config)) else { return };
     ending.open = true;
     let _ = ws.get_mut().set_read_timeout(Some(Duration::from_millis(15)));
-    tracing::info!("browser: an agent connected to {browser}");
+    tracing::info!("browser: an agent connected to {browser}", browser = super::log_safe(&browser));
     'conn: loop {
         loop {
             match rx.try_recv() {
@@ -453,7 +453,7 @@ fn from_agent(browser: &str, conn: u64, text: &str) -> Option<String> {
         FromAgent::Forward { id, message } => {
             // Method names only (the recon log): never params, never the token.
             if let Some(m) = &method {
-                tracing::debug!("browser: cdp {browser} forward {m}");
+                tracing::debug!("browser: cdp {browser} forward {m}", browser = super::log_safe(&browser));
             }
             h.jobs.push_back(Job::ToPage { browser: browser.to_owned(), conn, id, message });
             drop(h);
@@ -462,7 +462,7 @@ fn from_agent(browser: &str, conn: u64, text: &str) -> Option<String> {
         }
         FromAgent::Reply(reply) => {
             if let Some(m) = &method {
-                tracing::debug!("browser: cdp {browser} refused {m}");
+                tracing::debug!("browser: cdp {browser} refused {m}", browser = super::log_safe(&browser));
             }
             Some(reply)
         }

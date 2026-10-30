@@ -1756,7 +1756,7 @@ impl AppWindow {
         if let Ok(v) = &r
             && !check
         {
-            tracing::info!("browser: agent attach browser={} terminal={terminal} (claimed, unverified) selection={}", v["browser"].as_str().unwrap_or("?"), v["selection"].as_str().unwrap_or("?"));
+            tracing::info!("browser: agent attach browser={} terminal={terminal} (claimed, unverified) selection={}", crate::browser::log_safe(v["browser"].as_str().unwrap_or("?")), v["selection"].as_str().unwrap_or("?"));
         }
         r
     }
@@ -3284,9 +3284,10 @@ impl AppWindow {
                 let r = self.open_browser(Self::arg(a, "url").unwrap_or_default(), Self::arg(a, "place").unwrap_or("right"), Self::owned(a, "pane"), Self::arg(a, "profile"));
                 self.answer(r);
             }
-            // Off from anywhere; on only from Herdr's own pane button (an agent can
-            // reach the socket and write mods). `person` here means a mod's run(),
-            // a key or a menu, which agents can also write.
+            // Off from anywhere; on only from the native dialog's Allow
+            // (`ask_agent_access`; the pane button only opens it), never from
+            // here: an agent can reach the socket and write mods. `person` here
+            // means a mod's run(), a key or a menu, which agents can also write.
             "browser.agent_access" => {
                 let b = Self::arg(a, "browser").unwrap_or_default().to_owned();
                 let on = a.get("on").and_then(Value::as_bool).unwrap_or(false);

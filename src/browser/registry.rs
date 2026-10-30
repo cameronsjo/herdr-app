@@ -205,8 +205,9 @@ impl Registry {
 
 /// Every browser block: the tabs' panes (with their space), then the shown
 /// layout's own blocks (on every space, so none). An agent-profile block
-/// whose id isn't one Herdr gives out (`herdr_id`) is left out, so it never
-/// opens and never reaches the consent dialog.
+/// whose id isn't shaped like Herdr's (`herdr_id`) is left out, so it never
+/// opens and never reaches the consent dialog. Only the shape is checked:
+/// a block may use an id Herdr never gave out.
 pub fn blocks(model: &Model, chrome: &Node) -> Vec<Block> {
     let mut out = Vec::new();
     for space in &model.spaces {
@@ -230,7 +231,7 @@ pub fn blocks(model: &Model, chrome: &Node) -> Vec<Block> {
             out.push(Block { browser: browser.clone(), url: url.clone(), agent_profile: is_agent(profile.as_deref()), node: n.id.clone(), space: None, pane: None });
         }
     }
-    // An agent-profile block with an id Herdr didn't give out never opens.
+    // An agent-profile block with an id not shaped like Herdr's never opens.
     out.retain(may_open);
     out
 }
