@@ -15,7 +15,7 @@
 
 use serde_json::{Map, Value, json};
 
-pub use super::{Source, not_in_herdr, without_query};
+pub use super::{Source, not_in_herdr, public_url};
 use std::collections::HashMap;
 
 pub const PROTOCOL: &str = "agent-browser.plugin.v1";
@@ -47,17 +47,11 @@ pub fn allowed_url(url: &str) -> bool {
 }
 
 /// What the logs may say about a url: scheme, host and path (no userinfo,
-/// query or fragment, where tokens and codes ride), at most 80 characters.
+/// query or fragment, where tokens and codes ride), with control characters
+/// escaped (`super::log_safe`: a url an agent sends can't forge a log line),
+/// at most 80 characters.
 pub fn loggable(url: &str) -> String {
-    let url = without_query(url);
-    let url = match url.split_once("://") {
-        Some((scheme, rest)) => {
-            let (authority, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
-            let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
-            format!("{scheme}://{host}{path}")
-        }
-        None => url,
-    };
+    let url = super::log_safe(&public_url(url));
     if url.len() <= 80 { url } else { format!("{}…", &url[..url.floor_char_boundary(77)]) }
 }
 
@@ -300,6 +294,12 @@ pub fn check_upgrade(req: &Upgrade, port: u16, tokens: &Tokens, live: impl Fn(&s
 /// reaches the page. The same list applies inside child sessions.
 pub fn allowed_method(method: &str) -> bool {
     let Some((domain, name)) = method.split_once('.') else { return false };
+    // `Domain.name`, letters and digits only: a name that differs from a
+    // refused one by a space, a newline or another dot is refused too.
+    let word = |w: &str| !w.is_empty() && w.chars().all(|c| c.is_ascii_alphanumeric());
+    if !word(domain) || !word(name) {
+        return false;
+    }
     match domain {
         "Accessibility" | "DOMSnapshot" | "CSS" | "Overlay" | "Log" | "Inspector" | "Performance" | "PerformanceTimeline" | "Animation"
         | "LayerTree" | "Schema" | "WebMCP" => true,
@@ -364,7 +364,13 @@ impl Link {
             return FromAgent::Reply(error(&Value::Null, None, -32700, "herdr: not a JSON object"));
         };
         let id = msg.get("id").cloned().unwrap_or(Value::Null);
-        let session = msg.get("sessionId").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned);
+        // A session id is a string or absent. Anything else is refused here,
+        // not left to Chromium's parser to read as the page's own session.
+        let session = match msg.get("sessionId") {
+            None => None,
+            Some(Value::String(s)) => Some(s.clone()).filter(|s| !s.is_empty()),
+            Some(_) => return FromAgent::Reply(error(&id, None, -32600, "herdr: sessionId must be a string")),
+        };
         let refuse = |m: &str| FromAgent::Reply(error(&id, session.as_deref(), -32601, m));
         let Some(method) = msg.get("method").and_then(Value::as_str).map(str::to_owned) else {
             return refuse("herdr: a request needs an id and a method");
@@ -651,8 +657,9 @@ mod tests {
         assert_eq!(loggable("https://user:pw@example.com/a/b?code=SECRET#frag"), "https://example.com/a/b");
         assert_eq!(loggable("http://127.0.0.1:8765/x.html"), "http://127.0.0.1:8765/x.html");
         assert_eq!(loggable("about:blank"), "about:blank");
-        assert_eq!(without_query("https://a/b?token=1#x"), "https://a/b");
-        assert_eq!(without_query("https://a/b"), "https://a/b");
+        assert_eq!(loggable("http://a/x\nFORGED-LINE browser: agent access off"), "http://a/x\\nFORGED-LINE browser: agent access off");
+        assert_eq!(public_url("https://a/b?token=1#x"), "https://a/b");
+        assert_eq!(public_url("https://a/b"), "https://a/b");
     }
 
     #[test]
@@ -887,6 +894,7 @@ mod tests {
             "Page.addScriptToEvaluateOnNewDocument", "Page.setDownloadBehavior", "Runtime.addBinding", "Fetch.enable",
             "DOMStorage.getDOMStorageItems", "IndexedDB.requestData", "CacheStorage.requestEntries", "ServiceWorker.enable",
             "Tracing.start", "Tethering.bind", "Security.setIgnoreCertificateErrors", "Debugger.enable", "IO.read", "Nope.nothing", "Page",
+            "Runtime.addBinding ", "Runtime.evaluate\nFORGED x", "Runtime.", ".evaluate", "Runtime.evaluate.x", "Accessibility.enable\u{0}",
         ] {
             let r = send(&mut link, &mut next, json!({ "id": 7, "method": method }));
             assert_eq!(refused(&r), Some(format!("herdr: {method} is not allowed for agents")), "{method}");
@@ -1070,6 +1078,23 @@ mod tests {
         let r = send(&mut link, &mut next, json!({ "id": 1, "method": "Target.setAutoAttach", "params": null }));
         let FromAgent::Forward { message, .. } = r else { panic!("null params refused: {:?}", refused(&r)) };
         assert_eq!(serde_json::from_str::<Value>(&message).unwrap()["params"], json!({ "flatten": true }));
+    }
+
+    #[test]
+    fn a_session_id_that_is_not_a_string_is_refused_not_forwarded() {
+        for session in [json!(5), json!({}), json!(null), json!(["s1"]), json!(true)] {
+            let mut link = Link::default();
+            let mut next = 0;
+            let r = send(&mut link, &mut next, json!({ "id": 3, "method": "Runtime.evaluate", "params": {}, "sessionId": session }));
+            let FromAgent::Reply(text) = r else { panic!("sessionId {session} was forwarded") };
+            let out: Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(out, json!({ "id": 3, "error": { "code": -32600, "message": "herdr: sessionId must be a string" } }));
+            assert!(link.pending.is_empty(), "nothing is in flight");
+        }
+        // Absent: the page's own session, forwarded.
+        let mut link = Link::default();
+        let mut next = 0;
+        assert!(matches!(send(&mut link, &mut next, json!({ "id": 4, "method": "Runtime.evaluate", "params": {} })), FromAgent::Forward { .. }));
     }
 
     // ---- the provider (agent-browser's plugin side)

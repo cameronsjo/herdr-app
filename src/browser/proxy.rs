@@ -452,13 +452,17 @@ fn serve(stream: TcpStream, port: u16, slot: Slot<'static>) {
 #[cfg(test)]
 const TEST_PANIC: &str = "herdr-test: panic here";
 
+/// The method an agent message names, as the debug log shows it: the
+/// agent's text, escaped (`super::log_safe`), so it can't forge a log line.
+fn logged_method(text: &str) -> Option<String> {
+    serde_json::from_str::<Value>(text).ok()?.get("method")?.as_str().map(super::log_safe)
+}
+
 /// One agent message: queued for the page, or an answer straight back.
 fn from_agent(browser: &str, conn: u64, text: &str) -> Option<String> {
     #[cfg(test)]
     assert!(text != TEST_PANIC, "test: a panic on the agent connection's thread");
-    let method = tracing::enabled!(tracing::Level::DEBUG)
-        .then(|| serde_json::from_str::<Value>(text).ok()?.get("method")?.as_str().map(str::to_owned))
-        .flatten();
+    let method = tracing::enabled!(tracing::Level::DEBUG).then(|| logged_method(text)).flatten();
     let mut h = hub();
     let url = h.urls.get(browser).cloned().unwrap_or_default();
     let mut next = h.next_id;
@@ -533,6 +537,15 @@ mod tests {
             from_page(b, &event(512));
         }
         std::thread::sleep(Duration::from_millis(300));
+    }
+
+    #[test]
+    fn an_agents_method_name_cannot_forge_a_log_line() {
+        let forged = serde_json::json!({ "id": 1, "method": "Evil.x\nFORGED-LINE browser: agent access off browser=b1 by=pane control\r\u{202e}" }).to_string();
+        let logged = logged_method(&forged).unwrap();
+        assert!(!logged.contains(['\n', '\r', '\u{202e}']), "{logged:?}");
+        assert_eq!(logged, r"Evil.x\nFORGED-LINE browser: agent access off browser=b1 by=pane control\r\u{202e}");
+        assert_eq!(logged_method(r#"{"id":1,"method":"Page.navigate"}"#).as_deref(), Some("Page.navigate"));
     }
 
     #[test]

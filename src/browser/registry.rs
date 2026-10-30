@@ -62,12 +62,17 @@ pub struct Entry {
 
 impl Entry {
     /// One browser as mods and `herdr-app ls` see it.
-    /// The url keeps its query and fragment only while agent access is on
-    /// (codes and magic links in a url stay out of `herdr-app ls` otherwise).
+    /// The url keeps its userinfo, query and fragment only while agent access
+    /// is on (codes and magic links in a url stay out of `herdr-app ls`
+    /// otherwise), and so does a title that is the url (a page with none).
     pub fn json(&self, focused: bool) -> Value {
-        let url = if self.agent_access { self.page.url.clone() } else { super::agent::without_query(&self.page.url) };
+        let (url, title) = if self.agent_access {
+            (self.page.url.clone(), self.page.title.clone())
+        } else {
+            (super::public_url(&self.page.url), super::public_title(&self.page.title, &self.page.url))
+        };
         json!({
-            "browser": self.browser, "url": url, "title": self.page.title, "profile": if self.agent_profile { "agent" } else { "person" },
+            "browser": self.browser, "url": url, "title": title, "profile": if self.agent_profile { "agent" } else { "person" },
             "last_agent": self.last_agent,
             "loading": self.page.loading, "can_go_back": self.page.can_go_back, "can_go_forward": self.page.can_go_forward,
             "space": self.space, "pane": self.pane, "agent_access": self.agent_access, "focused": focused,
@@ -276,6 +281,23 @@ mod tests {
 
     fn block(browser: &str, url: &str, node: &str, space: Option<&str>) -> Block {
         Block { browser: browser.into(), url: url.into(), node: node.into(), space: space.map(Into::into), pane: space.map(|_| node.into()), agent_profile: false }
+    }
+
+    #[test]
+    fn ls_shows_an_access_off_page_with_no_title_without_its_query() {
+        let mut r = Registry::default();
+        r.reconcile(&[block("b2", "http://127.0.0.1:18766/", "p2", Some("sp1"))]);
+        // A page with no <title>: Chromium titles it with its url, scheme dropped.
+        let url = "http://me:pw@127.0.0.1:18766/notitle.html?code=SECRETQ2#fragSECRET";
+        r.page("b2", Page { url: url.into(), title: "127.0.0.1:18766/notitle.html?code=SECRETQ2".into(), ..Page::default() });
+        let off = r.get("b2").unwrap().json(false);
+        assert_eq!(off["url"], "http://127.0.0.1:18766/notitle.html");
+        assert_eq!(off["title"], "127.0.0.1:18766/notitle.html");
+        assert!(!off.to_string().contains("SECRET") && !off.to_string().contains("pw@"), "{off}");
+        // Access on: the agent's page, as it is.
+        r.set_access("b2", true);
+        let on = r.get("b2").unwrap().json(false);
+        assert_eq!((on["url"].as_str(), on["title"].as_str()), (Some(url), Some("127.0.0.1:18766/notitle.html?code=SECRETQ2")));
     }
 
     #[test]

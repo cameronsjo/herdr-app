@@ -247,16 +247,26 @@ impl Browsers {
     }
 
     /// Goes inside an overlay (absolute, its full size): reports its bounds
-    /// while painting, so a page under it hides (`label` names it in the log).
+    /// while the frame is prepared, so a page under it hides (`label` names
+    /// it in the log) and an agent header under it isn't drawn
+    /// (`agent_header`, prepared after every cover).
     pub fn cover(&self, label: String) -> Option<AnyElement> {
-        Some(canvas(|_, _, _| {}, move |bounds, _, _, _| view::cover(&label, bounds)).absolute().size_full().into_any_element())
+        Some(canvas(move |bounds, _, _| view::cover(&label, bounds), |_, _, _, _| {}).absolute().size_full().into_any_element())
+    }
+
+    /// An agent browser's header, in Herdr's top layer (`super::layer`):
+    /// drawn after everything a mod or layout draws, and not at all while
+    /// one of Herdr's overlays overlaps any part of it.
+    pub fn agent_header(&self, node: &str, header: AnyElement) -> AnyElement {
+        let node = node.to_owned();
+        super::layer::top(header, move |bounds| view::agent_header(&node, bounds))
     }
 
     /// Goes inside an agent access button (absolute, its full size): reports
-    /// its bounds while painting, for its input protection.
+    /// its bounds as it's drawn, for its input protection.
     pub fn access_button(&self, node: &str, browser: &str, sets: bool) -> Option<AnyElement> {
         let (node, browser) = (node.to_owned(), browser.to_owned());
-        Some(canvas(|_, _, _| {}, move |bounds, _, _, _| view::access_button(&node, &browser, sets, bounds)).absolute().size_full().into_any_element())
+        Some(canvas(move |bounds, _, _| view::access_button(&node, &browser, sets, bounds), |_, _, _, _| {}).absolute().size_full().into_any_element())
     }
 
     /// Whether a click on `node`'s access button counts: "Allow agent" only
@@ -306,6 +316,6 @@ impl Browsers {
 
     /// Painted after everything else: hides the pages whose block wasn't painted this frame.
     pub fn frame_end(&self) -> Option<AnyElement> {
-        Some(canvas(|_, _, _| {}, |_, _, window, _| view::end_frame(window)).absolute().size_0().into_any_element())
+        Some(canvas(|_, _, _| {}, |_, _, window, cx| view::end_frame(window, cx.has_active_drag())).absolute().size_0().into_any_element())
     }
 }

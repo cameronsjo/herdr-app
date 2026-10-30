@@ -112,17 +112,30 @@ person allows it for that pane:
    (`<app home>/browser/agent-profile`); only such a browser can be driven.
    Its header says "Test profile: don't sign into real accounts." Downloads
    are refused in it.
-2. Click **Allow agent** in that header. It takes a click only after it
-   has shown for half a second with that label, in the same place, for the
-   same browser, with no Herdr overlay over it and the window active, and
-   never the second click of a double click. So a double click on **Stop
-   agent** can't turn access back on, and an agent can't slide the button
-   under the pointer (`layout.resize`, `pane.swap`, `layout.set`) or swap
-   in another browser's header just before a click. "Over it" counts only
-   the overlays Herdr registers (dialogs, popups, toasts, floats, the pane
-   grip, the update pill). A pane frame's `reveal: "hover"` header is drawn
-   beside a browser pane, never over it, so it can't hide the button while
-   passing the click through.
+2. Click **Allow agent** in that header. Herdr draws the header in its own
+   top layer, after everything a layout or a mod draws (a mod's popups,
+   dialogs, toasts and tooltips included), and the header takes every
+   click on it. So no mod or layout content can sit over the button, and
+   none gets or passes on a click aimed at it. Only Herdr's own overlays
+   are drawn above it (dialogs, popups, menus, the palette, toasts,
+   floats, the pane grip and drop preview, the update pill; a mod's
+   overlay opened through Herdr is one of these), and while one overlaps
+   any part of the header the header isn't drawn at all. The button takes
+   a click only after it has shown for half a second with that label, in
+   the same place, for the same browser, with nothing over its header,
+   the window active and no drag going on, and never the second click of
+   a double click. So a double click on **Stop agent** can't turn access
+   back on, and an agent can't slide the button under the pointer
+   (`layout.resize`, `pane.swap`, `layout.set`), swap in another
+   browser's header, or put a decoy over it just before a click.
+   The property, precisely: a click turns access on only if Herdr drew
+   the button as the topmost thing at that point in every frame of the
+   last 500 ms, unmoved, with the same label and browser, and with no
+   Herdr overlay over any part of its header. What GPUI draws after the
+   top layer is its own tooltips (no mod's script can make one), prompts
+   (none in Herdr) and a drag's preview (a drag blocks the click). A
+   page's native view is above all of Herdr's drawing; a click on a page
+   goes to that page, never to a button under it.
    Nothing else turns agent access on:
    `herdr-app do browser.agent_access --on true` and a mod's `run()` are
    refused, because an agent can reach both. Turning it off works from
@@ -208,7 +221,8 @@ shown):
 > type, and read what the page shows. Any process running as you can also
 > read this profile's cookies from disk, because the prototype encrypts
 > them with Chromium's public test key (`--use-mock-keychain`). It can also
-> cover or recolor the access marker (a mod overlay, a theme edit), and if
+> hide or recolor the access marker (a mod's overlay over it, a theme
+> edit; the overlay also keeps **Allow agent** from taking a click), and if
 > your terminal app has macOS Accessibility permission, click **Allow
 > agent** itself. Herdr's own agent connection needs a 256-bit token and
 > accepts only loopback connections without an `Origin` header. But while

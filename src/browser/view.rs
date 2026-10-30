@@ -54,6 +54,8 @@ thread_local! {
     static WANTED: RefCell<Option<Option<String>>> = const { RefCell::new(None) };
     /// The agent access buttons' input protection (`super::AllowGuard`).
     static ALLOW: RefCell<AllowGuard> = RefCell::new(AllowGuard::default());
+    /// The agent headers not drawn last time, by node: the overlay over each (for the log).
+    static HEADERS_UNDER: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
 }
 
 /// How long after a press in a page CEF's "got focus" still counts as that click.
@@ -99,15 +101,38 @@ fn rect(bounds: Bounds<Pixels>) -> Rect {
     }
 }
 
-/// An overlay painted this frame over these bounds (window points, top
-/// left): a page it overlaps hides at the frame's end (`end_frame`).
+/// An overlay drawn this frame over these bounds (window points, top
+/// left): a page it overlaps hides at the frame's end (`end_frame`), and an
+/// agent header it overlaps isn't drawn (`agent_header`).
 pub fn cover(label: &str, bounds: Bounds<Pixels>) {
     COVERS.with_borrow_mut(|c| c.push((label.to_owned(), rect(bounds))));
 }
 
-/// An agent access button painted this frame over these bounds, in block
+/// Block `node`'s agent header, laid out this frame over these bounds, as
+/// the top layer prepares it (after every cover this frame): whether it may
+/// draw. Not while any of Herdr's overlays overlaps any part of it.
+pub fn agent_header(node: &str, bounds: Bounds<Pixels>) -> bool {
+    let at = rect(bounds);
+    ALLOW.with_borrow_mut(|g| g.header(node, at));
+    let under = COVERS.with_borrow(|c| super::over(&at, c).map(str::to_owned));
+    HEADERS_UNDER.with_borrow_mut(|h| {
+        if h.get(node) != under.as_ref() {
+            match &under {
+                Some(label) => tracing::debug!("browser: {node}'s agent header is under overlay {label}; not drawn, and Allow agent waits"),
+                None => tracing::debug!("browser: {node}'s agent header is drawn again"),
+            }
+        }
+        match &under {
+            Some(label) => h.insert(node.to_owned(), label.clone()),
+            None => h.remove(node),
+        };
+    });
+    under.is_none()
+}
+
+/// An agent access button drawn this frame over these bounds, in block
 /// `node`, for `browser`; `sets`: what a click on it sets. `end_frame`
-/// checks it against the overlays painted after it and last frame's place.
+/// checks it against this frame's overlays and last frame's place.
 pub fn access_button(node: &str, browser: &str, sets: bool, bounds: Bounds<Pixels>) {
     ALLOW.with_borrow_mut(|g| g.painted(node, browser, sets, rect(bounds)));
 }
@@ -165,9 +190,10 @@ pub fn place(id: &str, bounds: Bounds<Pixels>, window: &Window) {
 /// other placed view shows. A page that had the keyboard and hides hands it
 /// to Herdr now (typing never goes into a hidden page); when the set of
 /// covered pages changes, the window decides again who has the keyboard.
-pub fn end_frame(window: &Window) {
+pub fn end_frame(window: &Window, dragging: bool) {
     let covers = COVERS.with_borrow_mut(std::mem::take);
-    ALLOW.with_borrow_mut(|g| g.end_frame(&covers, window.is_window_active(), Instant::now()));
+    // A drag's preview is drawn after every layer: no click counts meanwhile.
+    ALLOW.with_borrow_mut(|g| g.end_frame(&covers, window.is_window_active() && !dragging, Instant::now()));
     let holder = match responder(window) {
         Responder::Page(id) => Some(id),
         _ => None,
@@ -340,11 +366,11 @@ pub fn install_monitor() {
             Some(action) => {
                 match keys::native(&action) {
                     Some(native) => {
-                        tracing::info!("browser: a page had the keyboard; {action} goes to macOS");
+                        tracing::info!("browser: a page had the keyboard; {} goes to macOS", super::log_safe(&action));
                         run_native(native);
                     }
                     None => {
-                        tracing::info!("browser: a page had the keyboard; {action} goes to Herdr");
+                        tracing::info!("browser: a page had the keyboard; {} goes to Herdr", super::log_safe(&action));
                         crate::mods::request(crate::mods::Request::Run { name: action, args: serde_json::Value::Null });
                     }
                 }

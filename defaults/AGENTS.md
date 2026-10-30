@@ -547,6 +547,7 @@ The main ones:
   pane header's "Allow agent". `browser.agent_access {browser, on: false}` turns
   that off; nothing but the person's click turns it on (not `run()`, not the socket;
   a `dev-agent-access` test build, which says so in the pane, also takes the socket).
+  Herdr draws that header above anything a mod draws; it takes every click on it.
 - Agents: `agent.next`, `agent.prev`, `agent.focus {terminal}`.
 - Layout: `layout.switch {name?}`, `layout.toggle {id}`, `layout.show {id}`, `layout.hide {id}`,
   `layout.resize {id, px | weight}`, `layout.select {stack, child}`, `layout.set {layout}`

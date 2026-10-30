@@ -12,6 +12,8 @@ pub mod agent;
 #[cfg(any(test, all(target_os = "macos", feature = "browser")))]
 pub mod keys;
 #[cfg(any(test, all(target_os = "macos", feature = "browser")))]
+pub mod layer;
+#[cfg(any(test, all(target_os = "macos", feature = "browser")))]
 pub mod registry;
 
 #[cfg(all(target_os = "macos", feature = "browser"))]
@@ -186,7 +188,11 @@ impl Source {
             Source::PaneControl => "pane control",
             Source::Socket => "socket",
             Source::Mod => "mod or key",
+            #[cfg(all(debug_assertions, feature = "dev-agent-access"))]
             Source::DevSwitch => "socket (dev switch, dev-agent-access build)",
+            // Never set in builds without the dev feature.
+            #[cfg(not(all(debug_assertions, feature = "dev-agent-access")))]
+            Source::DevSwitch => "socket",
             Source::Close => "close",
             Source::Quit => "quit",
         }
@@ -211,26 +217,43 @@ pub fn access_button(shown_on: bool) -> (&'static str, bool) {
 pub const ALLOW_AFTER: std::time::Duration = std::time::Duration::from_millis(500);
 
 #[cfg(any(test, all(target_os = "macos", feature = "browser")))]
+/// The first of Herdr's covers (overlays painted this frame) that overlaps
+/// any part of `target`: an agent browser's header, or its button. A header
+/// with one over it isn't drawn (`layer::top`), and its "Allow agent" doesn't
+/// count as shown (`AllowGuard`).
+pub fn over<'a>(target: &Rect, covers: &'a [(String, Rect)]) -> Option<&'a str> {
+    covers.iter().find(|(_, c)| c.overlaps(target)).map(|(label, _)| label.as_str())
+}
+
+#[cfg(any(test, all(target_os = "macos", feature = "browser")))]
 /// Input protection for the access buttons, as Chromium's
 /// `InputEventActivationProtector` does for its prompts. "Allow agent" takes
 /// a click only after `ALLOW_AFTER` on screen unchanged (same label, same
-/// place, same browser in the block, no overlay over it, window active), and
-/// never a second click of a double click. So neither a double click on
-/// "Stop agent" nor a click aimed at something that changed under the
-/// pointer turns access on: an overlay that closed on the first click, a
-/// socket `off` just before the person clicked "Stop agent", a window
-/// activated by the click, or a button an agent slid under the pointer
-/// (`layout.resize`, `pane.swap`, `pane.zoom`, `layout.set`) or swapped for
-/// another browser's. "Stop agent" takes every click at once. Keyed by the
-/// block (node) the button is in. Only overlays Herdr registers as covers
-/// (`Browsers::cover`) count as "over it"; anything else drawn over the
-/// agent header must not exist (a pane frame's hover header is drawn beside
-/// a browser pane, never over it).
+/// place, same browser in the block, nothing over any part of its header,
+/// the window active and no drag going on), and never a second click of a
+/// double click. So neither a double click on "Stop agent" nor a click aimed
+/// at something that changed under the pointer turns access on: an overlay
+/// that closed on the first click, a socket `off` just before the person
+/// clicked "Stop agent", a window activated by the click, or a button an
+/// agent slid under the pointer (`layout.resize`, `pane.swap`, `pane.zoom`,
+/// `layout.set`) or swapped for another browser's. "Stop agent" takes every
+/// click at once. Keyed by the block (node) the button is in.
+///
+/// What can be over the header: the header is drawn in Herdr's top layer
+/// (`layer::top`), after every element and every deferred draw a mod can
+/// make, and occludes, so mod and layout content is always under it and
+/// gets none of its clicks. Only Herdr's own overlays (`Browsers::cover`:
+/// palette, dialogs, popups, menus, toasts, floats, the drag grip and drop
+/// preview, the update pill) are drawn above it; where one overlaps any part
+/// of the header, the header isn't drawn and its button starts its wait
+/// again (`over`).
 #[derive(Default)]
 pub struct AllowGuard {
     shown: std::collections::HashMap<String, Shown>,
     /// The buttons painted this frame: node, browser, what a click sets, bounds.
     painted: Vec<(String, String, bool, Rect)>,
+    /// The headers laid out this frame, by node (drawn or not).
+    headers: std::collections::HashMap<String, Rect>,
 }
 
 #[cfg(any(test, all(target_os = "macos", feature = "browser")))]
@@ -241,7 +264,7 @@ struct Shown {
     sets: bool,
     /// Where it painted (window points).
     at: Rect,
-    /// Under an overlay, or the window inactive, this frame.
+    /// Something over its header, the window inactive, or a drag going on, this frame.
     covered: bool,
     /// When it started to show as it does now.
     since: std::time::Instant,
@@ -254,15 +277,23 @@ impl AllowGuard {
         self.painted.push((node.to_owned(), browser.to_owned(), sets, at));
     }
 
-    /// The frame's end, with the overlays painted in it. A button that
-    /// changed what it does, moved, now belongs to another browser, is
-    /// covered, has just come out from under a cover, or first shows now,
+    /// Block `node`'s header this frame (window points), the button's whole bar.
+    pub fn header(&mut self, node: &str, at: Rect) {
+        self.headers.insert(node.to_owned(), at);
+    }
+
+    /// The frame's end, with the overlays painted in it. `ready`: the window
+    /// is active and no drag is going on. A button that changed what it does,
+    /// moved, now belongs to another browser, has anything over any part of
+    /// its header, has just come out from under one, or first shows now,
     /// starts its wait again. One not painted in this frame is forgotten (it
     /// starts again when it comes back).
-    pub fn end_frame(&mut self, covers: &[(String, Rect)], window_active: bool, now: std::time::Instant) {
+    pub fn end_frame(&mut self, covers: &[(String, Rect)], ready: bool, now: std::time::Instant) {
         let mut shown = std::collections::HashMap::new();
+        let headers = std::mem::take(&mut self.headers);
         for (node, browser, sets, at) in self.painted.drain(..) {
-            let covered = !window_active || covers.iter().any(|(_, c)| c.overlaps(&at));
+            let header = headers.get(&node).copied().unwrap_or(at);
+            let covered = !ready || over(&header, covers).is_some() || over(&at, covers).is_some();
             let since = match self.shown.get(&node) {
                 Some(s) if s.sets == sets && s.browser == browser && same_place(&s.at, &at) && !s.covered && !covered => s.since,
                 _ => now,
@@ -291,11 +322,18 @@ fn same_place(a: &Rect, b: &Rect) -> bool {
 }
 
 #[cfg(all(debug_assertions, feature = "dev-agent-access"))]
-static DEV_SWITCH:std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static DEV_SWITCH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// What every agent header and the window's agent strip say while the dev
-/// switch is on: the person's click is no longer the only way in.
-pub const DEV_SWITCH_NOTE: &str = "DEV SWITCH: the control socket can turn agent access on";
+/// switch is on: the person's click is no longer the only way in. Builds
+/// without the dev feature carry no such text.
+pub fn dev_switch_note() -> Option<&'static str> {
+    #[cfg(all(debug_assertions, feature = "dev-agent-access"))]
+    if dev_switch() {
+        return Some("DEV SWITCH: the control socket can turn agent access on");
+    }
+    None
+}
 
 /// Debug builds with the `dev-agent-access` feature only:
 /// `HERDR_DEV_AGENT_ACCESS=1` in the app's own environment at launch lets
@@ -323,12 +361,70 @@ pub fn dev_switch() -> bool {
     false
 }
 
-/// The url without its query and fragment, wherever a url leaves the app
-/// for a browser agents can't drive (`herdr-app ls`, mods' `browsers()`, the
-/// status of a block whose browser isn't open): OAuth codes and magic links
-/// stay out of reach. The tab document keeps the whole url (restore needs it).
-pub fn without_query(url: &str) -> String {
-    url.split(['?', '#']).next().unwrap_or_default().to_owned()
+/// The url without its userinfo, query and fragment, wherever a url leaves
+/// the app for a browser agents can't drive (`herdr-app ls`, mods'
+/// `browsers()`, the status of a block whose browser isn't open), and in
+/// logs: OAuth codes, magic links and passwords stay out of reach. The tab
+/// document keeps the whole url (restore needs it).
+pub fn public_url(url: &str) -> String {
+    let url = url.split(['?', '#']).next().unwrap_or_default();
+    match url.split_once("://") {
+        Some((scheme, rest)) => {
+            let (authority, path) = rest.split_at(rest.find(['/', '\\']).unwrap_or(rest.len()));
+            let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+            format!("{scheme}://{host}{path}")
+        }
+        None => url.to_owned(),
+    }
+}
+
+/// A page's title wherever its url goes out as `public_url`. Chromium titles
+/// a page that has none with its url ("127.0.0.1:8765/cb?code=…", no scheme
+/// or userinfo, maybe unescaped), so a title that starts with the page's
+/// host, or carries its query, is cut the same way. Other titles pass.
+#[cfg_attr(not(all(target_os = "macos", feature = "browser")), allow(dead_code))]
+pub fn public_title(title: &str, url: &str) -> String {
+    let (before, query) = url.split_once('?').map_or((url, ""), |(b, q)| (b, q.split('#').next().unwrap_or_default()));
+    let host = public_url(before)
+        .split_once("://")
+        .map(|(_, rest)| rest.split(['/', '\\']).next().unwrap_or_default().to_ascii_lowercase())
+        .unwrap_or_default();
+    let shown = title.trim_start();
+    let shown = shown.split_once("://").filter(|(scheme, _)| !scheme.contains([' ', '/'])).map_or(shown, |(_, rest)| rest);
+    let shown = shown.split_once('@').filter(|(user, _)| !user.contains(['/', ' '])).map_or(shown, |(_, rest)| rest).to_ascii_lowercase();
+    let hosts = [host.as_str(), host.strip_prefix("www.").unwrap_or_default()];
+    let carries_query = !query.is_empty() && title.contains(query);
+    if !carries_query && !hosts.iter().any(|h| !h.is_empty() && shown.starts_with(h)) {
+        return title.to_owned();
+    }
+    let title = if carries_query { title.replace(query, "") } else { title.to_owned() };
+    let cut = title.split(['?', '#']).next().unwrap_or_default();
+    match cut.split_once('@') {
+        Some((user, rest)) if !user.contains(['/', ' ']) => rest.to_owned(),
+        _ => cut.to_owned(),
+    }
+}
+
+/// Text from outside Herdr (an agent's CDP method name, a url it asked for,
+/// a key binding's action) as a log line may carry it: control characters,
+/// line and paragraph separators and bidi controls escaped (`\n`,
+/// `\u{202e}`), so it can't start a line of its own or reorder one; at most
+/// 200 characters.
+#[cfg_attr(not(all(target_os = "macos", feature = "browser")), allow(dead_code))]
+pub fn log_safe(text: &str) -> String {
+    let mut out = String::new();
+    for (i, ch) in text.chars().enumerate() {
+        if i == 200 {
+            out.push('…');
+            break;
+        }
+        if ch.is_control() || matches!(ch, '\u{2028}' | '\u{2029}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}') {
+            out.extend(ch.escape_default());
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 // Errors an agent sees (pinned in agent.rs's tests).
@@ -484,6 +580,39 @@ mod allow_tests {
     }
 
     #[test]
+    fn anything_over_any_part_of_the_agent_header_keeps_allow_from_counting() {
+        let t = Instant::now();
+        let mut g = AllowGuard::default();
+        // p1's header bar; the button sits at its right end.
+        let header = Rect { x: 640.0, y: 36.0, w: 640.0, h: 28.0 };
+        let shown = |g: &mut AllowGuard, covers: &[(String, Rect)], ready: bool, at: Instant| {
+            g.header("p1", header);
+            g.painted("p1", "b1", true, BUTTON);
+            g.end_frame(covers, ready, at);
+        };
+        shown(&mut g, &[], true, t);
+        assert!(allow(&g, 1, t + ms(500)));
+        // A popup over the header's left end: clear of the button, but over the header.
+        let left = vec![("popup bait".to_owned(), Rect { x: 600.0, y: 30.0, w: 100.0, h: 40.0 })];
+        assert_eq!(super::over(&header, &left), Some("popup bait"));
+        assert_eq!(super::over(&BUTTON, &left), None);
+        shown(&mut g, &left, true, t + ms(1_000));
+        assert!(!allow(&g, 1, t + ms(5_000)), "a button whose header had something over it took a click");
+        // It goes: the wait starts again.
+        shown(&mut g, &[], true, t + ms(6_000));
+        assert!(!allow(&g, 1, t + ms(6_100)));
+        assert!(allow(&g, 1, t + ms(6_500)));
+        // Edges that only touch the header are not over it.
+        let below = vec![("toast toast".to_owned(), Rect { x: 640.0, y: 64.0, w: 300.0, h: 50.0 })];
+        assert_eq!(super::over(&header, &below), None);
+        shown(&mut g, &below, true, t + ms(7_000));
+        assert!(allow(&g, 1, t + ms(7_000)));
+        // A drag going on (or the window inactive): nothing counts until it ends.
+        shown(&mut g, &[], false, t + ms(8_000));
+        assert!(!allow(&g, 1, t + ms(9_000)));
+    }
+
+    #[test]
     fn a_block_that_now_holds_another_browser_starts_the_wait_again() {
         let t = Instant::now();
         let mut g = AllowGuard::default();
@@ -501,7 +630,42 @@ mod allow_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{Hand, Rect, Responder, covered, hand, keyboard_page, may_focus};
+    use super::{Hand, Rect, Responder, covered, hand, keyboard_page, log_safe, may_focus, public_title, public_url};
+
+    #[test]
+    fn public_urls_have_no_userinfo_query_or_fragment() {
+        assert_eq!(public_url("https://user:pw@example.test/cb?code=SECRET#frag"), "https://example.test/cb");
+        assert_eq!(public_url("http://me@127.0.0.1:8765/x"), "http://127.0.0.1:8765/x");
+        assert_eq!(public_url("http://127.0.0.1:8765/x.html"), "http://127.0.0.1:8765/x.html");
+        assert_eq!(public_url("https://a.test/p@q?x=1"), "https://a.test/p@q");
+        assert_eq!(public_url("about:blank"), "about:blank");
+    }
+
+    #[test]
+    fn a_title_that_is_the_url_goes_out_as_the_url_does() {
+        // Chromium's title for a page with no <title>: the url with no scheme.
+        let url = "http://127.0.0.1:18766/notitle.html?code=SECRETQ2#frag";
+        assert_eq!(public_title("127.0.0.1:18766/notitle.html?code=SECRETQ2", url), "127.0.0.1:18766/notitle.html");
+        assert_eq!(public_title("http://127.0.0.1:18766/notitle.html?code=SECRETQ2", url), "http://127.0.0.1:18766/notitle.html");
+        assert_eq!(public_title("user:pw@127.0.0.1:18766/notitle.html?code=SECRETQ2", "http://user:pw@127.0.0.1:18766/notitle.html?code=SECRETQ2"), "127.0.0.1:18766/notitle.html");
+        assert_eq!(public_title("example.test/cb?code=1", "https://www.example.test/cb?code=1"), "example.test/cb");
+        assert_eq!(public_title("EXAMPLE.test/cb#t=1", "https://example.test/cb#t=1"), "EXAMPLE.test/cb");
+        // A title that carries the query, however it starts.
+        assert_eq!(public_title("Signed in: code=SECRETQ3", "https://a.test/cb?code=SECRETQ3"), "Signed in: ");
+        assert!(!public_title("x ?code=SECRETQ3", "https://a.test/cb?code=SECRETQ3").contains("SECRET"));
+        // A page's own title passes, question marks and all.
+        assert_eq!(public_title("What is a pane? · Docs", "https://docs.test/panes?x=1"), "What is a pane? · Docs");
+        assert_eq!(public_title("Herdr fixture", "http://127.0.0.1:8765/browser-fixture.html"), "Herdr fixture");
+        assert_eq!(public_title("", "about:blank"), "");
+    }
+
+    #[test]
+    fn logged_text_cannot_start_a_line_of_its_own() {
+        assert_eq!(log_safe("Page.navigate"), "Page.navigate");
+        assert_eq!(log_safe("Evil.x\nFORGED\r\u{1b}[2J\u{2028}\u{202e}"), "Evil.x\\nFORGED\\r\\u{1b}[2J\\u{2028}\\u{202e}");
+        let long = "a".repeat(500);
+        assert_eq!(log_safe(&long).chars().count(), 201);
+    }
 
     fn r(x: f32, y: f32, w: f32, h: f32) -> Rect {
         Rect { x, y, w, h }

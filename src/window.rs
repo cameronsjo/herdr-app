@@ -68,11 +68,10 @@ fn separator_line(row: bool, width: f32, color: Hsla, top: f32) -> Div {
 }
 
 /// Whether a pane frame's header is drawn over the pane (`reveal: "hover"`)
-/// rather than beside it. Never over a browser pane: there it would sit on
-/// the agent header, hide "Allow agent" from the person, and pass their
-/// clicks through to it (GPUI hit-tests through a box that doesn't occlude,
-/// and the access button's input protection counts only overlays Herdr
-/// registers as covers).
+/// rather than beside it. Never over a browser pane: GPUI can't draw over
+/// the page's native view, and the agent header is drawn above every mod
+/// (`Browsers::agent_header`), so over a browser pane it would show only in
+/// strips and never be clickable where the agent header is.
 fn header_over(hover: bool, content: Option<&Content>) -> bool {
     hover && !matches!(content, Some(Content::Browser { .. }))
 }
@@ -1588,6 +1587,11 @@ impl AppWindow {
     /// The header of an agent-profile browser block: a warning that this is
     /// a test profile, whether agent access is on (and which terminal last
     /// attached, as it claimed), and the button that turns it on or off.
+    /// The live header is drawn in Herdr's top layer (`Browsers::agent_header`):
+    /// after everything a mod or a layout draws, occluding, so nothing can sit
+    /// over "Allow agent" or take or pass on its clicks; it isn't drawn while
+    /// one of Herdr's own overlays overlaps it. Under it, in the layout, a copy
+    /// without the button holds its place and shows under such an overlay.
     fn agent_bar(&self, node: &str, browser: &str, cx: &mut Context<Self>) -> AnyElement {
         let (on, last) = self.browsers.agent_state(browser).unwrap_or((false, None));
         let state = match (on, last) {
@@ -1597,23 +1601,26 @@ impl AppWindow {
         };
         let (b, node_id) = (browser.to_owned(), node.to_owned());
         let (label, sets) = crate::browser::access_button(on);
-        div()
-            .flex_none()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_2()
-            .px_2()
-            .h(settings::z(26.0))
-            .bg(if on { c("blocked") } else { c("raised") })
-            .text_size(settings::z(12.0))
-            .text_color(c("foreground"))
-            .child(div().flex_1().overflow_hidden().whitespace_nowrap().child(if crate::browser::dev_switch() {
-                crate::browser::DEV_SWITCH_NOTE
-            } else {
-                "Test profile: don't sign into real accounts."
-            }))
-            .child(div().whitespace_nowrap().child(state))
+        let look = || {
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .px_2()
+                .size_full()
+                .bg(if on { c("blocked") } else { c("raised") })
+                .text_size(settings::z(12.0))
+                .text_color(c("foreground"))
+                .child(div().flex_1().overflow_hidden().whitespace_nowrap().child(crate::browser::dev_switch_note().unwrap_or("Test profile: don't sign into real accounts.")))
+                .child(div().whitespace_nowrap().child(state.clone()))
+        };
+        let live = look()
+            .id(SharedString::from(format!("agent-header-{node}")))
+            .absolute()
+            .inset_0()
+            // Nothing under it gets the pointer: no click on it reaches a mod, and none passes on.
+            .occlude()
             .child(
                 div()
                     .id(SharedString::from(format!("agent-access-{node}")))
@@ -1624,14 +1631,14 @@ impl AppWindow {
                     .cursor_pointer()
                     .relative()
                     .child(label)
-                    // Reports where it painted, for the input protection below.
+                    // Reports where it is drawn, for the input protection below.
                     .children(self.browsers.access_button(node, browser, sets))
                     // A person's click: the one path that turns agent access on.
                     // It does what the label said, not a toggle of the live state.
-                    // "Allow agent" counts only once it has shown unchanged and
-                    // uncovered, in the same place, for half a second, and never
-                    // as a double click's second click (`browser::AllowGuard`);
-                    // "Stop agent" at once.
+                    // "Allow agent" counts only once it has shown unchanged, in the
+                    // same place, with nothing over its header, for half a second,
+                    // and never as a double click's second click
+                    // (`browser::AllowGuard`); "Stop agent" at once.
                     .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
                         if !this.browsers.may_click(&node_id, &b, sets, ev.click_count()) {
                             tracing::info!("browser: ignored an Allow agent click on {b} (it changed, moved or was covered under 500 ms ago, or a double click)");
@@ -1646,7 +1653,13 @@ impl AppWindow {
                         this.publish(cx);
                         cx.notify();
                     })),
-            )
+            );
+        div()
+            .flex_none()
+            .relative()
+            .h(settings::z(26.0))
+            .child(look())
+            .child(self.browsers.agent_header(node, live.into_any_element()))
             .into_any_element()
     }
 
@@ -1673,8 +1686,8 @@ impl AppWindow {
             .bg(c("blocked"))
             .text_size(settings::z(12.0))
             .text_color(c("foreground"));
-        if crate::browser::dev_switch() {
-            strip = strip.child(div().whitespace_nowrap().child(crate::browser::DEV_SWITCH_NOTE));
+        if let Some(note) = crate::browser::dev_switch_note() {
+            strip = strip.child(div().whitespace_nowrap().child(note));
         }
         for (browser, last) in on {
             let label = match last {
@@ -1898,7 +1911,7 @@ impl AppWindow {
                         // A browser that isn't open: its saved url, without
                         // query or fragment (codes and magic links stay in the
                         // tab document only; an open one's comes from `info`).
-                        let url = &crate::browser::without_query(url);
+                        let url = &crate::browser::public_url(url);
                         let info = self.browsers.info(browser, focused);
                         let field = |k: &str| info.as_ref().and_then(|i| i.get(k)).and_then(Value::as_str).filter(|v| !v.is_empty()).map(str::to_owned);
                         let title = field("title").or_else(|| field("url")).unwrap_or_else(|| url.clone());
@@ -3272,7 +3285,8 @@ impl AppWindow {
                 let from = if person {
                     crate::browser::Source::Mod
                 } else if on && crate::browser::dev_switch() {
-                    tracing::warn!("browser: DEV SWITCH (dev-agent-access build): the control socket turns agent access on for {b}");
+                    #[cfg(all(debug_assertions, feature = "dev-agent-access"))]
+                    tracing::warn!("browser: DEV SWITCH (dev-agent-access build): the control socket turns agent access on for {}", crate::browser::log_safe(&b));
                     crate::browser::Source::DevSwitch
                 } else {
                     crate::browser::Source::Socket
@@ -4059,9 +4073,7 @@ impl AppWindow {
 
     /// A pane in its frame: the look, and the header mod above or below it
     /// (on hover: drawn over the terminal, so it never resizes). A browser
-    /// pane's header is always beside the page (`header_over`): GPUI can't
-    /// draw over the page, and over the agent header it would hide "Allow
-    /// agent" from the person while passing their clicks through to it.
+    /// pane's header is always beside the page (`header_over`).
     fn frame_pane(&self, n: &Node, f: &PaneFrame, on: bool, inner: AnyElement, cx: &mut Context<Self>) -> AnyElement {
         let line = if on { f.focus.as_ref().or(f.border.as_ref()) } else { f.border.as_ref() };
         let group = SharedString::from(format!("pane-{}", n.id));
@@ -4611,7 +4623,7 @@ impl AppWindow {
 fn browser_status(info: Option<Value>, browser: &str, pane: &str, saved_url: &str) -> Value {
     match info {
         Some(i) => json!({ "browser": browser, "pane": pane, "url": i["url"], "title": i["title"] }),
-        None => json!({ "browser": browser, "pane": pane, "url": crate::browser::without_query(saved_url) }),
+        None => json!({ "browser": browser, "pane": pane, "url": crate::browser::public_url(saved_url) }),
     }
 }
 
@@ -5034,6 +5046,8 @@ mod tests {
     fn a_browser_block_that_isnt_open_shows_its_url_without_query() {
         let saved = "https://example.test/cb?step=2&id=42#top";
         assert_eq!(super::browser_status(None, "b1", "p1", saved), serde_json::json!({ "browser": "b1", "pane": "p1", "url": "https://example.test/cb" }));
+        let with_user = "https://me:pw@example.test/cb?step=2";
+        assert_eq!(super::browser_status(None, "b1", "p1", with_user)["url"], "https://example.test/cb");
         let open = serde_json::json!({ "url": "https://example.test/cb?step=2", "title": "T" });
         assert_eq!(super::browser_status(Some(open), "b1", "p1", saved)["url"], "https://example.test/cb?step=2");
     }

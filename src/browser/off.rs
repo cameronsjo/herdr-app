@@ -80,6 +80,11 @@ impl Browsers {
         None
     }
 
+    /// No agent browsers: never called with one.
+    pub fn agent_header(&self, _node: &str, header: AnyElement) -> AnyElement {
+        header
+    }
+
     /// Only "Stop agent" would count; there is no button to click here.
     pub fn may_click(&self, _node: &str, _browser: &str, sets: bool, _click_count: usize) -> bool {
         !sets
