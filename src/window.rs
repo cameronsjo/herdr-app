@@ -1519,7 +1519,8 @@ impl AppWindow {
             .then(|| self.model.focused_pane())
             .flatten()
             .and_then(|p| self.model.active_tab().and_then(|t| t.shown().find(&p)).and_then(|n| n.browser()).map(str::to_owned));
-        let page = crate::browser::keyboard_page(dialog, control, self.layout_page.as_deref(), pane_page.as_deref()).map(str::to_owned);
+        let covered = self.browsers.covered();
+        let page = crate::browser::keyboard_page(dialog, control, self.layout_page.as_deref(), pane_page.as_deref(), &covered).map(str::to_owned);
         self.browsers.keys(page.as_deref(), window);
     }
 
@@ -1535,6 +1536,11 @@ impl AppWindow {
             // A click on Herdr: a layout block's page lets go (a pane's page
             // keeps it until the click moves the focused pane).
             self.layout_page = None;
+            return self.sync_browser_keys(window);
+        }
+        if u.covers {
+            // A page hid under an overlay (Herdr types meanwhile) or came back
+            // (it gets the keyboard again only if it still should have it).
             return self.sync_browser_keys(window);
         }
         let pane = self.browser_pane(&u.browser);
@@ -3979,7 +3985,7 @@ impl AppWindow {
                             this.sync(window, cx);
                         }
                     }))
-                    .child(self.browsers.element(&n.id, browser, url, c("dim")))
+                    .child(self.browsers.element(&n.id, browser, url, crate::browser::Look { surface: c("surface"), text: c("foreground"), dim: c("dim") }))
                     .into_any_element()
             }
             Content::Agent { .. } => match self.shown_agent() {
@@ -4196,6 +4202,14 @@ impl AppWindow {
         let order = self.overlays.iter().filter(|o| o.kind == OverlayKind::Window).chain(self.overlays.iter().filter(|o| o.kind != OverlayKind::Window));
         for o in order {
             let id = o.id.clone();
+            // For the log when a page hides under it: "popup frame-palette".
+            let kind = match o.kind {
+                OverlayKind::Dialog => "dialog",
+                OverlayKind::Popup => "popup",
+                OverlayKind::Toast => "toast",
+                OverlayKind::Window => "window",
+            };
+            let label = format!("{kind} {}", self.copies.get(&o.slot).map_or(o.id.as_str(), |c| c.inst.name.as_str()));
             // Up to 1: a share of the window (terminals in overlays want room, not px).
             let span = |v: f32, full: Pixels| if v <= 1.0 { full * v } else { settings::z(v) };
             let (w, h) = (span(o.size.width, viewport.width), span(o.size.height, viewport.height));
@@ -4217,6 +4231,8 @@ impl AppWindow {
                 // Scroll, hover and cursor stop here, not on the pane behind.
                 .occlude()
                 .when(o.kind != OverlayKind::Window, |d| d.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()))
+                // A dialog's backdrop covers the window: it reports that instead.
+                .when(o.kind != OverlayKind::Dialog, |d| d.children(self.browsers.cover(label.clone())))
                 .child(content);
             match o.kind {
                 OverlayKind::Window => out.push(self.render_window(o, body, viewport, cx)),
@@ -4230,6 +4246,8 @@ impl AppWindow {
                         .items_center()
                         .justify_center()
                         .when(!o.modal, |d| d.on_mouse_down(MouseButton::Left, cx.listener(move |this, _, w, cx| this.close_overlay(&id, w, cx))))
+                        // The dimmed backdrop is the dialog's too: every page under it hides.
+                        .children(self.browsers.cover(label))
                         .child(body)
                         .into_any_element(),
                 ),
@@ -4260,6 +4278,7 @@ impl AppWindow {
         }
         if let Some(error) = crate::update::core().error {
             out.push(div().absolute().right(settings::z(16.0)).bottom(settings::z(toast_y))
+                .children(self.browsers.cover("core update error".into()))
                 .max_w(settings::z(540.0)).p(settings::z(12.0)).rounded_lg().bg(c("popover"))
                 .border_1().border_color(c("border")).text_size(settings::z(13.0)).text_color(c("foreground"))
                 .id("core-update-error").cursor_pointer()
@@ -4310,6 +4329,7 @@ impl AppWindow {
             .rounded_full()
             .shadow_lg()
             .occlude()
+            .children(self.browsers.cover("update pill".into()))
             .text_size(settings::z(13.0))
             .child(div().text_color(c("foreground")).child(label.clone()))
             .when(app_ready, |pill| pill.child(

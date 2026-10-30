@@ -38,15 +38,69 @@ pub struct Update {
     pub close: bool,
     /// The person pressed the mouse on Herdr, outside every page.
     pub clicked_herdr: bool,
+    /// A page hid under an overlay or came back: who has the keyboard may change.
+    pub covers: bool,
+}
+
+/// The theme colors a browser block's placeholder uses.
+#[derive(Clone, Copy)]
+pub struct Look {
+    pub surface: gpui::Hsla,
+    pub text: gpui::Hsla,
+    pub dim: gpui::Hsla,
 }
 
 /// Which page has the keyboard: none while a dialog or popup is open (it
 /// takes typing) or while a Herdr control the person pressed has GPUI focus
 /// (a layout mod's input, a floating terminal); else the layout block's page
 /// the person clicked into, while it shows; else the focused pane's page,
-/// while its tab shows. `None`: Herdr (GPUI) has it.
-pub fn keyboard_page<'a>(dialog: bool, control: bool, layout_page: Option<&'a str>, pane_page: Option<&'a str>) -> Option<&'a str> {
-    if dialog || control { None } else { layout_page.or(pane_page) }
+/// while its tab shows. A page hidden under an overlay (`covered`) can't
+/// have it: Herdr holds it until the overlay goes, and the page gets it back
+/// only if it still wins then. `None`: Herdr (GPUI) has it.
+pub fn keyboard_page<'a>(dialog: bool, control: bool, layout_page: Option<&'a str>, pane_page: Option<&'a str>, covered: &[String]) -> Option<&'a str> {
+    if dialog || control {
+        return None;
+    }
+    layout_page.or(pane_page).filter(|p| !covered.iter().any(|c| c == p))
+}
+
+#[cfg(any(test, all(target_os = "macos", feature = "browser")))]
+/// A rectangle in window points, top-left origin (as GPUI paints).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Rect {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+#[cfg(any(test, all(target_os = "macos", feature = "browser")))]
+impl Rect {
+    /// Shares some area with `other`: edges that only touch, and an empty
+    /// rectangle (an overlay not measured yet), don't count.
+    pub fn overlaps(&self, other: &Rect) -> bool {
+        self.w > 0.0
+            && self.h > 0.0
+            && other.w > 0.0
+            && other.h > 0.0
+            && self.x < other.x + other.w
+            && other.x < self.x + self.w
+            && self.y < other.y + other.h
+            && other.y < self.y + self.h
+    }
+}
+
+#[cfg(any(test, all(target_os = "macos", feature = "browser")))]
+/// Which overlay each page hides under: GPUI can't draw over a page's native
+/// view, so a page an overlay overlaps hides while it's there and its block
+/// shows a placeholder. `covers` are the overlays painted this frame (label,
+/// bounds), in paint order; a page names the first that overlaps it. None:
+/// the page shows.
+pub fn covered<'a>(pages: &[(&'a str, Rect)], covers: &'a [(String, Rect)]) -> Vec<(&'a str, Option<&'a str>)> {
+    pages
+        .iter()
+        .map(|(id, page)| (*id, covers.iter().find(|(_, c)| c.overlaps(page)).map(|(label, _)| label.as_str())))
+        .collect()
 }
 
 #[cfg(any(test, all(target_os = "macos", feature = "browser")))]
@@ -106,7 +160,63 @@ pub const AVAILABLE: bool = cfg!(all(target_os = "macos", feature = "browser"));
 
 #[cfg(test)]
 mod tests {
-    use super::{Hand, Responder, hand, keyboard_page, may_focus};
+    use super::{Hand, Rect, Responder, covered, hand, keyboard_page, may_focus};
+
+    fn r(x: f32, y: f32, w: f32, h: f32) -> Rect {
+        Rect { x, y, w, h }
+    }
+
+    /// A 1280x800 window: b1 the right half below the tab bar, b2 a side column.
+    fn pages() -> Vec<(&'static str, Rect)> {
+        vec![("b1", r(640.0, 80.0, 640.0, 720.0)), ("b2", r(0.0, 80.0, 300.0, 720.0))]
+    }
+
+    #[test]
+    fn no_overlay_hides_no_page() {
+        assert_eq!(covered(&pages(), &[]), vec![("b1", None), ("b2", None)]);
+    }
+
+    #[test]
+    fn an_overlay_hides_only_the_pages_it_overlaps() {
+        // The palette hangs from the top, centered: over b1's left edge, clear of b2.
+        let covers = vec![("popup frame-palette".to_owned(), r(330.0, 60.0, 620.0, 500.0))];
+        assert_eq!(covered(&pages(), &covers), vec![("b1", Some("popup frame-palette")), ("b2", None)]);
+        // A toast in the bottom right corner: b1 only.
+        let covers = vec![("toast toast".to_owned(), r(924.0, 712.0, 340.0, 72.0))];
+        assert_eq!(covered(&pages(), &covers), vec![("b1", Some("toast toast")), ("b2", None)]);
+    }
+
+    #[test]
+    fn a_dialogs_backdrop_hides_every_page() {
+        let covers = vec![("dialog prompt".to_owned(), r(0.0, 0.0, 1280.0, 800.0))];
+        assert_eq!(covered(&pages(), &covers), vec![("b1", Some("dialog prompt")), ("b2", Some("dialog prompt"))]);
+    }
+
+    #[test]
+    fn the_first_overlay_painted_over_a_page_names_it() {
+        let covers = vec![("float notes".to_owned(), r(700.0, 100.0, 100.0, 100.0)), ("toast toast".to_owned(), r(924.0, 712.0, 340.0, 72.0))];
+        assert_eq!(covered(&pages(), &covers)[0], ("b1", Some("float notes")));
+    }
+
+    #[test]
+    fn touching_edges_and_empty_overlays_hide_nothing() {
+        // Ends exactly where b1 starts; a float not measured yet (0x0) inside b1.
+        let covers = vec![("float side".to_owned(), r(300.0, 80.0, 340.0, 720.0)), ("float new".to_owned(), r(700.0, 100.0, 0.0, 0.0))];
+        assert_eq!(covered(&pages(), &covers), vec![("b1", None), ("b2", None)]);
+    }
+
+    #[test]
+    fn a_page_under_an_overlay_hands_the_keyboard_to_herdr() {
+        let hidden = ["b1".to_owned()];
+        // The focused pane's page is under a toast: Herdr types meanwhile.
+        assert_eq!(keyboard_page(false, false, None, Some("b1"), &hidden), None);
+        // A clicked layout page under an overlay doesn't pass it to the pane's page.
+        assert_eq!(keyboard_page(false, false, Some("b1"), Some("b2"), &hidden), None);
+        // Another page isn't affected.
+        assert_eq!(keyboard_page(false, false, None, Some("b2"), &hidden), Some("b2"));
+        // The overlay went: the page that still should have it gets it back.
+        assert_eq!(keyboard_page(false, false, None, Some("b1"), &[]), Some("b1"));
+    }
 
     #[test]
     fn closing_the_page_with_the_keyboard_hands_it_back_to_herdr() {
@@ -139,26 +249,26 @@ mod tests {
 
     #[test]
     fn a_dialog_takes_the_keyboard_from_every_page() {
-        assert_eq!(keyboard_page(true, false, Some("b5"), Some("b1")), None);
-        assert_eq!(keyboard_page(true, false, None, Some("b1")), None);
+        assert_eq!(keyboard_page(true, false, Some("b5"), Some("b1"), &[]), None);
+        assert_eq!(keyboard_page(true, false, None, Some("b1"), &[]), None);
     }
 
     #[test]
     fn a_control_the_person_pressed_keeps_the_keyboard_from_every_page() {
         // The Changes panel's commit box, a floating terminal: typing goes there.
-        assert_eq!(keyboard_page(false, true, None, Some("b1")), None);
-        assert_eq!(keyboard_page(false, true, Some("b5"), Some("b1")), None);
+        assert_eq!(keyboard_page(false, true, None, Some("b1"), &[]), None);
+        assert_eq!(keyboard_page(false, true, Some("b5"), Some("b1"), &[]), None);
     }
 
     #[test]
     fn a_clicked_layout_page_wins_over_the_focused_pane() {
-        assert_eq!(keyboard_page(false, false, Some("b5"), Some("b1")), Some("b5"));
-        assert_eq!(keyboard_page(false, false, Some("b5"), None), Some("b5"));
+        assert_eq!(keyboard_page(false, false, Some("b5"), Some("b1"), &[]), Some("b5"));
+        assert_eq!(keyboard_page(false, false, Some("b5"), None, &[]), Some("b5"));
     }
 
     #[test]
     fn otherwise_the_focused_panes_page_or_herdr() {
-        assert_eq!(keyboard_page(false, false, None, Some("b1")), Some("b1"));
-        assert_eq!(keyboard_page(false, false, None, None), None);
+        assert_eq!(keyboard_page(false, false, None, Some("b1"), &[]), Some("b1"));
+        assert_eq!(keyboard_page(false, false, None, None, &[]), None);
     }
 }

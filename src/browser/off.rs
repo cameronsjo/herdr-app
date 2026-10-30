@@ -1,7 +1,7 @@
 //! Builds without browsers (not macOS, or no `browser` feature): blocks show
 //! a placeholder, commands say why, nothing opens.
 
-use gpui::{AnyElement, App, Hsla, IntoElement, ParentElement, Styled, Window, div};
+use gpui::{AnyElement, App, IntoElement, ParentElement, Styled, Window, div};
 use serde_json::Value;
 
 use crate::layout::Node;
@@ -50,7 +50,16 @@ impl Browsers {
 
     pub fn keys(&mut self, _page: Option<&str>, _window: &mut Window) {}
 
-    pub fn element(&self, _node: &str, browser: &str, url: &str, dim: Hsla) -> AnyElement {
+    pub fn covered(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// No pages, so overlays report nothing.
+    pub fn cover(&self, _label: String) -> Option<AnyElement> {
+        None
+    }
+
+    pub fn element(&self, _node: &str, browser: &str, url: &str, look: super::Look) -> AnyElement {
         div()
             .size_full()
             .flex()
@@ -59,8 +68,9 @@ impl Browsers {
             .justify_center()
             .gap_1()
             .p_4()
-            .text_color(dim)
-            .child(format!("Browser {browser}: {url}"))
+            .bg(look.surface)
+            .text_color(look.dim)
+            .child(div().text_color(look.text).child(format!("Browser {browser}: {url}")))
             .child(UNAVAILABLE)
             .into_any_element()
     }

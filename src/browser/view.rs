@@ -23,16 +23,28 @@ use objc2_foundation::{NSPoint, NSRect, NSSize};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use super::keys::{self, Native, Press};
-use super::{Responder, runtime};
+use super::{Rect, Responder, runtime};
 
 struct Container {
     view: Retained<NSView>,
-    /// Painted this frame.
-    placed: bool,
+    /// Its block's bounds this frame; None: not painted this frame.
+    placed: Option<Rect>,
+    /// Why it's hidden, for the log (None: it shows).
+    hidden: Option<Hidden>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum Hidden {
+    /// Its block isn't painted (another tab, a zoomed pane, a hidden column), or not yet.
+    NotShown,
+    /// An overlay (its label) overlaps its block.
+    Under(String),
 }
 
 thread_local! {
     static VIEWS: RefCell<HashMap<String, Container>> = RefCell::new(HashMap::new());
+    /// The overlays painted this frame (label, bounds), in paint order.
+    static COVERS: RefCell<Vec<(String, Rect)>> = const { RefCell::new(Vec::new()) };
     static BINDINGS: RefCell<Vec<(String, String)>> = const { RefCell::new(Vec::new()) };
     static MONITOR: RefCell<Option<Retained<AnyObject>>> = const { RefCell::new(None) };
     /// The page the last mouse press landed in, and when.
@@ -72,12 +84,36 @@ pub fn container(id: &str, window: &Window) -> anyhow::Result<Retained<NSView>> 
     view.setWantsLayer(true);
     view.setHidden(true);
     content.addSubview_positioned_relativeTo(&view, NSWindowOrderingMode::Above, Some(gpui));
-    VIEWS.with_borrow_mut(|v| v.insert(id.to_owned(), Container { view: view.clone(), placed: false }));
+    VIEWS.with_borrow_mut(|v| v.insert(id.to_owned(), Container { view: view.clone(), placed: None, hidden: Some(Hidden::NotShown) }));
     Ok(view)
 }
 
+fn rect(bounds: Bounds<Pixels>) -> Rect {
+    Rect {
+        x: f32::from(bounds.origin.x),
+        y: f32::from(bounds.origin.y),
+        w: f32::from(bounds.size.width),
+        h: f32::from(bounds.size.height),
+    }
+}
+
+/// An overlay painted this frame over these bounds (window points, top
+/// left): a page it overlaps hides at the frame's end (`end_frame`).
+pub fn cover(label: &str, bounds: Bounds<Pixels>) {
+    COVERS.with_borrow_mut(|c| c.push((label.to_owned(), rect(bounds))));
+}
+
+/// The pages hidden under an overlay now: they can't have the keyboard.
+pub fn covered() -> Vec<String> {
+    VIEWS.with_borrow(|views| {
+        let mut ids: Vec<String> = views.iter().filter(|(_, c)| matches!(c.hidden, Some(Hidden::Under(_)))).map(|(id, _)| id.clone()).collect();
+        ids.sort();
+        ids
+    })
+}
+
 /// Puts a browser's view on its block (window points, top-left origin, as
-/// GPUI paints) and shows it.
+/// GPUI paints); `end_frame` shows it unless an overlay covers it.
 pub fn place(id: &str, bounds: Bounds<Pixels>, window: &Window) {
     let Ok(gpui) = gpui_view(window) else { return };
     let host = gpui.frame();
@@ -87,7 +123,7 @@ pub fn place(id: &str, bounds: Bounds<Pixels>, window: &Window) {
     let frame = NSRect::new(NSPoint::new(host.origin.x + x, host.origin.y + host.size.height - y - h), NSSize::new(w, h));
     VIEWS.with_borrow_mut(|views| {
         let Some(c) = views.get_mut(id) else { return };
-        c.placed = true;
+        c.placed = Some(rect(bounds));
         let old = c.view.frame();
         if old.origin != frame.origin || old.size != frame.size {
             tracing::debug!("browser: {id} placed at {x},{y} {w}x{h} (window points, top left)");
@@ -106,25 +142,62 @@ pub fn place(id: &str, bounds: Bounds<Pixels>, window: &Window) {
                 page.setFrame(fill);
             }
         }
-        if c.view.isHidden() {
-            tracing::debug!("browser: {id} shown");
-            c.view.setHidden(false);
-        }
     });
 }
 
 /// After a frame: a view whose block wasn't painted (another tab, a zoomed
-/// pane, a hidden column) hides.
-pub fn end_frame() {
+/// pane, a hidden column) hides; so does one an overlay painted this frame
+/// overlaps (`super::covered`), and its block's placeholder shows. Every
+/// other placed view shows. A page that had the keyboard and hides hands it
+/// to Herdr now (typing never goes into a hidden page); when the set of
+/// covered pages changes, the window decides again who has the keyboard.
+pub fn end_frame(window: &Window) {
+    let covers = COVERS.with_borrow_mut(std::mem::take);
+    let holder = match responder(window) {
+        Responder::Page(id) => Some(id),
+        _ => None,
+    };
+    let mut changed = false;
+    let mut take_back = false;
     VIEWS.with_borrow_mut(|views| {
+        let placed: Vec<(&str, Rect)> = views.iter().filter_map(|(id, c)| c.placed.map(|r| (id.as_str(), r))).collect();
+        let decided: HashMap<String, Hidden> = super::covered(&placed, &covers)
+            .into_iter()
+            .filter_map(|(id, under)| under.map(|l| (id.to_owned(), Hidden::Under(l.to_owned()))))
+            .collect();
         for (id, c) in views.iter_mut() {
-            if !c.placed && !c.view.isHidden() {
-                tracing::debug!("browser: {id} hidden (its block isn't shown)");
-                c.view.setHidden(true);
+            let want = match c.placed.take() {
+                None => Some(Hidden::NotShown),
+                Some(_) => decided.get(id).cloned(),
+            };
+            if want == c.hidden {
+                continue;
             }
-            c.placed = false;
+            let was_under = matches!(c.hidden, Some(Hidden::Under(_)));
+            match &want {
+                Some(Hidden::NotShown) => tracing::debug!("browser: {id} hidden (its block isn't shown)"),
+                Some(Hidden::Under(label)) => tracing::debug!("browser: {id} hidden under overlay {label}"),
+                None => match &c.hidden {
+                    Some(Hidden::Under(label)) => tracing::debug!("browser: {id} shown again ({label} no longer over it)"),
+                    _ => tracing::debug!("browser: {id} shown"),
+                },
+            }
+            if want.is_some() && holder.as_deref() == Some(id.as_str()) {
+                take_back = true;
+            }
+            changed |= was_under || matches!(want, Some(Hidden::Under(_)));
+            c.view.setHidden(want.is_some());
+            c.hidden = want;
         }
     });
+    if take_back {
+        // Before AppKit picks some other key view for a hidden first responder.
+        tracing::debug!("browser: {} hid with the keyboard; Herdr takes it", holder.as_deref().unwrap_or_default());
+        take_keys(window);
+    }
+    if changed {
+        runtime::covers_changed();
+    }
 }
 
 /// The browser closed: its container goes too (runtime.rs removed the page first).

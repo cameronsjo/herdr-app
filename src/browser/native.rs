@@ -1,11 +1,12 @@
 //! Browser panes on macOS with the `browser` feature: the registry decides
 //! what is open, runtime.rs drives CEF, view.rs places the native views.
 
-use gpui::{AnyElement, App, Hsla, IntoElement, ParentElement, Styled, Window, canvas, div};
+use gpui::prelude::FluentBuilder as _;
+use gpui::{AnyElement, App, IntoElement, ParentElement, Styled, Window, canvas, div};
 use serde_json::{Value, json};
 
 use super::registry::{self, Page, Registry};
-use super::{Hand, Responder, Update, runtime, view};
+use super::{Hand, Look, Responder, Update, runtime, view};
 use crate::layout::Node;
 use crate::model::Model;
 
@@ -17,6 +18,8 @@ pub enum Event {
     CloseAsked(String),
     /// A mouse press on Herdr (outside every page) while a page had the keyboard.
     ClickedHerdr,
+    /// A page hid under an overlay or came back: who has the keyboard may change.
+    Covers,
 }
 
 pub struct Browsers {
@@ -66,6 +69,7 @@ impl Browsers {
             }
             Event::CloseAsked(browser) => Update { browser, close: true, ..Update::default() },
             Event::ClickedHerdr => Update { clicked_herdr: true, ..Update::default() },
+            Event::Covers => Update { covers: true, ..Update::default() },
         }
     }
 
@@ -173,22 +177,47 @@ impl Browsers {
         }
     }
 
+    /// The pages hidden under an overlay now (they can't have the keyboard).
+    pub fn covered(&self) -> Vec<String> {
+        view::covered()
+    }
+
+    /// Goes inside an overlay (absolute, its full size): reports its bounds
+    /// while painting, so a page under it hides (`label` names it in the log).
+    pub fn cover(&self, label: String) -> Option<AnyElement> {
+        Some(canvas(|_, _, _| {}, move |bounds, _, _, _| view::cover(&label, bounds)).absolute().size_full().into_any_element())
+    }
+
     pub fn set_bindings(&mut self, bindings: Vec<(String, String)>) {
         view::set_bindings(bindings);
     }
 
     /// The block: what shows while the page isn't there (opening, an
-    /// error, another block owns it), and a canvas that puts the page's
+    /// error, another block owns it, an overlay over it: the page's title
+    /// and url on the theme's `surface`), and a canvas that puts the page's
     /// view on the block each frame.
-    pub fn element(&self, node: &str, browser: &str, url: &str, dim: Hsla) -> AnyElement {
+    pub fn element(&self, node: &str, browser: &str, url: &str, look: Look) -> AnyElement {
         let owner = self.registry.owned_by(node).filter(|e| e.browser == browser);
-        let note = match (&self.error, owner) {
-            (Some(e), _) => format!("The browser can't start: {e}"),
-            (None, Some(e)) => format!("{} {}", if e.page.loading { "Opening" } else { "Showing" }, e.page.url),
-            (None, None) if self.registry.get(browser).is_some() => format!("Browser {browser} shows in another block."),
-            (None, None) => format!("Opening {url}"),
+        let (title, note) = match (&self.error, owner) {
+            (Some(e), _) => (None, format!("The browser can't start: {e}")),
+            (None, Some(e)) if e.page.loading => (None, format!("Opening {}", e.page.url)),
+            (None, Some(e)) => (Some(e.page.title.clone()).filter(|t| !t.is_empty()), e.page.url.clone()),
+            (None, None) if self.registry.get(browser).is_some() => (None, format!("Browser {browser} shows in another block.")),
+            (None, None) => (None, format!("Opening {url}")),
         };
-        let mut el = div().size_full().relative().flex().items_center().justify_center().p_4().text_color(dim).child(note);
+        let mut el = div()
+            .size_full()
+            .relative()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_1()
+            .p_4()
+            .overflow_hidden()
+            .bg(look.surface)
+            .when_some(title, |d, t| d.text_color(look.text).child(t))
+            .child(div().text_color(look.dim).child(note));
         if let (None, Some(_)) = (&self.error, owner) {
             let id = browser.to_owned();
             el = el.child(canvas(|_, _, _| {}, move |bounds, _, window, _| view::place(&id, bounds, window)).absolute().size_full());
@@ -198,6 +227,6 @@ impl Browsers {
 
     /// Painted after everything else: hides the pages whose block wasn't painted this frame.
     pub fn frame_end(&self) -> Option<AnyElement> {
-        Some(canvas(|_, _, _| {}, |_, _, _, _| view::end_frame()).absolute().size_0().into_any_element())
+        Some(canvas(|_, _, _| {}, |_, _, window, _| view::end_frame(window)).absolute().size_0().into_any_element())
     }
 }

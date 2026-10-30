@@ -100,6 +100,11 @@ pub fn clicked_herdr() {
     send(Event::ClickedHerdr);
 }
 
+/// A page hid under an overlay or came back from under one (view.rs).
+pub fn covers_changed() {
+    send(Event::Covers);
+}
+
 fn send(event: Event) {
     EVENTS.with_borrow(|e| {
         if let Some(tx) = e {

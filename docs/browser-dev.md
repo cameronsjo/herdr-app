@@ -58,7 +58,17 @@ a new-window link.
   over GPUI's drawing.
 - Each frame the page's view takes its block's bounds; a block that isn't
   painted (another tab, a zoomed pane, a hidden column) hides its page.
-  Overlays (dialogs, menus, toasts) still draw under a page.
+- GPUI can't draw over a page, so a page hides while any overlay overlaps
+  its block: a dialog (its dimmed backdrop covers every page), a popup (the
+  palette, a menu), a toast, a mod window, the update pill, a floating
+  block, the pane grip and the drop preview while you drag a pane. Its block
+  shows the page's title and url on the theme's `surface` meanwhile; the
+  page keeps its scroll position and comes back when the overlay goes. A
+  hidden page can't have the keyboard: Herdr takes it, and the page gets it
+  back only if it should still have it then. The log names each change
+  (`b1 hidden under overlay popup frame-palette`). Popups and tooltips a mod
+  draws inside its own view (not through Herdr's overlays) still draw under
+  a page.
 - Clicking a page gives it the keyboard and makes its pane the focused one.
   A layout block's page keeps the keyboard until a click elsewhere in Herdr
   or a focus change. A dialog or popup (the palette, a menu, a rename
