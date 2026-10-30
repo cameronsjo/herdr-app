@@ -172,7 +172,8 @@ pub enum Source {
     Socket,
     /// A mod's `run()` (and keys.json bindings, the native key monitor): agents write mods and keys.
     Mod,
-    /// The dev-only switch (debug builds, `HERDR_DEV_AGENT_ACCESS=1` at launch).
+    /// The dev-only switch (debug builds with the `dev-agent-access` feature,
+    /// `HERDR_DEV_AGENT_ACCESS=1` at launch).
     DevSwitch,
     Close,
     Quit,
@@ -185,24 +186,30 @@ impl Source {
             Source::PaneControl => "pane control",
             Source::Socket => "socket",
             Source::Mod => "mod or key",
-            Source::DevSwitch => "socket (dev switch, debug build)",
+            Source::DevSwitch => "socket (dev switch, dev-agent-access build)",
             Source::Close => "close",
             Source::Quit => "quit",
         }
     }
 }
 
-#[cfg(debug_assertions)]
+#[cfg(all(debug_assertions, feature = "dev-agent-access"))]
 static DEV_SWITCH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Debug builds only: `HERDR_DEV_AGENT_ACCESS=1` in the app's own environment
-/// at launch lets the control socket turn agent access on, so an agent can
-/// test the path end to end without a person's click. Read once at startup
-/// and removed from the environment, so terminals never inherit it. Release
-/// builds compile none of this: the variable means nothing there.
+/// What every agent header and the window's agent strip say while the dev
+/// switch is on: the person's click is no longer the only way in.
+pub const DEV_SWITCH_NOTE: &str = "DEV SWITCH: the control socket can turn agent access on";
+
+/// Debug builds with the `dev-agent-access` feature only:
+/// `HERDR_DEV_AGENT_ACCESS=1` in the app's own environment at launch lets
+/// the control socket turn agent access on, so an agent can test the path
+/// end to end without a person's click. That drops the consent property, so
+/// the dev bundle people run (`just browser-dev`) is built without it. Read
+/// once at startup and removed from the environment, so terminals never
+/// inherit it. Other builds compile none of this: the variable means nothing.
 #[cfg_attr(not(all(target_os = "macos", feature = "browser")), allow(dead_code))]
 pub fn read_dev_switch() {
-    #[cfg(debug_assertions)]
+    #[cfg(all(debug_assertions, feature = "dev-agent-access"))]
     {
         const NAME: &str = "HERDR_DEV_AGENT_ACCESS";
         let on = std::env::var(NAME).is_ok_and(|v| v == "1");
@@ -213,9 +220,9 @@ pub fn read_dev_switch() {
 }
 
 pub fn dev_switch() -> bool {
-    #[cfg(debug_assertions)]
+    #[cfg(all(debug_assertions, feature = "dev-agent-access"))]
     return DEV_SWITCH.load(std::sync::atomic::Ordering::SeqCst);
-    #[cfg(not(debug_assertions))]
+    #[cfg(not(all(debug_assertions, feature = "dev-agent-access")))]
     false
 }
 

@@ -1597,7 +1597,11 @@ impl AppWindow {
             .bg(if on { c("blocked") } else { c("raised") })
             .text_size(settings::z(12.0))
             .text_color(c("foreground"))
-            .child(div().flex_1().overflow_hidden().whitespace_nowrap().child("Test profile: don't sign into real accounts."))
+            .child(div().flex_1().overflow_hidden().whitespace_nowrap().child(if crate::browser::dev_switch() {
+                crate::browser::DEV_SWITCH_NOTE
+            } else {
+                "Test profile: don't sign into real accounts."
+            }))
             .child(div().whitespace_nowrap().child(state))
             .child(
                 div()
@@ -1621,6 +1625,57 @@ impl AppWindow {
                     })),
             )
             .into_any_element()
+    }
+
+    /// While any browser has agent access on, a strip along the bottom of the
+    /// window names each one, with a Stop button. It sits outside the layout,
+    /// so hiding, moving or editing a block, or switching tab or space, can't
+    /// hide it, and no page's view covers it.
+    fn agent_watch(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let on = self.browsers.agents_on();
+        if on.is_empty() {
+            return None;
+        }
+        let mut strip = div()
+            .id("agent-watch")
+            .flex_none()
+            .w_full()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .h(settings::z(24.0))
+            .overflow_hidden()
+            .bg(c("blocked"))
+            .text_size(settings::z(12.0))
+            .text_color(c("foreground"));
+        if crate::browser::dev_switch() {
+            strip = strip.child(div().whitespace_nowrap().child(crate::browser::DEV_SWITCH_NOTE));
+        }
+        for (browser, last) in on {
+            let label = match last {
+                Some(t) => format!("Agent access ON: {browser} · last: terminal {t} (claimed)"),
+                None => format!("Agent access ON: {browser}"),
+            };
+            let b = browser.clone();
+            strip = strip.child(div().whitespace_nowrap().child(label)).child(
+                div()
+                    .id(SharedString::from(format!("agent-watch-stop-{browser}")))
+                    .px_2()
+                    .rounded_sm()
+                    .bg(c("accent"))
+                    .text_color(c("accent_foreground"))
+                    .cursor_pointer()
+                    .child("Stop agent")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let _ = this.set_agent_access(&b, false, crate::browser::Source::PaneControl);
+                        this.publish(cx);
+                        cx.notify();
+                    })),
+            );
+        }
+        Some(strip.into_any_element())
     }
 
     /// Turns agent access for `browser` on or off (plan Task 5). On only
@@ -3190,7 +3245,7 @@ impl AppWindow {
                 let from = if person {
                     crate::browser::Source::Mod
                 } else if on && crate::browser::dev_switch() {
-                    tracing::warn!("browser: DEV SWITCH (debug build): the control socket turns agent access on for {b}");
+                    tracing::warn!("browser: DEV SWITCH (dev-agent-access build): the control socket turns agent access on for {b}");
                     crate::browser::Source::DevSwitch
                 } else {
                     crate::browser::Source::Socket
@@ -4093,12 +4148,15 @@ impl AppWindow {
                 None => div().into_any_element(),
             },
             Content::Mod { .. } => self.render_slot(&n.id, cx),
-            Content::Browser { browser, url, profile } => {
+            Content::Browser { browser, url, .. } => {
                 let id = n.id.clone();
                 // An agent-profile browser gets Herdr's own header: the test-profile
                 // warning and the agent-access switch. Herdr draws it (no mod), and
                 // its button is the only way agent access turns on (plan Task 5).
-                let bar = (profile.as_deref() == Some("agent")).then(|| self.agent_bar(&n.id, browser, cx));
+                // Whether to draw it comes from the open browser (fixed when it
+                // opened), never the block's `profile`: agents can edit layouts, and
+                // removing the field must not hide the marker while access is on.
+                let bar = self.browsers.agent_state(browser).map(|_| self.agent_bar(&n.id, browser, cx));
                 div()
                     .size_full()
                     .flex()
@@ -4833,6 +4891,11 @@ impl Render for AppWindow {
         }
         let focused = self.focused_path();
         let tree = self.render_node(&self.chrome, &focused, None, cx);
+        // The agent-access strip takes the bottom of the window from the layout.
+        let tree = match self.agent_watch(cx) {
+            Some(strip) => div().size_full().flex().flex_col().child(div().flex_1().min_h_0().flex().child(tree)).child(strip).into_any_element(),
+            None => tree,
+        };
         let tree = self.window_frame(tree, window, cx);
         let overlays = self.render_overlays(window.viewport_size(), cx);
         let tracker = self.float_tracker(cx);

@@ -117,7 +117,11 @@ person allows it for that pane:
    refused, because an agent can reach both. Turning it off works from
    anywhere (the header's **Stop agent**, or
    `herdr-app do browser.agent_access --browser b1 --on false`). Access is
-   never saved; closing the browser or quitting turns it off.
+   never saved; closing the browser or quitting turns it off. While any
+   browser has access on, a strip along the bottom of the window names it,
+   with its own **Stop agent**. Herdr draws the header and the strip from the
+   open browser, not the layout, so hiding or editing a block, or switching
+   tab or space, doesn't hide them.
 3. In a terminal Herdr started (any agent pane), `agent-browser snapshot -i`,
    `agent-browser click @e5`, `agent-browser fill @e2 "Ada"`. The header
    names the terminal that last attached, as it claimed itself.
@@ -136,8 +140,13 @@ downloads; cookie headers are stripped from network events. It refuses any
 upgrade with an `Origin` header or a `Host` other than `127.0.0.1:<port>`,
 and answers anything but an upgrade with a bare 404. Turning access off, a
 new attach for the same page, closing the browser and quitting end the
-token and the connection; when an agent's connection ends, the page
-reopens at its url so nothing the agent set (headers, overrides) stays.
+token and the connection: Herdr shuts the socket itself, so an agent that
+stopped reading can't hold it open. A connection's own end (the agent
+closed it, a write it didn't take in 5 s, or more than 1024 messages or
+32 MiB waiting for it) ends its token too; agent-browser asks the provider
+for a new one. Whenever a connection ends, the page reopens at its url so
+nothing the agent set (headers, overrides) stays. The reopen keeps the
+profile's storage (cookies, local storage).
 Every on, off and attach is in the log, never the token or port.
 
 agent-browser hides a provider's error text (`Plugin 'herdr' returned
@@ -145,6 +154,10 @@ success=false`); `agent-browser plugin run herdr herdr.check` says why
 (for example `agent access is off for b1: ask the person to turn on agent
 access for b1`). Terminals started before this build, or by `hc run`, don't
 have the environment; `AGENT_BROWSER_PROVIDER=` opts a terminal out.
+agent-browser's daemon reads the provider's environment once, when its
+session starts, so to pick another browser run
+`export HERDR_BROWSER=<id> AGENT_BROWSER_SESSION=$AGENT_BROWSER_SESSION-<id>`
+before the next agent-browser command.
 
 What this does and doesn't protect (state this wherever the prototype is
 shown):
@@ -167,11 +180,22 @@ process at its next launch, same user only), and Chromium logs a failed
 signature check of its own process (`process_requirement.cc … -67030`);
 whether Chromium then skips checks between its processes is unverified.
 
-### Dev-only switch (debug builds)
+### Dev-only switch (automated tests only)
 
-A debug build started with `HERDR_DEV_AGENT_ACCESS=1` in its own
-environment lets `herdr-app do browser.agent_access --on true` turn access
-on, so an agent can test the whole path without a person's click. It is
-read once at launch and removed from the environment (terminals never
-inherit it), logged as `DEV SWITCH ON` at startup and on every use, and not
-compiled into release builds.
+A build with the switch drops the consent property: an agent that can
+relaunch the app (`herdr-app do app.quit`, then the app with the variable
+set) can turn its own access on. So only an explicit test build has it:
+`scripts/browser-dev-bundle --dev-agent-access` builds a debug bundle with
+the `dev-agent-access` Cargo feature. `just browser-dev` and
+`just browser-build` leave it out, and release builds ignore it (the code is
+behind `debug_assertions` and the feature; the test
+`builds_without_the_dev_feature_have_no_dev_switch` pins it).
+
+Started with `HERDR_DEV_AGENT_ACCESS=1` in its own environment, such a
+build lets `herdr-app do browser.agent_access --on true` turn access on, so
+an agent can test the whole path without a person's click. It is read once
+at launch and removed from the environment (terminals never inherit it),
+logged as `DEV SWITCH ON` at startup and on every use, and every agent
+header and the window's agent strip say "DEV SWITCH: the control socket can
+turn agent access on". Show the prototype on a bundle without it
+(`just browser-dev --release`).

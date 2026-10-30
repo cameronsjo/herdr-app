@@ -292,6 +292,25 @@ mod tests {
         assert_eq!(changes.open, vec![("b2".into(), BLANK.into())]);
     }
 
+    /// The header and the window's agent strip follow the open browser, not
+    /// the block: an agent that edits a layout to drop `profile: "agent"`
+    /// keeps the browser in the agent profile with its access and marker.
+    #[test]
+    fn a_block_edit_changes_neither_the_open_browsers_profile_nor_its_access() {
+        let mut r = Registry::default();
+        let agent = Block { agent_profile: true, ..block("b1", "https://a/", "p1", Some("sp1")) };
+        r.reconcile(&[agent.clone()]);
+        assert!(r.set_access("b1", true));
+        let edited = Block { agent_profile: false, ..agent };
+        assert_eq!(r.reconcile(&[edited]), Changes::default());
+        let e = r.get("b1").unwrap();
+        assert!(e.agent_profile && e.agent_access, "a layout edit turned the marker's state off");
+        // And a person-profile browser doesn't become an agent one by adding the field.
+        r.reconcile(&[block("b2", "https://b/", "p2", Some("sp1"))]);
+        r.reconcile(&[Block { agent_profile: true, ..block("b2", "https://b/", "p2", Some("sp1")) }]);
+        assert!(!r.get("b2").unwrap().agent_profile);
+    }
+
     #[test]
     fn a_gone_block_closes_its_browser_and_a_moved_one_keeps_it() {
         let mut r = Registry::default();

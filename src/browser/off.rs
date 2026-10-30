@@ -52,6 +52,10 @@ impl Browsers {
         None
     }
 
+    pub fn agents_on(&self) -> Vec<(String, Option<String>)> {
+        Vec::new()
+    }
+
     pub fn set_agent_access(&mut self, _browser: &str, _on: bool, _from: super::Source) -> Result<(), String> {
         Err(UNAVAILABLE.into())
     }

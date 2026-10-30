@@ -126,7 +126,13 @@ pub fn access_off(browser: &str) -> String {
     format!("agent access is off for {browser}: ask the person to turn on agent access for {browser}")
 }
 pub fn ambiguous(browsers: &[&str]) -> String {
-    format!("two or more browsers here ({}): set HERDR_BROWSER=<id>", browsers.join(", "))
+    // agent-browser's daemon reads the provider's environment once, when it
+    // starts (often on the command that got this error), so a new
+    // HERDR_BROWSER needs a new session too.
+    format!(
+        "two or more browsers here ({}): run `export HERDR_BROWSER=<id> AGENT_BROWSER_SESSION=$AGENT_BROWSER_SESSION-<id>`, then agent-browser again (a running agent-browser session keeps the environment it started with)",
+        browsers.join(", ")
+    )
 }
 pub fn person_profile(browser: &str) -> String {
     format!("{browser} uses the person's profile: agents can only drive a browser opened with --profile agent")
@@ -676,13 +682,17 @@ mod tests {
         assert!(needs_agent_profile(true).is_ok());
     }
 
-    #[cfg(not(debug_assertions))]
+    /// Every build but a debug one with the `dev-agent-access` feature: the
+    /// variable means nothing (default and `--features browser` test runs,
+    /// and every release build).
+    #[cfg(not(all(debug_assertions, feature = "dev-agent-access")))]
     #[test]
-    fn release_builds_have_no_dev_switch() {
-        // SAFETY: test-only, single-threaded at this point of the test.
+    fn builds_without_the_dev_feature_have_no_dev_switch() {
+        // SAFETY: test-only; no other test reads this variable.
         unsafe { std::env::set_var("HERDR_DEV_AGENT_ACCESS", "1") };
         read_dev_switch();
         assert!(!dev_switch());
+        unsafe { std::env::remove_var("HERDR_DEV_AGENT_ACCESS") };
     }
 
     // ---- selecting the caller's browser
@@ -742,7 +752,10 @@ mod tests {
         assert_eq!(remote("m1/t4"), "terminal m1/t4 runs on another machine: browser panes are only for this machine's terminals");
         assert_eq!(no_browser(), "no browser in this space: open one with: herdr-app do browser.open --profile agent --url <url>");
         assert_eq!(access_off("b1"), "agent access is off for b1: ask the person to turn on agent access for b1");
-        assert_eq!(ambiguous(&["b1", "b2"]), "two or more browsers here (b1, b2): set HERDR_BROWSER=<id>");
+        assert_eq!(
+            ambiguous(&["b1", "b2"]),
+            "two or more browsers here (b1, b2): run `export HERDR_BROWSER=<id> AGENT_BROWSER_SESSION=$AGENT_BROWSER_SESSION-<id>`, then agent-browser again (a running agent-browser session keeps the environment it started with)"
+        );
         assert_eq!(person_profile("b1"), "b1 uses the person's profile: agents can only drive a browser opened with --profile agent");
     }
 

@@ -544,7 +544,8 @@ The main ones:
   Pages are http, https or about:blank. `profile: "agent"` opens a separate test
   profile; the person can let agents drive it (`agent-browser`) with the
   pane header's "Allow agent". `browser.agent_access {browser, on: false}` turns
-  that off; nothing but the person's click turns it on (not `run()`, not the socket).
+  that off; nothing but the person's click turns it on (not `run()`, not the socket;
+  a `dev-agent-access` test build, which says so in the pane, also takes the socket).
 - Agents: `agent.next`, `agent.prev`, `agent.focus {terminal}`.
 - Layout: `layout.switch {name?}`, `layout.toggle {id}`, `layout.show {id}`, `layout.hide {id}`,
   `layout.resize {id, px | weight}`, `layout.select {stack, child}`, `layout.set {layout}`

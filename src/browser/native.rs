@@ -188,6 +188,11 @@ impl Browsers {
         self.registry.get(browser).filter(|e| e.agent_profile).map(|e| (e.agent_access, e.last_agent.clone()))
     }
 
+    /// The browsers with agent access on, with their last attaching terminal.
+    pub fn agents_on(&self) -> Vec<(String, Option<String>)> {
+        self.registry.list().iter().filter(|e| e.agent_profile && e.agent_access).map(|e| (e.browser.clone(), e.last_agent.clone())).collect()
+    }
+
     /// Agent access on or off (`agent::may_set_access`: on only from the
     /// pane's own control). Off ends the agent's token and connection; the
     /// connection's end reopens the page (runtime::agent_gone).

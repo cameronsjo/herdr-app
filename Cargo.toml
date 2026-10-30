@@ -42,6 +42,12 @@ sha2 = "0.10"
 # with CEF's helper apps (`just browser-dev`). Building it needs CEF_PATH
 # outside the repo (build.rs refuses otherwise; `just browser-build` sets it).
 browser = ["dep:cef", "dep:block2", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation", "dep:raw-window-handle", "dep:tungstenite"]
+# Automated tests of agent access only: a debug build with this feature,
+# launched with HERDR_DEV_AGENT_ACCESS=1, lets the control socket turn agent
+# access on, so it no longer needs the person's click. Never in a build
+# people use (`just browser-dev` and `browser-build` leave it out; release
+# builds ignore it). `scripts/browser-dev-bundle --dev-agent-access`.
+dev-agent-access = ["browser"]
 
 # CEF starts its renderer, GPU and network processes from this helper; a
 # bundle names its copies "Herdr Helper*" (scripts/browser-dev-bundle).

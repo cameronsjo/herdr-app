@@ -121,7 +121,8 @@ agent-browser says `Plugin 'herdr' returned success=false`, run
 `agent-browser plugin run herdr herdr.check` to see why. Terminals opened
 before this version or with `hc run` don't have the environment;
 `AGENT_BROWSER_PROVIDER=` opts a terminal out. `HERDR_BROWSER=<id>` picks a
-browser when there are two. Only a browser opened with `--profile agent` can
+browser when there are two; agent-browser reads it only when its session
+starts, so export it with a new `AGENT_BROWSER_SESSION` name. Only a browser opened with `--profile agent` can
 be driven; open one with `herdr-app do browser.open --profile agent --url <url>`
 only when asked.
 
