@@ -624,6 +624,8 @@ wrap_life_span_handler! {
                 tracing::info!("browser: {} (cef {}) is no longer wanted; closing it", self.id, browser.identifier());
                 STATE.with_borrow_mut(|s| s.closing.push(browser.identifier()));
                 close_browser(&browser);
+            } else {
+                view::page_created(&self.id);
             }
         }
 

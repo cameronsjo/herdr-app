@@ -200,6 +200,26 @@ pub fn end_frame(window: &Window) {
     }
 }
 
+/// CEF made a browser's page in its container. A page born in a hidden
+/// container (under an overlay, or in a block that isn't shown) reports
+/// `visible` until it has been shown once (measured; after that, hiding the
+/// container makes it report `hidden`). Showing and hiding
+/// the container again in the same main-thread turn tells it: AppKit sends
+/// the unhide and hide to the page's view at once, and nothing draws between.
+pub fn page_created(id: &str) {
+    VIEWS.with_borrow(|views| {
+        let Some(c) = views.get(id) else { return };
+        let Some(why) = &c.hidden else { return };
+        c.view.setHidden(false);
+        c.view.setHidden(true);
+        let why = match why {
+            Hidden::NotShown => "its block isn't shown".to_owned(),
+            Hidden::Under(label) => format!("under overlay {label}"),
+        };
+        tracing::debug!("browser: {id}'s page was born hidden ({why}); told it it's hidden");
+    });
+}
+
 /// The browser closed: its container goes too (runtime.rs removed the page first).
 pub fn remove(id: &str) {
     if let Some(c) = VIEWS.with_borrow_mut(|v| v.remove(id)) {
