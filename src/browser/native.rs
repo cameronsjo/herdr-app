@@ -262,7 +262,7 @@ impl Browsers {
         let e = self.registry.get(browser).ok_or_else(|| format!("no open browser {browser:?}"))?;
         agent::needs_agent_profile(e.agent_profile).map_err(str::to_owned)?;
         let site = agent::site(&e.page.url);
-        let (title, body) = agent::consent_text(browser, &site);
+        let (title, body) = agent::consent_text(browser, &site).map_err(str::to_owned)?;
         self.asking = Some(browser.to_owned());
         Ok(super::Ask { browser: browser.to_owned(), site, title, body })
     }
@@ -297,6 +297,8 @@ impl Browsers {
             (None, Some(e)) if e.page.loading => (None, format!("Opening {}", e.page.url)),
             (None, Some(e)) => (Some(e.page.title.clone()).filter(|t| !t.is_empty()), e.page.url.clone()),
             (None, None) if self.registry.get(browser).is_some() => (None, format!("Browser {browser} shows in another block.")),
+            // An agent-profile block whose id Herdr didn't give out (`registry::blocks`).
+            (None, None) if !registry::herdr_id(browser) => (None, "This browser doesn't open: an agent-profile browser needs an id Herdr gave out (b1, b2, …).".to_owned()),
             (None, None) => (None, format!("Opening {url}")),
         };
         let mut el = div()

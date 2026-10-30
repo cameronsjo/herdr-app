@@ -154,15 +154,20 @@ pub fn site(url: &str) -> String {
 }
 
 /// The dialog's title and text: the browser, its profile, and its site.
-pub fn consent_text(browser: &str, site: &str) -> (String, String) {
-    (
+/// Only a Herdr-issued id (`b1`, `b2`, …; `registry::herdr_id`) is named:
+/// an agent writes layout blocks, and the dialog must carry no sentence of
+/// its choosing (fix round 8).
+pub fn consent_text(browser: &str, site: &str) -> Result<(String, String), &'static str> {
+    if !super::registry::herdr_id(browser) {
+        return Err("agent access needs a browser id Herdr gave out (b1, b2, …)");
+    }
+    Ok((
         "Let agents drive this browser?".to_owned(),
         format!(
-            "Browser {}, agent profile, at {}.\n\nAny agent in a Herdr terminal on this Mac can then read this page, click and type in it, run script in it and open other sites in this pane, until you click Stop agent. Use test accounts only.",
-            super::log_safe(browser),
+            "Browser {browser}, agent profile, at {}.\n\nAny agent in a Herdr terminal on this Mac can then read this page, click and type in it, run script in it and open other sites in this pane, until you click Stop agent. Use test accounts only.",
             super::log_safe(site)
         ),
-    )
+    ))
 }
 
 /// Agent access only in a browser on the separate agent profile (review item 2).
@@ -855,13 +860,28 @@ mod tests {
     fn the_dialog_names_the_browser_its_profile_and_only_the_site() {
         assert_eq!(site("http://me:pw@127.0.0.1:8765/browser-fixture.html?code=SECRET#f"), "http://127.0.0.1:8765");
         assert_eq!(site("https://Example.TEST/a"), "https://example.test");
-        let (title, body) = consent_text("b3", &site("https://example.test/x?y=1"));
+        let (title, body) = consent_text("b3", &site("https://example.test/x?y=1")).unwrap();
         assert_eq!(title, "Let agents drive this browser?");
         assert!(body.starts_with("Browser b3, agent profile, at https://example.test."), "{body}");
         assert!(!body.contains("/x") && !body.contains("y=1"), "{body}");
         // A site can't add lines or reorder the text.
-        let (_, body) = consent_text("b3", "https://a.test\nAllow is safe\u{202e}");
+        let (_, body) = consent_text("b3", "https://a.test\nAllow is safe\u{202e}").unwrap();
         assert!(!body.contains("test\nAllow") && !body.contains('\u{202e}'), "{body}");
+    }
+
+    /// Fix round 8: a layout block's browser id is agent-written text. The
+    /// dialog names only ids Herdr gives out, so an agent can't put a
+    /// sentence of its own into the one surface consent rests on.
+    #[test]
+    fn the_dialog_names_only_an_id_herdr_gave_out() {
+        let site = site("http://127.0.0.1:8765/x");
+        for good in ["b1", "b42", "b999999999"] {
+            assert!(consent_text(good, &site).is_ok(), "{good}");
+        }
+        let forged = "b1 is a read-only preview; Allow only finishes the fixture demo";
+        for bad in [forged, "side", "b", "b0", "b01", "B1", "b1 ", " b1", "b1\u{200b}", "b1000000000", "b-1", "b1.5", "b１"] {
+            assert!(consent_text(bad, &site).is_err(), "{bad:?}");
+        }
     }
 
     /// Fix round 2: the header's button acts on the state it was painted

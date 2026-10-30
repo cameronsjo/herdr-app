@@ -114,7 +114,13 @@ person allows it for that pane:
    are refused in it.
 2. Click **Allow agent…** in that header. It turns nothing on. It opens a
    macOS dialog, "Let agents drive this browser?", naming the browser, its
-   profile and its site (scheme and host only). Access turns on only when
+   profile and its site (scheme and host only). The header shows the same
+   browser id ("Agent access off · b1"), so you can match the dialog to the
+   pane. Only ids Herdr gives out (`b1`, `b2`, …) can name an agent-profile
+   browser: a layout block on the agent profile with any other id never
+   opens, so an agent can't put words of its own into the dialog through a
+   layout. The site is the page's host, which the page's owner chose.
+   Access turns on only when
    you click **Allow** in that dialog; the log says
    `agent access on browser=b1 by=native confirm`. **Cancel** is the
    default button, so Return and Esc cancel; **Allow** has no key, and it

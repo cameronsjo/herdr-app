@@ -1593,10 +1593,12 @@ impl AppWindow {
     /// Allow. "Stop agent" turns access off at once.
     fn agent_bar(&self, node: &str, browser: &str, cx: &mut Context<Self>) -> AnyElement {
         let (on, last) = self.browsers.agent_state(browser).unwrap_or((false, None));
+        // The id, so the person can match the native dialog ("Browser b3, …") to this pane.
+        let id = crate::browser::log_safe(browser);
         let state = match (on, last) {
-            (false, _) => "Agent access off".to_owned(),
-            (true, None) => "Agent access ON".to_owned(),
-            (true, Some(t)) => format!("Agent access ON · last: terminal {t} (claimed)"),
+            (false, _) => format!("Agent access off · {id}"),
+            (true, None) => format!("Agent access ON · {id}"),
+            (true, Some(t)) => format!("Agent access ON · {id} · last: terminal {t} (claimed)"),
         };
         let b = browser.to_owned();
         let (label, sets) = crate::browser::access_button(on);

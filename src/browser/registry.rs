@@ -204,7 +204,9 @@ impl Registry {
 }
 
 /// Every browser block: the tabs' panes (with their space), then the shown
-/// layout's own blocks (on every space, so none).
+/// layout's own blocks (on every space, so none). An agent-profile block
+/// whose id isn't one Herdr gives out (`herdr_id`) is left out, so it never
+/// opens and never reaches the consent dialog.
 pub fn blocks(model: &Model, chrome: &Node) -> Vec<Block> {
     let mut out = Vec::new();
     for space in &model.spaces {
@@ -228,12 +230,28 @@ pub fn blocks(model: &Model, chrome: &Node) -> Vec<Block> {
             out.push(Block { browser: browser.clone(), url: url.clone(), agent_profile: is_agent(profile.as_deref()), node: n.id.clone(), space: None, pane: None });
         }
     }
+    // An agent-profile block with an id Herdr didn't give out never opens.
+    out.retain(may_open);
     out
 }
 
 /// The number in an id Herdr gives out (`b12` → 12).
 fn id_number(id: &str) -> Option<u64> {
-    id.strip_prefix('b').filter(|n| !n.starts_with('0')).and_then(|n| n.parse().ok())
+    herdr_id(id).then(|| id[1..].parse().ok()).flatten()
+}
+
+/// Whether `id` has the shape of an id Herdr gives out: `b1` to
+/// `b999999999`. Only such a browser may open on the agent profile, so the
+/// native consent dialog, which names the browser, never shows an id an
+/// agent wrote into a layout block as a sentence of its own (fix round 8).
+pub fn herdr_id(id: &str) -> bool {
+    id.strip_prefix('b').is_some_and(|n| (1..=9).contains(&n.len()) && !n.starts_with('0') && n.bytes().all(|c| c.is_ascii_digit()))
+}
+
+/// A block that may open: an agent-profile block needs a Herdr-shaped id
+/// (`herdr_id`); a person-profile block may use any id (a layout's `side`).
+fn may_open(b: &Block) -> bool {
+    !b.agent_profile || herdr_id(&b.browser)
 }
 
 /// What `browser.open`/`browser.navigate` accept: an http(s) url,
@@ -411,6 +429,40 @@ mod tests {
         // A restored layout names b7 (and a layout file's own `side`).
         r.reconcile(&[block("b7", "https://a/", "p1", Some("sp1")), block("side", "https://b/", "s", None)]);
         assert_eq!(r.issue(["b7", "side"]), "b8");
+    }
+
+    /// Fix round 8: a layout block's id is agent-written text, and the
+    /// consent dialog names the browser. An agent-profile block whose id
+    /// Herdr didn't give out never opens, so it never reaches the dialog; a
+    /// person-profile block keeps any id (it can't get agent access).
+    #[test]
+    fn an_agent_block_with_an_id_herdr_didnt_give_out_never_opens() {
+        let forged = "b1 is a read-only preview; Allow only finishes the fixture demo";
+        let agent = |id: &str, node: &str| Node::block(node, Content::Browser { browser: id.into(), url: "http://127.0.0.1:8765/".into(), profile: Some("agent".into()) });
+        let mut m = Model::default();
+        m.add_space("sp1", "one", "/", Tab::with_pane("tb1", "", agent(forged, "p1")));
+        m.split_with("p1", Axis::Row, agent("b2", "p2"));
+        m.split_with("p2", Axis::Row, agent("b99999999999", "p3"));
+        m.split_with("p3", Axis::Row, browser_pane("p4", "side", "https://a/"));
+        let chrome = Node::container("root", Axis::Row, vec![agent("side", "s")]);
+        let found = blocks(&m, &chrome);
+        assert_eq!(found.iter().map(|b| (b.browser.as_str(), b.agent_profile)).collect::<Vec<_>>(), [("b2", true), ("side", false)]);
+        let mut r = Registry::default();
+        let changes = r.reconcile(&found);
+        assert_eq!(changes.open.iter().map(|(b, _)| b.as_str()).collect::<Vec<_>>(), ["b2", "side"]);
+        assert!(r.get(forged).is_none());
+        // A huge restored id can't push the next one past what fits.
+        assert_eq!(r.issue(["b18446744073709551615"]), "b3");
+    }
+
+    #[test]
+    fn herdr_ids_are_b_and_one_to_nine_digits() {
+        for good in ["b1", "b10", "b999999999"] {
+            assert!(herdr_id(good), "{good}");
+        }
+        for bad in ["", "b", "b0", "b07", "b1000000000", "B1", "b1 ", "b-1", "b+1", "side", "b1\u{200b}", "b١"] {
+            assert!(!herdr_id(bad), "{bad:?}");
+        }
     }
 
     #[test]

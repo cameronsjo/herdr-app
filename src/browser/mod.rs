@@ -330,15 +330,27 @@ pub fn public_url(url: &str) -> String {
 /// A page's title wherever its url goes out as `public_url`. Chromium titles
 /// a page that has none with its url ("127.0.0.1:8765/cb?code=…", no scheme
 /// or userinfo, maybe unescaped, the host maybe in Unicode), so a title
-/// that starts with the page's host, carries its query, or reads as a url
-/// (a host with a `.` or `:`, then `/`, then `?` or `#`, and no space before
-/// those) is cut the same way. Other titles pass.
+/// that starts with the page's host, ends its head with the page's path
+/// (as is or unescaped), or reads as a url (a host with a `.` or `:`, then
+/// `/`, then `?` or `#`, and no space before those) is cut the same way.
+/// Then, whatever the title looks like, the url's query, fragment and
+/// userinfo come out of it, matched as they are and unescaped (fix round
+/// 8: a Unicode host and a space in the path got past the shape tests).
+/// Other titles pass.
 #[cfg_attr(not(all(target_os = "macos", feature = "browser")), allow(dead_code))]
 pub fn public_title(title: &str, url: &str) -> String {
+    without_url_secrets(&url_title_cut(title, url), url)
+}
+
+fn url_title_cut(title: &str, url: &str) -> String {
     let (before, query) = url.split_once('?').map_or((url, ""), |(b, q)| (b, q.split('#').next().unwrap_or_default()));
-    let host = public_url(before)
+    let public = public_url(before);
+    let (host, path) = public
         .split_once("://")
-        .map(|(_, rest)| rest.split(['/', '\\']).next().unwrap_or_default().to_ascii_lowercase())
+        .map(|(_, rest)| {
+            let (host, path) = rest.split_at(rest.find(['/', '\\']).unwrap_or(rest.len()));
+            (host.to_ascii_lowercase(), path)
+        })
         .unwrap_or_default();
     let shown = title.trim_start();
     let shown = shown.split_once("://").filter(|(scheme, _)| !scheme.contains([' ', '/'])).map_or(shown, |(_, rest)| rest);
@@ -346,10 +358,12 @@ pub fn public_title(title: &str, url: &str) -> String {
     let hosts = [host.as_str(), host.strip_prefix("www.").unwrap_or_default()];
     let carries_query = !query.is_empty() && title.contains(query);
     let head = shown.split(['?', '#']).next().unwrap_or_default();
-    let reads_as_url = head.len() < shown.len()
-        && !head.contains(char::is_whitespace)
-        && head.split_once('/').is_some_and(|(host, _)| host.contains(['.', ':']));
-    if !carries_query && !reads_as_url && !hosts.iter().any(|h| !h.is_empty() && shown.starts_with(h)) {
+    let hostish = head.split_once('/').is_some_and(|(host, _)| host.contains(['.', ':']));
+    let reads_as_url = head.len() < shown.len() && hostish && !head.contains(char::is_whitespace);
+    // The page's path after a host-shaped head, as Chromium shows it (a
+    // Unicode host, `%20` as a space): the url, whatever its host looks like.
+    let has_path = path.len() > 1 && hostish && [path.to_ascii_lowercase(), unescape(path).to_lowercase()].iter().any(|p| head.ends_with(p.as_str()));
+    if !carries_query && !reads_as_url && !has_path && !hosts.iter().any(|h| !h.is_empty() && shown.starts_with(h)) {
         return title.to_owned();
     }
     let title = if carries_query { title.replace(query, "") } else { title.to_owned() };
@@ -360,11 +374,64 @@ pub fn public_title(title: &str, url: &str) -> String {
     }
 }
 
+/// `title` with the url's query, fragment, `userinfo@` and password taken
+/// out, each matched as it is in the url and unescaped (Chromium shows a
+/// url's `%20` as a space), then any `?`, `#`, `&` or `=` left dangling
+/// at its end. A title that carries none of them passes as it is.
+fn without_url_secrets(title: &str, url: &str) -> String {
+    let (pre, fragment) = url.split_once('#').unwrap_or((url, ""));
+    let query = pre.split_once('?').map_or("", |(_, q)| q);
+    let authority = pre.split_once("://").map_or("", |(_, rest)| rest.split(['/', '\\', '?']).next().unwrap_or_default());
+    let userinfo = authority.rsplit_once('@').map_or(String::new(), |(u, _)| format!("{u}@"));
+    let password = userinfo.trim_end_matches('@').split_once(':').map_or("", |(_, p)| p);
+    let secrets: Vec<&str> = [query, fragment, userinfo.as_str(), password].into_iter().filter(|s| !s.is_empty()).collect();
+    let mut out = title.to_owned();
+    let mut found = false;
+    for s in &secrets {
+        if out.contains(s) {
+            out = out.replace(s, "");
+            found = true;
+        }
+    }
+    let unescaped: Vec<String> = secrets.iter().map(|s| unescape(s)).filter(|s| !s.is_empty()).collect();
+    if unescaped.iter().any(|s| unescape(&out).contains(s.as_str())) {
+        out = unescape(&out);
+        for s in &unescaped {
+            out = out.replace(s.as_str(), "");
+        }
+        found = true;
+    }
+    if found { out.trim_end_matches(['?', '#', '&', '=']).to_owned() } else { out }
+}
+
+/// `%XX` escapes decoded (invalid UTF-8 as U+FFFD); `+` stays a `+`, as
+/// in Chromium's display of a url.
+fn unescape(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |b: u8| (b as char).to_digit(16);
+        match (bytes[i], bytes.get(i + 1).copied().and_then(hex), bytes.get(i + 2).copied().and_then(hex)) {
+            (b'%', Some(h), Some(l)) => {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+            }
+            (b, _, _) => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Text from outside Herdr (an agent's CDP method name, a url it asked for,
-/// a key binding's action) as a log line may carry it: control characters,
-/// line and paragraph separators and bidi controls escaped (`\n`,
-/// `\u{202e}`), so it can't start a line of its own or reorder one; at most
-/// 200 characters.
+/// a key binding's action, a site the consent dialog names) as a log line or
+/// the dialog may carry it: control characters, line and paragraph
+/// separators, bidi controls and invisible format characters escaped
+/// (`\n`, `\u{202e}`, `\u{200b}`), so it can't start a line of its own,
+/// reorder one, or hide text in one; at most 200 characters.
 #[cfg_attr(not(all(target_os = "macos", feature = "browser")), allow(dead_code))]
 pub fn log_safe(text: &str) -> String {
     let mut out = String::new();
@@ -373,13 +440,22 @@ pub fn log_safe(text: &str) -> String {
             out.push('…');
             break;
         }
-        if ch.is_control() || matches!(ch, '\u{2028}' | '\u{2029}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}') {
+        if ch.is_control() || hidden(ch) {
             out.extend(ch.escape_default());
         } else {
             out.push(ch);
         }
     }
     out
+}
+
+/// Line and paragraph separators, bidi controls, and format characters
+/// that draw nothing (soft hyphen, zero-width spaces and joiners, word
+/// joiner and invisible operators, the byte order mark, the tag block).
+fn hidden(ch: char) -> bool {
+    matches!(ch,
+        '\u{00ad}' | '\u{061c}' | '\u{115f}' | '\u{1160}' | '\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}'
+        | '\u{2060}'..='\u{206f}' | '\u{3164}' | '\u{feff}' | '\u{ffa0}' | '\u{fff9}'..='\u{fffb}' | '\u{1d173}'..='\u{1d17a}' | '\u{e0000}'..='\u{e007f}')
 }
 
 // Errors an agent sees (pinned in agent.rs's tests).
@@ -428,6 +504,22 @@ mod tests {
         assert_eq!(public_title("bücher.localhost:18791/notitle.html?code=SECRET C1", idn), "bücher.localhost:18791/notitle.html");
         assert_eq!(public_title(" bücher.localhost:18791/notitle.html?code=SECRETH1é", idn), " bücher.localhost:18791/notitle.html");
         assert_eq!(public_title("bücher.localhost:18791/notitle.html#fragSECRET", idn), "bücher.localhost:18791/notitle.html");
+        // Fix round 8 (live, b4): a Unicode host and a space in the path.
+        // The host prefix (punycode), the raw query (`%20`) and the
+        // no-whitespace url shape all missed at once.
+        let b4 = concat!("http://me:", "p", "w", "@xn--bcher-kva.localhost:18795/no%20title.html?code=SECRET%20Q3#fragSECRET");
+        assert_eq!(public_title("bücher.localhost:18795/no title.html?code=SECRET Q3#fragSECRET", b4), "bücher.localhost:18795/no title.html");
+        assert_eq!(public_title("bücher.localhost:18795/no title.html#fragSECRET", b4), "bücher.localhost:18795/no title.html");
+        // A title cut short (Chromium caps titles): the head still reads as the url.
+        assert_eq!(public_title("bücher.localhost:18795/no title.html?code=SEC", b4), "bücher.localhost:18795/no title.html");
+        // Whatever the title looks like, the query, fragment and userinfo come out.
+        for t in ["Done: code=SECRET Q3", "Done: code=SECRET%20Q3", "x fragSECRET y", "as me:pw@ here", "pw"] {
+            let out = public_title(t, b4);
+            assert!(!out.contains("SECRET") && !out.contains("pw"), "{t:?} → {out:?}");
+        }
+        // Control: a Unicode host with no space and no query passes as the url it is.
+        let plain = "http://xn--bcher-kva.localhost:18795/notitle.html";
+        assert_eq!(public_title("bücher.localhost:18795/notitle.html", plain), "bücher.localhost:18795/notitle.html");
         // A page's own title passes, question marks and all.
         assert_eq!(public_title("What is a pane? · Docs", "https://docs.test/panes?x=1"), "What is a pane? · Docs");
         assert_eq!(public_title("Herdr fixture", "http://127.0.0.1:8765/browser-fixture.html"), "Herdr fixture");
@@ -442,6 +534,12 @@ mod tests {
         assert_eq!(log_safe("Evil.x\nFORGED\r\u{1b}[2J\u{2028}\u{202e}"), "Evil.x\\nFORGED\\r\\u{1b}[2J\\u{2028}\\u{202e}");
         let long = "a".repeat(500);
         assert_eq!(log_safe(&long).chars().count(), 201);
+        // Fix round 8: invisible format characters can't hide text either.
+        for ch in ['\u{00ad}', '\u{061c}', '\u{200b}', '\u{200d}', '\u{2060}', '\u{2064}', '\u{feff}', '\u{e0041}', '\u{e007f}'] {
+            let out = log_safe(&format!("a{ch}b"));
+            assert!(!out.contains(ch) && out.starts_with("a\\u{"), "{ch:?} → {out}");
+        }
+        assert_eq!(log_safe("bücher.localhost"), "bücher.localhost");
     }
 
     fn r(x: f32, y: f32, w: f32, h: f32) -> Rect {
