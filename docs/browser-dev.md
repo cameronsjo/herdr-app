@@ -116,10 +116,14 @@ person allows it for that pane:
    macOS dialog, "Let agents drive this browser?", naming the browser, its
    profile and its site (scheme and host only). The header shows the same
    browser id ("Agent access off · b1"), so you can match the dialog to the
-   pane. Only ids Herdr gives out (`b1`, `b2`, …) can name an agent-profile
-   browser: a layout block on the agent profile with any other id never
-   opens, so an agent can't put words of its own into the dialog through a
-   layout. The site is the page's host, which the page's owner chose.
+   pane. An agent-profile browser's id must have the shape of the ids
+   Herdr gives out: `b` and 1 to 9 digits, no leading zero
+   (`registry::herdr_id`). A layout block on the agent profile with any
+   other id never opens, so an agent can't put words of its own into the
+   dialog through a layout. The check is the shape only: an agent that
+   writes a layout block can still open an agent-profile browser under
+   any such id, including one Herdr never gave out or a closed browser's
+   id. The site is the page's host, which the page's owner chose.
    Access turns on only when
    you click **Allow** in that dialog; the log says
    `agent access on browser=b1 by=native confirm`. **Cancel** is the
@@ -128,7 +132,11 @@ person allows it for that pane:
    click whose first click opened the dialog can't land on it. The dialog
    doesn't open while Herdr isn't the active app or while another such
    dialog is open, and an answer counts only if Herdr is still the active
-   app and the browser is still open at the site the dialog named. The
+   app and Herdr's record of the browser still has it open at the site the
+   dialog named. That record is checked as the dialog closes, before Herdr
+   handles any page event from while it was open, so a page that
+   went to another site while the dialog was open isn't caught: access
+   turns on for that browser at its new site. The
    dialog is app-modal and AppKit draws it in its own window, above every
    view in Herdr's window (GPUI's drawing and the pages): no layout, mod,
    theme, page or Herdr command can draw over it, move it or answer it.
@@ -182,8 +190,9 @@ keeps none.
 
 agent-browser's own stream server: while an agent-browser session is
 attached to a pane, its daemon also runs a websocket server on
-`127.0.0.1` with no token. agent-browser 0.39.1 starts it for every
-session, with no setting to keep it from starting, and writes its port to
+`127.0.0.1` with no token. This was checked against agent-browser 0.39.1
+(source and a live run); later versions may differ. 0.39.1 starts it for
+every session, with no setting to keep it from starting, and writes its port to
 `~/.agent-browser/<session>.stream` (`agent-browser stream disable`, run
 in that session, shuts it down until the daemon exits; the next daemon
 starts it again). It accepts connections with no

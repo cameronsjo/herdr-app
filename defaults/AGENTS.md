@@ -545,7 +545,8 @@ The main ones:
   Pages are http, https or about:blank. `profile: "agent"` opens a separate test
   profile; the person can let agents drive it (`agent-browser`): the pane header's
   "Allow agent…" opens a macOS dialog, and only its Allow turns access on. An agent-profile
-  browser needs an id Herdr gave out (`b1`, `b2`, …): a layout block with another id doesn't open.
+  browser needs an id shaped like Herdr's (`b` and 1-9 digits): a layout block with another id
+  doesn't open. Only the shape is checked; any such id opens.
   `browser.agent_access {browser, on: false}` turns it off; nothing else turns it on
   (not `run()`, not the socket, not the header alone; a `dev-agent-access` test build,
   which says so in the pane, also takes the socket). The header is a status marker only.
