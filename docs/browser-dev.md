@@ -122,6 +122,12 @@ herdr-app do browser.close --browser b2
 keys and an IME, a `<select>`, a long list to scroll, a right-click menu and
 a new-window link.
 
+`bash scripts/browser-live-checks`, run in a terminal inside the dev app,
+walks the agent checks that need a person at the window: the consent
+dialog's keys, an agent's drag, right-click and typing (the keyboard must
+stay where you left it), Stop agent, and that an iframe can't post lines
+into the agent's console. It writes your answers to a results file.
+
 ## How it behaves
 
 - A browser block is `{ "browser": "b1", "url": "..." }`, as a pane in a tab
