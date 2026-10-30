@@ -1,4 +1,4 @@
-//! The agents' loopback websocket (plan Task 5): `ws://127.0.0.1:<port>/<token>`
+//! The agents' loopback websocket: `ws://127.0.0.1:<port>/<token>`
 //! for one browser, passed through `agent::Link`'s allowlist to that page's
 //! in-process DevTools session (runtime.rs: `SendDevToolsMessage` and an
 //! observer). No CEF remote-debugging port exists; this is the only way in.
@@ -351,10 +351,10 @@ impl Drop for Ending {
             runtime::wake();
         }
         if std::thread::panicking() {
-            tracing::error!("browser: the agent connection to {} stopped on an error in Herdr", self.browser);
+            tracing::error!("browser: the agent connection to {} stopped on an error in Herdr", super::log_safe(&self.browser));
         }
         if self.open {
-            tracing::info!("browser: the agent connection to {} ended", self.browser);
+            tracing::info!("browser: the agent connection to {} ended", super::log_safe(&self.browser));
         }
     }
 }

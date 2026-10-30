@@ -287,7 +287,7 @@ fn start_cef() -> anyhow::Result<()> {
     }
     declare_app_protocol()?;
 
-    // The person's profile and the agent profile (plan Task 5) sit side by
+    // The person's profile and the agent profile sit side by
     // side under `browser/`, CEF's root cache path; every folder is 0700.
     let root = crate::mods::app_dir().join("browser");
     let profile = root.join("profile");
@@ -305,7 +305,7 @@ fn start_cef() -> anyhow::Result<()> {
         cache_path: CefString::from(profile_str.as_ref()),
         log_file: CefString::from(log.to_string_lossy().as_ref()),
         log_severity: LogSeverity::WARNING,
-        // Never a DevTools port: agents get CDP through the app (plan Task 5).
+        // Never a DevTools port: agents get CDP through the app.
         remote_debugging_port: 0,
         ..Default::default()
     };
@@ -736,7 +736,7 @@ wrap_life_span_handler! {
                 });
                 format!("{}x{}, in a window: {}{}", f.size.width, f.size.height, v.window().is_some(), fitted.unwrap_or_default())
             });
-            tracing::info!("browser: created {} (cef {}), view {}", self.id, browser.identifier(), placed.unwrap_or_else(|| "missing".into()));
+            tracing::info!("browser: created {} (cef {}), view {}", super::log_safe(&self.id), browser.identifier(), placed.unwrap_or_else(|| "missing".into()));
             let browser = browser.clone();
             // Its block went while CEF was creating it: close it right away.
             let wanted = STATE.with_borrow_mut(|s| {
@@ -745,7 +745,7 @@ wrap_life_span_handler! {
                 s.is_current(&self.id, self.generation)
             });
             if !wanted {
-                tracing::info!("browser: {} (cef {}) is no longer wanted; closing it", self.id, browser.identifier());
+                tracing::info!("browser: {} (cef {}) is no longer wanted; closing it", super::log_safe(&self.id), browser.identifier());
                 STATE.with_borrow_mut(|s| s.closing.push(browser.identifier()));
                 close_browser(&browser);
             } else {
@@ -778,12 +778,12 @@ wrap_life_span_handler! {
                 let is_main = frame.as_ref().is_some_and(|f| f.is_main() == 1);
                 let main_url = browser.and_then(|b| b.main_frame()).map(|f| CefString::from(&f.url()).to_string()).unwrap_or_default();
                 if agent::popup_allowed(&url, &frame_url, &main_url, is_main, user_gesture == 1) {
-                    tracing::info!("browser: {} popup {} opens in its pane", self.id, agent::loggable(&url));
+                    tracing::info!("browser: {} popup {} opens in its pane", super::log_safe(&self.id), agent::loggable(&url));
                     STATE.with_borrow_mut(|s| s.navigations.push((self.id.clone(), url)));
                 } else {
                     tracing::warn!(
                         "browser: {} popup to {} dropped (gesture {}, main frame {is_main}): only http, https and about:blank, and a cross-origin frame needs a click",
-                        self.id, agent::loggable(&url), user_gesture == 1
+                        super::log_safe(&self.id), agent::loggable(&url), user_gesture == 1
                     );
                 }
             }
@@ -799,7 +799,7 @@ wrap_life_span_handler! {
             let cef = browser.identifier();
             let ours = STATE.with_borrow(|s| s.phase == Phase::Closing || s.closing.contains(&cef));
             if !ours && is_current(&self.id, self.generation) {
-                tracing::info!("browser: {} asked to close", self.id);
+                tracing::info!("browser: {} asked to close", super::log_safe(&self.id));
                 send(Event::CloseAsked(self.id.clone()));
             }
             1
@@ -819,7 +819,7 @@ wrap_life_span_handler! {
                     s.pages.remove(&self.id);
                 }
             });
-            tracing::info!("browser: closed {} (cef {})", self.id, cef.unwrap_or_default());
+            tracing::info!("browser: closed {} (cef {})", super::log_safe(&self.id), cef.unwrap_or_default());
         }
     }
 }
@@ -843,7 +843,7 @@ wrap_load_handler! {
             let Some(frame) = frame else { return };
             if frame.is_main() == 1 {
                 let url = CefString::from(&frame.url()).to_string();
-                tracing::info!("browser: {} load end {} status {http_status_code}", self.id, agent::loggable(&url));
+                tracing::info!("browser: {} load end {} status {http_status_code}", super::log_safe(&self.id), agent::loggable(&url));
             }
         }
 
@@ -858,7 +858,7 @@ wrap_load_handler! {
             if frame.is_some_and(|f| f.is_main() == 1) {
                 let text = error_text.map(|t| t.to_string()).unwrap_or_default();
                 let url = failed_url.map(|u| u.to_string()).unwrap_or_default();
-                tracing::warn!("browser: {} load error {} {error_code:?} {text}", self.id, agent::loggable(&url));
+                tracing::warn!("browser: {} load error {} {error_code:?} {text}", super::log_safe(&self.id), agent::loggable(&url));
             }
         }
     }
@@ -903,7 +903,7 @@ wrap_focus_handler! {
             let current = is_current(&self.id, self.generation);
             let allowed = current && view::may_take_focus(&self.id);
             if !allowed {
-                tracing::debug!("browser: {} asked for the keyboard ({source}); refused, it isn't the page that should have it", self.id);
+                tracing::debug!("browser: {} asked for the keyboard ({source}); refused, it isn't the page that should have it", super::log_safe(&self.id));
             }
             c_int::from(!allowed)
         }
@@ -963,7 +963,7 @@ wrap_download_handler! {
         fn can_download(&self, _browser: Option<&mut Browser>, url: Option<&CefString>, _method: Option<&CefString>) -> c_int {
             if self.agent_profile {
                 let url = url.map(|u| u.to_string()).unwrap_or_default();
-                tracing::info!("browser: {} download of {} refused (agent profile)", self.id, agent::loggable(&url));
+                tracing::info!("browser: {} download of {} refused (agent profile)", super::log_safe(&self.id), agent::loggable(&url));
             }
             c_int::from(!self.agent_profile)
         }
@@ -990,7 +990,7 @@ wrap_dev_tools_message_observer! {
 
         fn on_dev_tools_agent_detached(&self, _browser: Option<&mut Browser>) {
             if is_current(&self.id, self.generation) && proxy::revoke(&self.id) {
-                tracing::info!("browser: agent access token for {} revoked: CEF's DevTools agent went away", self.id);
+                tracing::info!("browser: agent access token for {} revoked: CEF's DevTools agent went away", super::log_safe(&self.id));
             }
         }
     }

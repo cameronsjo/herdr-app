@@ -1,5 +1,5 @@
 //! The native "Let agents drive this browser?" dialog: the one control that
-//! turns agent access on (plan Task 5).
+//! turns agent access on.
 //!
 //! An app-modal `NSAlert`. AppKit draws it in its own window, above every
 //! GPUI and CEF view, and no Herdr command, mod, layout or page can draw

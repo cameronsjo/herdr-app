@@ -33,7 +33,7 @@ pub enum Content {
     /// `url` is where it was last, so a block whose browser isn't open
     /// (a restart, another screen) opens there again.
     /// `profile: "agent"`: a separate Chromium profile for test accounts;
-    /// only such a browser can be driven by an agent (plan Task 5).
+    /// only such a browser can be driven by an agent.
     Browser {
         browser: String,
         #[serde(default)]

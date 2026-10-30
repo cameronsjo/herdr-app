@@ -1,4 +1,4 @@
-//! Agents drive a browser pane (plan Task 5): the rules, with no CEF and no
+//! Agents drive a browser pane: the rules, with no CEF and no
 //! sockets, so every security control here is unit-tested.
 //!
 //! The path: `agent-browser` in a Herdr terminal runs `herdr-app
@@ -95,8 +95,8 @@ pub const ONLY_THE_PERSON: &str =
 /// On only from the person's Allow in the native dialog (or the dev
 /// switch of a dev-agent-access test build); off from anywhere. An agent
 /// can reach the control socket, write mods and keys, and arrange or cover
-/// anything Herdr draws in the window, so none of those may grant access
-/// (review F1), Herdr's own pane button included: it only opens the dialog.
+/// anything Herdr draws in the window, so none of those may grant access,
+/// Herdr's own pane button included: it only opens the dialog.
 pub fn may_set_access(on: bool, from: Source) -> Result<(), &'static str> {
     if !on || matches!(from, Source::NativeConfirm | Source::DevSwitch) { Ok(()) } else { Err(ONLY_THE_PERSON) }
 }
@@ -156,10 +156,10 @@ pub fn site(url: &str) -> String {
 /// The dialog's title and text: the browser, its profile, and its site.
 /// Only an id shaped like Herdr's (`b1`, `b2`, …; `registry::herdr_id`) is named:
 /// an agent writes layout blocks, and the dialog must carry no sentence of
-/// its choosing (fix round 8).
+/// its choosing.
 pub fn consent_text(browser: &str, site: &str) -> Result<(String, String), &'static str> {
     if !super::registry::herdr_id(browser) {
-        return Err("agent access needs a browser id Herdr gave out (b1, b2, …)");
+        return Err("agent access needs a browser id shaped like Herdr's (b and 1-9 digits: b1, b2, …)");
     }
     Ok((
         "Let agents drive this browser?".to_owned(),
@@ -170,7 +170,7 @@ pub fn consent_text(browser: &str, site: &str) -> Result<(String, String), &'sta
     ))
 }
 
-/// Agent access only in a browser on the separate agent profile (review item 2).
+/// Agent access only in a browser on the separate agent profile.
 pub fn needs_agent_profile(agent_profile: bool) -> Result<(), &'static str> {
     if agent_profile { Ok(()) } else { Err("agent access needs a browser opened with profile \"agent\"") }
 }
@@ -746,7 +746,7 @@ mod tests {
     use crate::browser::{dev_switch, parked, read_dev_switch, remote};
     use serde_json::{Value, json};
 
-    // ---- one URL gate (review item 7)
+    // ---- one URL gate
 
     #[test]
     fn only_http_https_and_about_blank_pass_the_url_gate() {
@@ -800,7 +800,7 @@ mod tests {
         assert_eq!(forbidden_switch(["herdr-app", "remote-debugging-port", "--use-mock-keychain"]), None);
     }
 
-    // ---- consent (review item 1)
+    // ---- consent
 
     #[test]
     fn only_the_native_confirmation_turns_access_on() {
@@ -869,7 +869,7 @@ mod tests {
         assert!(!body.contains("test\nAllow") && !body.contains('\u{202e}'), "{body}");
     }
 
-    /// Fix round 8: a layout block's browser id is agent-written text. The
+    /// A layout block's browser id is agent-written text. The
     /// dialog names only ids shaped like Herdr's, so an agent can't put a
     /// sentence of its own into the one surface consent rests on.
     #[test]
@@ -884,7 +884,7 @@ mod tests {
         }
     }
 
-    /// Fix round 2: the header's button acts on the state it was painted
+    /// The header's button acts on the state it was painted
     /// with. A "Stop agent" left on screen after the socket turned access
     /// off must still turn it off, never toggle the live state back on.
     #[test]
@@ -982,7 +982,7 @@ mod tests {
         assert_eq!(person_profile("b1"), "b1 uses the person's profile: agents can only drive a browser opened with --profile agent");
     }
 
-    // ---- tokens (review item 9)
+    // ---- tokens
 
     #[test]
     fn a_token_names_one_browser_until_revoked_or_replaced() {
@@ -1006,7 +1006,7 @@ mod tests {
         assert_eq!(Tokens::default().check(&c), None);
     }
 
-    // ---- the websocket upgrade (review item 8)
+    // ---- the websocket upgrade
 
     fn up<'a>(path: &'a str, host: Option<&'a str>, origin: Option<&'a str>) -> Upgrade<'a> {
         Upgrade { websocket: true, path, host, origin, malformed: false }
@@ -1270,7 +1270,7 @@ mod tests {
 
     /// `params` that isn't an object (or null) is an error answer, never a
     /// panic: a panic on the connection's thread skipped its cleanup, so the
-    /// token stayed live and the page didn't reset (round 3).
+    /// token stayed live and the page didn't reset.
     #[test]
     fn params_that_are_not_an_object_get_an_error_not_a_panic() {
         for method in ["Target.setAutoAttach", "Page.navigate", "Input.dispatchKeyEvent", "Page.printToPDF", "Runtime.evaluate"] {

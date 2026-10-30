@@ -141,7 +141,7 @@ impl std::fmt::Display for Responder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Responder::Herdr => f.write_str("Herdr"),
-            Responder::Page(id) => f.write_str(id),
+            Responder::Page(id) => f.write_str(&log_safe(id)),
             Responder::Other => f.write_str("the window (nobody)"),
         }
     }
@@ -342,8 +342,8 @@ pub fn public_url(url: &str) -> String {
 /// (as is or unescaped), or reads as a url (a host with a `.` or `:`, then
 /// `/`, then `?` or `#`, and no space before those) is cut the same way.
 /// Then, whatever the title looks like, the url's query, fragment and
-/// userinfo come out of it, matched as they are and unescaped (fix round
-/// 8: a Unicode host and a space in the path got past the shape tests).
+/// userinfo come out of it, matched as they are and unescaped: the shape
+/// tests miss a Unicode host with a space in the path.
 /// Other titles pass.
 #[cfg_attr(not(all(target_os = "macos", feature = "browser")), allow(dead_code))]
 pub fn public_title(title: &str, url: &str) -> String {
@@ -512,7 +512,7 @@ mod tests {
         assert_eq!(public_title("bücher.localhost:18791/notitle.html?code=SECRET C1", idn), "bücher.localhost:18791/notitle.html");
         assert_eq!(public_title(" bücher.localhost:18791/notitle.html?code=SECRETH1é", idn), " bücher.localhost:18791/notitle.html");
         assert_eq!(public_title("bücher.localhost:18791/notitle.html#fragSECRET", idn), "bücher.localhost:18791/notitle.html");
-        // Fix round 8 (live, b4): a Unicode host and a space in the path.
+        // Seen live: a Unicode host and a space in the path.
         // The host prefix (punycode), the raw query (`%20`) and the
         // no-whitespace url shape all missed at once.
         let b4 = concat!("http://me:", "p", "w", "@xn--bcher-kva.localhost:18795/no%20title.html?code=SECRET%20Q3#fragSECRET");
@@ -542,7 +542,7 @@ mod tests {
         assert_eq!(log_safe("Evil.x\nFORGED\r\u{1b}[2J\u{2028}\u{202e}"), "Evil.x\\nFORGED\\r\\u{1b}[2J\\u{2028}\\u{202e}");
         let long = "a".repeat(500);
         assert_eq!(log_safe(&long).chars().count(), 201);
-        // Fix round 8: invisible format characters can't hide text either.
+        // Invisible format characters can't hide text either.
         for ch in ['\u{00ad}', '\u{061c}', '\u{200b}', '\u{200d}', '\u{2060}', '\u{2064}', '\u{feff}', '\u{e0041}', '\u{e007f}'] {
             let out = log_safe(&format!("a{ch}b"));
             assert!(!out.contains(ch) && out.starts_with("a\\u{"), "{ch:?} → {out}");
@@ -558,6 +558,15 @@ mod tests {
         assert!(!line.contains('\n'), "{line}");
         assert!(line.ends_with(" by=socket"), "{line}");
         assert_eq!(access_line(true, "b1", Source::NativeConfirm), "browser: agent access on browser=b1 by=native confirm");
+    }
+
+    #[test]
+    fn a_page_holding_the_keyboard_is_logged_escaped() {
+        // The keyboard lines log the holder through `Display`.
+        let forged = Responder::Page("x\nbrowser: agent access on browser=b1 by=native confirm".into());
+        let shown = forged.to_string();
+        assert!(!shown.contains('\n'), "{shown}");
+        assert_eq!(Responder::Page("b1".into()).to_string(), "b1");
     }
 
     fn r(x: f32, y: f32, w: f32, h: f32) -> Rect {

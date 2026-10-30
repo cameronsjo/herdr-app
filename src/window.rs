@@ -1560,7 +1560,7 @@ impl AppWindow {
         if u.close && let Some(pane) = &pane {
             let r = self.run_as("pane.close", json!({ "pane": pane }), false, window, cx);
             if let Some(e) = r.get("error") {
-                tracing::warn!("browser {}: the page asked to close: {e}", u.browser);
+                tracing::warn!("browser {}: the page asked to close: {e}", crate::browser::log_safe(&u.browser));
             }
             return;
         }
@@ -1721,7 +1721,7 @@ impl AppWindow {
         Some(strip.into_any_element())
     }
 
-    /// Turns agent access for `browser` on or off (plan Task 5). On only
+    /// Turns agent access for `browser` on or off. On only
     /// from the native dialog's Allow (or the dev switch of a dev-agent-access
     /// test build); off
     /// from anywhere, and off revokes the agent's token and ends its
@@ -1756,7 +1756,7 @@ impl AppWindow {
         if let Ok(v) = &r
             && !check
         {
-            tracing::info!("browser: agent attach browser={} terminal={terminal} (claimed, unverified) selection={}", crate::browser::log_safe(v["browser"].as_str().unwrap_or("?")), v["selection"].as_str().unwrap_or("?"));
+            tracing::info!("browser: agent attach browser={} terminal={} (claimed, unverified) selection={}", crate::browser::log_safe(v["browser"].as_str().unwrap_or("?")), crate::browser::log_safe(terminal), v["selection"].as_str().unwrap_or("?"));
         }
         r
     }
@@ -4209,7 +4209,7 @@ impl AppWindow {
                 let id = n.id.clone();
                 // An agent-profile browser gets Herdr's own header: the test-profile
                 // warning, the agent-access state, and the button that opens the
-                // native dialog (the only way agent access turns on, plan Task 5).
+                // native dialog (the only way agent access turns on).
                 // Whether to draw it comes from the open browser (fixed when it
                 // opened), never the block's `profile`: agents can edit layouts, and
                 // removing the field must not hide the marker while access is on.

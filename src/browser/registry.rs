@@ -51,7 +51,7 @@ pub struct Entry {
     pub node: String,
     pub space: Option<String>,
     pub pane: Option<String>,
-    /// Plan Task 5: off until the person turns it on; never saved.
+    /// Off until the person turns it on; never saved.
     pub agent_access: bool,
     pub agent_profile: bool,
     /// The terminal that last attached an agent, as it claimed (`HC_TERMINAL_ID`).
@@ -244,7 +244,7 @@ fn id_number(id: &str) -> Option<u64> {
 /// Whether `id` has the shape of an id Herdr gives out: `b1` to
 /// `b999999999`. Only such a browser may open on the agent profile, so the
 /// native consent dialog, which names the browser, never shows an id an
-/// agent wrote into a layout block as a sentence of its own (fix round 8).
+/// agent wrote into a layout block as a sentence of its own.
 pub fn herdr_id(id: &str) -> bool {
     id.strip_prefix('b').is_some_and(|n| (1..=9).contains(&n.len()) && !n.starts_with('0') && n.bytes().all(|c| c.is_ascii_digit()))
 }
@@ -258,7 +258,7 @@ fn may_open(b: &Block) -> bool {
 /// What `browser.open`/`browser.navigate` accept: an http(s) url,
 /// `about:blank`, or a host (`example.com`, `localhost:3000`). Everything
 /// else fails the one URL gate (`agent::allowed_url`): `file:`, `data:`,
-/// `chrome:`, `javascript:` and the rest never open (plan Task 5, review F4).
+/// `chrome:`, `javascript:` and the rest never open.
 pub fn normalize_url(url: &str) -> Result<String, String> {
     let url = url.trim();
     if url.is_empty() {
@@ -432,7 +432,7 @@ mod tests {
         assert_eq!(r.issue(["b7", "side"]), "b8");
     }
 
-    /// Fix round 8: a layout block's id is agent-written text, and the
+    /// A layout block's id is agent-written text, and the
     /// consent dialog names the browser. An agent-profile block whose id
     /// Herdr didn't give out never opens, so it never reaches the dialog; a
     /// person-profile block keeps any id (it can't get agent access).

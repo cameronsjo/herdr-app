@@ -192,7 +192,7 @@ pub fn end_frame(window: &Window) {
     });
     if take_back {
         // Before AppKit picks some other key view for a hidden first responder.
-        tracing::debug!("browser: {} hid with the keyboard; Herdr takes it", holder.as_deref().unwrap_or_default());
+        tracing::debug!("browser: {} hid with the keyboard; Herdr takes it", super::log_safe(holder.as_deref().unwrap_or_default()));
         take_keys(window);
     }
     if changed {
