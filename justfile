@@ -67,7 +67,7 @@ browser-build *args:
 browser-dev *args:
     bash scripts/browser-dev-run {{args}}
 
-# Quits the running dev app, rebuilds, and starts it again in the background
+# Rebuilds, then quits the running dev app and starts the new build in the background
 [macos]
 browser-relaunch *args:
     bash scripts/browser-dev-run --relaunch {{args}}

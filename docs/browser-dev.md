@@ -15,9 +15,17 @@ signing, and its main gaps: [browser-prototype.md](browser-prototype.md).
 ```sh
 just browser-build   # target/browser-dev/Herdr Dev.app: the app, CEF's framework, 5 helper apps
 just browser-dev     # the same, then runs it on its own home and core (/tmp/hbd.dev)
-just browser-relaunch  # quit the running one, rebuild, run it again in the background
+just browser-relaunch  # rebuild, then quit the running one and run the new build in the background
 just browser-stop    # quit it and stop its core
 ```
+
+A build never replaces a bundle a running app uses: CEF starts helper
+processes from it on demand, so deleting it can kill that app.
+`browser-build` refuses while an app runs from `target/browser-dev`;
+`browser-dev` and `browser-relaunch` build beside it (`Herdr Dev.next.app`)
+and swap the new bundle in once the old app has quit. A `FRESH=1` run builds
+its own bundle inside its scratch home. `BROWSER_DEV_APP=<absolute path>.app`
+sends `scripts/browser-dev-bundle` anywhere else.
 
 Both need `cmake` and `ninja` (`brew install cmake ninja`). CEF on macOS only
 starts from such a bundle, so `cargo run` can't show a page.

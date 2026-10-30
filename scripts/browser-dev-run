@@ -31,7 +31,15 @@ export HERDR_APP_HOME=$root/home XDG_STATE_HOME=$root/state HC_SESSION=hbd-${roo
 export HERDR_APP_ID=herdr-browser-dev HERDR_APP_NO_SOUND=1 HERDR_TELEMETRY=0
 bundle=browser-dev
 for arg in "$@"; do [ "$arg" = --webkit ] && bundle=browser-dev-webkit; done
-app="$PWD/target/$bundle/Herdr Dev.app/Contents/MacOS/Herdr"
+# A FRESH home gets its own bundle, so it never replaces the one /tmp/hbd.dev
+# runs from. The kept home's bundle is built beside it and swapped in once
+# nothing runs from the old one.
+if [ "${FRESH:-}" = 1 ]; then
+  final="$root/Herdr Dev.app"; staged=$final
+else
+  final="$PWD/target/$bundle/Herdr Dev.app"; staged="$PWD/target/$bundle/Herdr Dev.next.app"
+fi
+app="$final/Contents/MacOS/Herdr"
 cli=$root/herdr-app
 
 running() { [ -x "$cli" ] && "$cli" status >/dev/null 2>&1; }
@@ -69,8 +77,18 @@ esac
 export PATH
 
 # Build first: a failed build leaves a running app alone.
-bash scripts/browser-dev-bundle "$@"
+BROWSER_DEV_APP=$staged bash scripts/browser-dev-bundle "$@"
 if [ "$mode" = relaunch ]; then quit_app; mode=background; fi
+if [ "$staged" != "$final" ]; then
+  # CEF's helpers can outlive the app by a moment.
+  for _ in $(seq 50); do pgrep -f -- "$final/Contents/" >/dev/null || break; sleep 0.2; done
+  if pgrep -f -- "$final/Contents/" >/dev/null; then
+    echo "another app still runs from $final; the new build is in $staged" >&2
+    exit 1
+  fi
+  rm -rf "$final"
+  mv "$staged" "$final"
+fi
 
 new=0
 if [ ! -d "$root/home" ]; then
