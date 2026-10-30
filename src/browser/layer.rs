@@ -12,6 +12,9 @@
 //! shows as it should, and the button has no place on screen, so "Allow
 //! agent" starts its wait again (`super::AllowGuard`).
 
+use std::cell::Cell;
+use std::rc::Rc;
+
 use gpui::{AnyElement, App, Bounds, ContentMask, Element, ElementId, GlobalElementId, InspectorElementId, IntoElement, LayoutId, Pixels, Window};
 
 /// The deferred-draw priority of the agent header: above every priority a
@@ -24,7 +27,8 @@ pub const TOP: usize = usize::MAX;
 /// after every other element has; false: it isn't drawn this frame (no
 /// paint, no hitbox).
 pub fn top(child: AnyElement, may_draw: impl FnOnce(Bounds<Pixels>) -> bool + 'static) -> AnyElement {
-    Top { gate: Some(Gate { child, may_draw: Some(Box::new(may_draw)), mask: None }.into_any_element()) }.into_any_element()
+    let mask = Rc::new(Cell::new(None));
+    Top { gate: Some(Gate { child, may_draw: Some(Box::new(may_draw)), mask: mask.clone() }.into_any_element()), mask }.into_any_element()
 }
 
 /// In the tree: takes the child's place in the layout, then hands it to the
@@ -32,13 +36,16 @@ pub fn top(child: AnyElement, may_draw: impl FnOnce(Bounds<Pixels>) -> bool + 's
 /// the clip it's in).
 struct Top {
     gate: Option<AnyElement>,
+    /// The clip where it's laid out, for the gate.
+    mask: Rc<Cell<Option<ContentMask<Pixels>>>>,
 }
 
 /// In the deferred draw: asks `may_draw`, then draws the child or nothing.
 struct Gate {
     child: AnyElement,
     may_draw: Option<Box<dyn FnOnce(Bounds<Pixels>) -> bool>>,
-    mask: Option<ContentMask<Pixels>>,
+    /// Set by `Top` as it hands the gate over.
+    mask: Rc<Cell<Option<ContentMask<Pixels>>>>,
 }
 
 impl IntoElement for Top {
@@ -75,6 +82,7 @@ impl Element for Top {
         let gate = self.gate.take().expect("prepainted once");
         // The clip it is in now: a header never draws outside its pane.
         let mask = window.content_mask();
+        self.mask.set(Some(mask));
         window.defer_draw(gate, window.element_offset(), TOP, Some(mask));
     }
 
@@ -95,7 +103,6 @@ impl Element for Gate {
     }
 
     fn request_layout(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, window: &mut Window, cx: &mut App) -> (LayoutId, ()) {
-        self.mask = Some(window.content_mask());
         (self.child.request_layout(window, cx), ())
     }
 
@@ -103,7 +110,7 @@ impl Element for Gate {
         let draw = self.may_draw.take().is_some_and(|f| f(bounds));
         if draw {
             // Deferred draws prepare with no clip: its hitbox keeps the clip it's painted with.
-            window.with_content_mask(self.mask, |window| self.child.prepaint(window, cx));
+            window.with_content_mask(self.mask.get(), |window| self.child.prepaint(window, cx));
         }
         draw
     }
@@ -130,6 +137,8 @@ mod tests {
     struct Scene {
         top: bool,
         clear: bool,
+        /// The header's container clips it to this width.
+        clip: Option<f32>,
         log: Rc<RefCell<Vec<&'static str>>>,
     }
 
@@ -166,15 +175,19 @@ mod tests {
             div()
                 .size_full()
                 .relative()
-                .child(div().size_full().relative().child(header))
+                .child(div().size_full().relative().when_some(self.clip, |d, w| d.w(px(w)).overflow_hidden()).child(header))
                 .child(bait("mod", "mod clicked"))
                 .child(deferred(bait("popup", "popup clicked")).with_priority(200))
         }
     }
 
     fn run(cx: &mut TestAppContext, top: bool, clear: bool) -> Vec<&'static str> {
+        run_clipped(cx, top, clear, None)
+    }
+
+    fn run_clipped(cx: &mut TestAppContext, top: bool, clear: bool, clip: Option<f32>) -> Vec<&'static str> {
         let log = Rc::new(RefCell::new(Vec::new()));
-        let (_, cx) = cx.add_window_view(|_, _| Scene { top, clear, log: log.clone() });
+        let (_, cx) = cx.add_window_view(|_, _| Scene { top, clear, clip, log: log.clone() });
         cx.run_until_parked();
         let painted = log.borrow().clone();
         log.borrow_mut().clear();
@@ -198,6 +211,14 @@ mod tests {
         let out = run(cx, false, true);
         assert_eq!(&out[..3], &["header", "mod", "popup"]);
         assert!(out.contains(&"allow clicked"), "{out:?}");
+    }
+
+    #[gpui::test]
+    fn the_header_keeps_the_clip_it_is_laid_out_in(cx: &mut TestAppContext) {
+        // Its pane shows only the first 5 points: a click at x 10 is outside
+        // it, so it reaches what is drawn there, never the clipped-off button.
+        let out = run_clipped(cx, true, true, Some(5.0));
+        assert!(!out.contains(&"allow clicked") && out.contains(&"mod clicked"), "{out:?}");
     }
 
     #[gpui::test]
