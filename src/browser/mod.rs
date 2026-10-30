@@ -457,6 +457,20 @@ pub fn log_safe(text: &str) -> String {
     out
 }
 
+/// A failed command's error as its warning line carries it: escaped like
+/// [`log_safe`], but whole, since errors quote ids and urls an agent wrote.
+pub fn log_escaped(text: &str) -> String {
+    let mut out = String::new();
+    for ch in text.chars() {
+        if ch.is_control() || hidden(ch) {
+            out.extend(ch.escape_default());
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
 /// Line and paragraph separators, bidi controls, and format characters
 /// that draw nothing (soft hyphen, zero-width spaces and joiners, word
 /// joiner and invisible operators, the byte order mark, the tag block).
@@ -483,7 +497,7 @@ pub const AVAILABLE: bool = cfg!(all(target_os = "macos", feature = "browser"));
 
 #[cfg(test)]
 mod tests {
-    use super::{Hand, Rect, Responder, Source, access_line, covered, hand, keyboard_page, log_safe, may_focus, public_title, public_url};
+    use super::{Hand, Rect, Responder, Source, access_line, covered, hand, keyboard_page, log_escaped, log_safe, may_focus, public_title, public_url};
 
     #[test]
     fn public_urls_have_no_userinfo_query_or_fragment() {
@@ -558,6 +572,16 @@ mod tests {
         assert!(!line.contains('\n'), "{line}");
         assert!(line.ends_with(" by=socket"), "{line}");
         assert_eq!(access_line(true, "b1", Source::NativeConfirm), "browser: agent access on browser=b1 by=native confirm");
+    }
+
+    #[test]
+    fn a_failed_command_quoting_an_agent_id_is_logged_on_one_line() {
+        // `browser.close` on a layout block quotes the block's id in its error.
+        let id = format!("x\u{2028}{}\nbrowser: agent access on browser=b1 by=native confirm", "y".repeat(300));
+        let error = format!("browser {id} is a block of the shown layout");
+        let line = log_escaped(&error);
+        assert!(!line.contains('\n') && !line.contains('\u{2028}'), "{line}");
+        assert!(line.ends_with("is a block of the shown layout"), "kept whole: {line}");
     }
 
     #[test]

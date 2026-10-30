@@ -2887,7 +2887,7 @@ impl AppWindow {
 
     fn answer(&mut self, r: Result<Value, String>) {
         if let Err(e) = &r {
-            tracing::warn!("{e}");
+            tracing::warn!("{}", crate::browser::log_escaped(e));
         }
         self.reply = Some(r.unwrap_or_else(|e| json!({ "error": e })));
     }
