@@ -113,7 +113,7 @@ impl Browsers {
         view::install_monitor();
     }
 
-    /// navigate / back / forward / reload / devtools / zoom / viewport.
+    /// navigate / back / forward / reload / open_external / devtools / zoom / viewport.
     pub fn command(&mut self, name: &str, browser: &str, args: &Value) -> Result<Value, String> {
         if browser.is_empty() {
             return Err(format!("{name} needs browser (an id from `herdr-app ls`), or a focused browser pane"));
@@ -131,6 +131,14 @@ impl Browsers {
             "browser.back" => engine::history(browser, -1).map(|()| json!({ "browser": browser })),
             "browser.forward" => engine::history(browser, 1).map(|()| json!({ "browser": browser })),
             "browser.reload" => engine::reload(browser).map(|()| json!({ "browser": browser })),
+            // Herdr's own record of the page's url (the engine's), never one a caller passes.
+            "browser.open_external" => {
+                let url = self.registry.get(browser).map(|e| e.page.url.clone()).unwrap_or_default();
+                let url = registry::external_url(&url)?;
+                crate::links::open(&crate::links::Target::Url(url));
+                tracing::info!("browser: {} opened in the default browser", super::log_safe(browser));
+                Ok(json!({ "browser": browser }))
+            }
             "browser.devtools" => {
                 let open = args.get("open").and_then(Value::as_bool);
                 // `note`: where the engine's inspector opens, if not in a window

@@ -542,6 +542,7 @@ The main ones:
   `browser.open {url, place?, pane?, profile?}` (place `"right"` default, `"down"`, `"tab"`;
   says `{browser, pane}`), `browser.navigate {browser, url}`, `browser.back {browser}`,
   `browser.forward {browser}`, `browser.reload {browser}`, `browser.close {browser}`,
+  `browser.open_external {browser?}` (the page in the default web browser; http and https only),
   `browser.devtools {browser, open?}`, `browser.zoom {step?: "in"|"out"|"reset", level?: 25-500,
   browser?}` (percent, Chromium's steps; kept per host on CEF, per pane on WebKit), `browser.viewport {preset?: "phone"|"tablet"|"fit",
   width?, height?, mobile?, browser?}` (responsive size; zoom and viewport default to the focused

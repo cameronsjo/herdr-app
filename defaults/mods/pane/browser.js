@@ -1,10 +1,11 @@
 // A browser pane's header (the pane mod's, for a pane with PaneInfo.browser):
-// back, forward, reload, the address, zoom, the viewport, DevTools. Only
-// commands any mod may run. The address is what browsers() gives (no query or
-// fragment unless agent access is on). Enter goes there and hands the keyboard
-// back to the page; Esc puts the page's address back. Zoom (- NN% +, the
-// percent resets it) and the viewport button (Fit, Phone, Tablet in turn)
-// show while the header is hovered, or while they aren't at their defaults.
+// back, forward, reload, the address, zoom, the viewport, open in the default
+// browser, DevTools. Only commands any mod may run. The address is what
+// browsers() gives (no query or fragment unless agent access is on). Enter
+// goes there and hands the keyboard back to the page; Esc puts the page's
+// address back. Zoom (- NN% +, the percent resets it) and the viewport button
+// (Fit, Phone, Tablet in turn) show while the header is hovered, or while they
+// aren't at their defaults; open in the default browser shows on hover.
 // A narrow bar keeps the address's room: no - and +, the zoom as a bare
 // number only when it isn't 100, the viewport as its icon only. Only the
 // pointer reports the bar's width, so a bar counts as narrow until the
@@ -190,6 +191,8 @@ export default class BrowserBar {
       .when(Boolean(b) && (this.narrow ? zoom !== 100 : hovered || zoom !== 100), (el) => el.child(this.percent(t, pane, zoom)))
       .when(Boolean(b) && hovered && !this.narrow, (el) => el.child(this.button(t, `pb-zin-${pane}`, "zoom-in", "browser.zoom", zoom < 500, { step: "in" })))
       .when(Boolean(b) && (hovered || Boolean(viewport)), (el) => el.child(this.viewport(t, pane, viewport)))
+      // Pages Herdr's browser can't sign into (passkeys) open in the default browser.
+      .when(Boolean(b) && hovered && !this.narrow, (el) => el.child(this.button(t, `pb-ext-${pane}`, "external", "browser.open_external", /^https?:\/\//i.test(b.url))))
       .child(this.button(t, `pb-dev-${pane}`, "devtools", "browser.devtools", Boolean(b)));
   }
 }

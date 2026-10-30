@@ -3330,7 +3330,7 @@ impl AppWindow {
                 };
                 return self.answer(r);
             }
-            "browser.navigate" | "browser.back" | "browser.forward" | "browser.reload" | "browser.devtools" | "browser.zoom" | "browser.viewport" => {
+            "browser.navigate" | "browser.back" | "browser.forward" | "browser.reload" | "browser.devtools" | "browser.zoom" | "browser.viewport" | "browser.open_external" => {
                 // Zoom and viewport default to the focused browser (keys.json's `browser` keys name none).
                 let b = Self::owned(a, "browser").or_else(|| self.focused_browser()).unwrap_or_default();
                 let r = self.browsers.command(name, &b, a);

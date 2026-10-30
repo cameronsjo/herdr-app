@@ -63,6 +63,7 @@ export function playSound(sound: string): null;
  *   terminal.right_click {to: "program" | "menu", terminal?} (right-clicks to a program that takes the mouse; Shift: the menu).
  * Browsers (macOS builds with the browser feature): browser.open {url, place?, pane?, profile?},
  *   browser.navigate {browser, url}, browser.back|forward|reload|close {browser}, browser.devtools {browser, open?},
+ *   browser.open_external {browser?} (the page in the default web browser; http and https only),
  *   browser.agent_access {browser, on: false} (only the person's click in the pane turns it on).
  * Agents: agent.next, agent.prev (the agents list's order), agent.focus {terminal} (sub-agents too).
  * Layout (the shown layout's nodes by id): layout.toggle|show|hide {id}, layout.resize {id, px | weight},

@@ -215,6 +215,14 @@ Close a browser and its pane.
 |---|---|
 | `browser` | yes |
 
+## `browser.open_external`
+
+Open a browser's page (default: the focused browser) in the default web browser: the page's own address, http or https only. For sign-ins Herdr's browser can't do, such as passkeys.
+
+| Argument | Required |
+|---|---|
+| `browser` | no |
+
 ## `browser.devtools`
 
 Open or close a browser's web inspector (no open: toggle): Chromium's DevTools window on the CEF engine; on the WebKit engine the page becomes inspectable from Safari's Develop menu.

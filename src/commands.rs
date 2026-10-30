@@ -53,6 +53,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("browser.forward", &[req("browser")], "Go forward a page in a browser."),
     cmd("browser.reload", &[req("browser")], "Reload a browser's page."),
     cmd("browser.close", &[req("browser")], "Close a browser and its pane."),
+    cmd("browser.open_external", &[opt("browser")], "Open a browser's page (default: the focused browser) in the default web browser: the page's own address, http or https only. For sign-ins Herdr's browser can't do, such as passkeys."),
     cmd("browser.devtools", &[req("browser"), opt("open")], "Open or close a browser's web inspector (no open: toggle): Chromium's DevTools window on the CEF engine; on the WebKit engine the page becomes inspectable from Safari's Develop menu."),
     cmd("browser.zoom", &[opt("step"), opt("browser"), opt("level")],
         "Zoom a browser's page (default: the focused browser): step \"in\" or \"out\" along Chromium's steps (25% to 500%), \"reset\" to 100%, or level, a percent from 25 to 500. The CEF engine keeps one zoom per host name (all its ports) in each profile, saved across restarts, so other pages on that host follow; the WebKit engine keeps it per pane. A number alone (browser.zoom:125) is a level. Says the zoom now, in percent."),

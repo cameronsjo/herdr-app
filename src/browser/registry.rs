@@ -294,6 +294,20 @@ pub fn normalize_url(url: &str) -> Result<String, String> {
     }
 }
 
+/// The url `browser.open_external` hands to the person's default browser: the
+/// page's own url as the engine reports it, http or https only, with nothing
+/// `open` could read as a flag or a second argument.
+pub fn external_url(url: &str) -> Result<String, String> {
+    let scheme = url.split_once("://").map(|(s, _)| s.to_ascii_lowercase());
+    if !matches!(scheme.as_deref(), Some("http" | "https")) {
+        return Err("only http and https pages open in the default browser".into());
+    }
+    if url.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err("the page's url has spaces or control characters; it isn't opened".into());
+    }
+    Ok(url.to_owned())
+}
+
 fn is_local(url: &str) -> bool {
     let host = url.split(['/', ':']).next().unwrap_or_default();
     host == "localhost" || host == "127.0.0.1" || host == "[::1]" || host.ends_with(".localhost")
@@ -504,6 +518,15 @@ mod tests {
         assert_eq!(normalize_url("/tmp/page.html").unwrap_err(), "file pages don't open in Herdr's browser: serve the folder over http (just browser-fixture serves scripts/)");
         for bad in ["file:///etc/hosts", "data:text/html,hi", "chrome://version", "devtools://devtools/x", "view-source:https://a/", "mailto:x@y"] {
             assert!(normalize_url(bad).unwrap_err().starts_with("only http, https and about:blank pages open"), "{bad}");
+        }
+    }
+
+    #[test]
+    fn only_http_and_https_pages_open_in_the_default_browser() {
+        assert_eq!(external_url("https://example.com/a?b=1#c").unwrap(), "https://example.com/a?b=1#c");
+        assert_eq!(external_url("HTTP://127.0.0.1:8765/").unwrap(), "HTTP://127.0.0.1:8765/");
+        for bad in ["about:blank", "", "file:///etc/hosts", "javascript:alert(1)", "data:text/html,hi", "x-apple-helpviewer://a", "-a Calculator", "https://a/ b", "https://a/\nb"] {
+            assert!(external_url(bad).is_err(), "{bad:?}");
         }
     }
 }
