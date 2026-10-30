@@ -434,7 +434,7 @@ mod tests {
 
     /// A layout block's id is agent-written text, and the
     /// consent dialog names the browser. An agent-profile block whose id
-    /// Herdr didn't give out never opens, so it never reaches the dialog; a
+    /// isn't shaped like Herdr's never opens, so it never reaches the dialog; a
     /// person-profile block keeps any id (it can't get agent access).
     #[test]
     fn an_agent_block_with_an_id_herdr_didnt_give_out_never_opens() {

@@ -873,7 +873,7 @@ mod tests {
     /// dialog names only ids shaped like Herdr's, so an agent can't put a
     /// sentence of its own into the one surface consent rests on.
     #[test]
-    fn the_dialog_names_only_an_id_herdr_gave_out() {
+    fn the_dialog_names_only_an_id_shaped_like_herdrs() {
         let site = site("http://127.0.0.1:8765/x");
         for good in ["b1", "b42", "b999999999"] {
             assert!(consent_text(good, &site).is_ok(), "{good}");

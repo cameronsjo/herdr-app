@@ -137,7 +137,7 @@ pub fn page_view(id: &str) -> Option<NonNull<NSView>> {
 
 pub fn navigate(id: &str, url: &str) -> Result<(), String> {
     if !agent::allowed_url(url) {
-        tracing::warn!("browser: {id} not sent to {}: only http, https and about:blank pages open", agent::loggable(url), id = super::log_safe(&id));
+        tracing::warn!("browser: {id} not sent to {}: only http, https and about:blank pages open", agent::loggable(url), id = super::log_safe(id));
         return Err(format!("only http, https and about:blank pages open, not {}", agent::loggable(url)));
     }
     let frame = need(id)?.main_frame().ok_or("the page has no main frame")?;
@@ -222,7 +222,7 @@ pub fn agent_gone(id: &str) {
     }
     let Some(parent) = view::existing(id) else { return };
     let agent_profile = STATE.with_borrow(|s| s.agent_profile.get(id).copied().unwrap_or(false));
-    tracing::info!("browser: {id}'s agent session ended; reopening it at {} so nothing the agent set stays", agent::loggable(&url), id = super::log_safe(&id));
+    tracing::info!("browser: {id}'s agent session ended; reopening it at {} so nothing the agent set stays", agent::loggable(&url), id = super::log_safe(id));
     close(id);
     open(id, parent, url, agent_profile);
 }
@@ -440,7 +440,7 @@ pub fn close(id: &str) {
         s.pages.remove(id);
     });
     if let Some(b) = b {
-        tracing::info!("browser: closing {id} (cef {})", b.identifier(), id = super::log_safe(&id));
+        tracing::info!("browser: closing {id} (cef {})", b.identifier(), id = super::log_safe(id));
         STATE.with_borrow_mut(|s| s.closing.push(b.identifier()));
         objc2::rc::autoreleasepool(|_| close_browser(&b));
     }
@@ -465,7 +465,7 @@ pub fn open(id: &str, parent: Retained<NSView>, url: String, agent_profile: bool
     match phase() {
         Phase::Starting => STATE.with_borrow_mut(|s| s.pending.push((id.to_owned(), generation, parent, url))),
         Phase::Ready => create(id, generation, &parent, &url),
-        other => tracing::warn!("browser: {id} not opened, CEF is {other:?}", id = super::log_safe(&id)),
+        other => tracing::warn!("browser: {id} not opened, CEF is {other:?}", id = super::log_safe(id)),
     }
 }
 
@@ -488,7 +488,7 @@ fn create(id: &str, generation: u64, parent: &NSView, url: &str) {
     let url = if agent::allowed_url(url) {
         url
     } else {
-        tracing::warn!("browser: {id} opens on about:blank, not {}: only http, https and about:blank pages open", agent::loggable(url), id = super::log_safe(&id));
+        tracing::warn!("browser: {id} opens on about:blank, not {}: only http, https and about:blank pages open", agent::loggable(url), id = super::log_safe(id));
         registry_blank()
     };
     let agent_profile = STATE.with_borrow(|s| s.agent_profile.get(id).copied().unwrap_or(false));
@@ -496,7 +496,7 @@ fn create(id: &str, generation: u64, parent: &NSView, url: &str) {
         match agent_context() {
             Some(c) => Some(c),
             None => {
-                tracing::error!("browser: CEF refused the agent profile; {id} not opened", id = super::log_safe(&id));
+                tracing::error!("browser: CEF refused the agent profile; {id} not opened", id = super::log_safe(id));
                 return;
             }
         }

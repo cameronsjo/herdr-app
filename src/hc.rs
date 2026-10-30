@@ -369,8 +369,8 @@ impl Core {
     pub fn run(&self, argv: Vec<String>, cwd: Option<String>, labels: Value, on: Option<&str>) -> Result<String> {
         #[allow(unused_mut)]
         let mut env = json!({"TERM": "xterm-256color", "COLORTERM": "truecolor", "TERM_PROGRAM": "herdr"});
-        // This machine's terminals: agent-browser drives Herdr's browser pane,
-        // through `herdr-app __agent-browser-provider`.
+        // This machine's terminals: agent-browser in them drives Herdr's browser
+        // pane through `herdr-app __agent-browser-provider`.
         #[cfg(all(target_os = "macos", feature = "browser"))]
         if on.is_none() {
             for (k, v) in agent_browser_env() {

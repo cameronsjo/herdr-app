@@ -126,7 +126,7 @@ pub fn place(id: &str, bounds: Bounds<Pixels>, window: &Window) {
         c.placed = Some(rect(bounds));
         let old = c.view.frame();
         if old.origin != frame.origin || old.size != frame.size {
-            tracing::debug!("browser: {id} placed at {x},{y} {w}x{h} (window points, top left)", id = super::log_safe(&id));
+            tracing::debug!("browser: {id} placed at {x},{y} {w}x{h} (window points, top left)", id = super::log_safe(id));
             c.view.setFrame(frame);
         }
         // The page fills its container. CEF sizes it once, at creation, maybe
@@ -138,7 +138,7 @@ pub fn place(id: &str, bounds: Bounds<Pixels>, window: &Window) {
             let fill = NSRect::new(NSPoint::new(0.0, 0.0), frame.size);
             let had = page.frame();
             if had.origin != fill.origin || had.size != fill.size {
-                tracing::debug!("browser: {id}'s page fills its block: {}x{} -> {w}x{h}", had.size.width, had.size.height, id = super::log_safe(&id));
+                tracing::debug!("browser: {id}'s page fills its block: {}x{} -> {w}x{h}", had.size.width, had.size.height, id = super::log_safe(id));
                 page.setFrame(fill);
             }
         }
@@ -175,11 +175,11 @@ pub fn end_frame(window: &Window) {
             }
             let was_under = matches!(c.hidden, Some(Hidden::Under(_)));
             match &want {
-                Some(Hidden::NotShown) => tracing::debug!("browser: {id} hidden (its block isn't shown)", id = super::log_safe(&id)),
-                Some(Hidden::Under(label)) => tracing::debug!("browser: {id} hidden under overlay {label}", id = super::log_safe(&id)),
+                Some(Hidden::NotShown) => tracing::debug!("browser: {id} hidden (its block isn't shown)", id = super::log_safe(id)),
+                Some(Hidden::Under(label)) => tracing::debug!("browser: {id} hidden under overlay {label}", id = super::log_safe(id)),
                 None => match &c.hidden {
-                    Some(Hidden::Under(label)) => tracing::debug!("browser: {id} shown again ({label} no longer over it)", id = super::log_safe(&id)),
-                    _ => tracing::debug!("browser: {id} shown", id = super::log_safe(&id)),
+                    Some(Hidden::Under(label)) => tracing::debug!("browser: {id} shown again ({label} no longer over it)", id = super::log_safe(id)),
+                    _ => tracing::debug!("browser: {id} shown", id = super::log_safe(id)),
                 },
             }
             if want.is_some() && holder.as_deref() == Some(id.as_str()) {
@@ -216,7 +216,7 @@ pub fn page_created(id: &str) {
             Hidden::NotShown => "its block isn't shown".to_owned(),
             Hidden::Under(label) => format!("under overlay {label}"),
         };
-        tracing::debug!("browser: {id}'s page was born hidden ({why}); told it it's hidden", id = super::log_safe(&id));
+        tracing::debug!("browser: {id}'s page was born hidden ({why}); told it it's hidden", id = super::log_safe(id));
     });
 }
 
@@ -235,7 +235,7 @@ pub fn remove(id: &str) {
 /// The page takes the keyboard. False while its view doesn't exist yet.
 pub fn give_keys(id: &str, window: &Window) -> bool {
     let Some(page) = runtime::page_view(id) else {
-        tracing::debug!("browser: {id} can't take the keyboard yet: no page view", id = super::log_safe(&id));
+        tracing::debug!("browser: {id} can't take the keyboard yet: no page view", id = super::log_safe(id));
         return false;
     };
     // SAFETY: CEF's live browser view, main thread.
@@ -243,7 +243,7 @@ pub fn give_keys(id: &str, window: &Window) -> bool {
     let Some(ns_window) = gpui_view(window).ok().and_then(|g| g.window()) else { return false };
     let taken = ns_window.makeFirstResponder(Some(page));
     if !taken {
-        tracing::debug!("browser: {id} can't take the keyboard: the window refused", id = super::log_safe(&id));
+        tracing::debug!("browser: {id} can't take the keyboard: the window refused", id = super::log_safe(id));
     }
     taken
 }
