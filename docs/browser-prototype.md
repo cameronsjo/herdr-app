@@ -1,12 +1,13 @@
 # Browser panes: a prototype to discuss
 
-This branch puts a real Chromium page in a Herdr pane on macOS, using CEF
-(the Chromium Embedded Framework) as a native view over the window, and lets
-a coding agent in a Herdr terminal drive that page with
-[`agent-browser`](https://github.com/vercel-labs/agent-browser) once the
-person allows it. It is a prototype to start a conversation, not a pull
-request. Everything sits behind a Cargo feature (`browser`) that is off by
-default; a default build has no CEF in it.
+This branch puts a real web page in a Herdr pane on macOS, as a native view
+over the window, and lets a coding agent in a Herdr terminal drive that page
+with [`agent-browser`](https://github.com/vercel-labs/agent-browser) once
+the person allows it. It has two engines: the system's WKWebView
+(`browser-webkit` feature), which is the proposal, and CEF, the Chromium
+Embedded Framework (`browser` feature), which it started on. It is a
+prototype to start a conversation, not a pull request. Both features are
+off by default; a default build has neither engine in it.
 
 The demo, in six lines:
 
@@ -27,14 +28,14 @@ has run outside this one Mac.
 
 ## Cost
 
-CEF is the prototype's engine, not the proposal: Herdr shouldn't have to
-own Chromium, and it doesn't have to ([Engine](#engine-herdr-shouldnt-own-chromium)).
-As built, a build with the feature is 387 MB (172 MB compressed) against
-62 MB without it, almost all of it CEF's framework; the default build is
-unchanged. The branch adds about 6,800 lines, about 5,360 of them in
-`src/browser/`. It is ad hoc signed only: Developer ID signing,
-notarization and CEF/Chromium license notices are not done. Measurements:
-[Details](#details-measured-facts).
+With the WebKit engine the release binary is 0.74 MB larger (0.30 MB
+gzipped) and the `.app` stays at 62 MB; the engine is the OS's. With CEF the
+`.app` is 387 MB (172 MB compressed), almost all of it CEF's framework,
+which is why CEF isn't the proposal ([Engine](#engine-the-system-web-view-not-chromium)).
+The default build is unchanged. `src/browser/` is about 8,100 lines, tests
+included: about 2,200 WebKit-only, about 1,100 CEF-only, the rest shared.
+It is ad hoc signed only: Developer ID signing and notarization are not
+done. Measurements: [Details](#details-measured-facts).
 
 ## Can's three questions
 
@@ -97,51 +98,89 @@ the consent reason above: the native dialog, the per-page token proxy
 (`src/browser/proxy.rs`, `src/browser/agent.rs`, about 2,100 lines) and the
 provider that `agent-browser` calls. The rest stands without it.
 
-## Engine: Herdr shouldn't own Chromium
+## Engine: the system web view, not Chromium
 
-The prototype embeds CEF because it was the fastest way to a page an agent
-can drive over CDP. Shipping it would make Herdr a Chromium vendor: macOS
-lets an app load code signed only by its own Apple team, so Herdr would sign,
-host and patch Chromium itself, and Chromium now ships security fixes about
-every two weeks.
+The prototype started on CEF because it was the fastest way to a page an
+agent can drive over CDP. Shipping it would make Herdr a Chromium vendor:
+macOS lets an app load code signed only by its own Apple team, so Herdr
+would sign, host and patch Chromium itself, and Chromium ships security
+fixes about every two weeks. Making CEF an optional download doesn't change
+that. A spike got it working (a slim app, about 0.24 MB larger gzipped,
+loaded CEF from `~/Library/Application Support` with every helper
+sandboxed), but the engine still had to be re-signed under Herdr's team,
+hosted by Herdr, and launched through a second app bundle. We don't
+recommend it.
 
-Making CEF an optional download doesn't change who owns it. A follow-up
-spike showed it works: a slim app with the browser code compiled in (about
-0.24 MB larger, gzip, and no CEF library linked) loaded CEF from
-`~/Library/Application Support` and rendered a page with every helper
-sandboxed. But it needs the engine re-signed under Herdr's team, hosted on
-Herdr's servers, and Herdr relaunched through a second app bundle, because
-Chromium's sandbox only lets helpers read inside the running app's bundle.
-We don't recommend it.
+**The branch now has a second engine: the system's WKWebView**, behind its
+own feature, `browser-webkit`. Both engines share the engine-neutral code
+(the block, key routing, the overlay cover, the consent dialog, the token
+proxy and its allowlist). Only one file differs per engine: `runtime.rs` for
+CEF, `webkit.rs` for WebKit. On WebKit:
 
-Two directions keep Chromium out of Herdr entirely:
+- **Size.** The release binary is 0.74 MB larger than the default build
+  (0.30 MB gzipped). The `.app` is 62 MB either way, against 387 MB for CEF.
+  WebKit is part of macOS, so Herdr ships, signs and patches no engine, and
+  none of CEF's app-class hook, message pump or helper apps.
+- **Agents.** agent-browser 0.39.1 speaks CDP, and WebKit doesn't, so
+  `src/browser/translate.rs` maps the CDP calls agent-browser makes onto
+  WKWebView's own calls. Methods outside its table are refused. The demo
+  ran end to end inside Herdr with trusted (`isTrusted`) input: snapshot,
+  fill, select, check, click, get, eval, screenshot, console, errors and
+  reload. It also ran on a CSP-strict site (github.com), because the agent's
+  script is compiled by WebKit itself, never by string `eval`.
+- **People.** Pages are debugged with Safari's Web Inspector (Develop
+  menu); `browser.devtools` turns it on for a page. Zoom is per pane, not
+  per site. The phone and tablet viewports set the size only, with no touch
+  or device-pixel emulation.
+- **Gaps.** No network events for agents (WebKit has no per-request API
+  for them). The accessibility tree that `snapshot` reads is built in
+  JavaScript and covers a subset of roles. No JS dialogs, downloads or file
+  pickers. Full list: [browser-dev.md](browser-dev.md#the-webkit-engine-no-chromium).
+- **One finding the reviews caught.** WebKit sends any key a page doesn't
+  handle back to the app, so an agent's `press x` then `Enter` ran as a
+  command in the person's focused terminal. That is fixed: the app now
+  drops agent keys the page didn't take, and a regression check confirms
+  the terminal receives nothing.
 
-- **The system web view:** WKWebView on macOS, WebView2 on Windows,
-  WebKitGTK on Linux. The OS vendor owns and patches the engine, and it
-  adds nothing to the app. WebView2 speaks CDP; on macOS and Linux agent
-  control needs a small translator from the CDP calls agent-browser makes
-  to the web view's own calls. A spike tested that on macOS: agent-browser
-  0.39.1 drove a WKWebView through a translator of about 475 lines (Swift,
-  plus JavaScript in an isolated content world) behind the same provider
-  path Herdr uses. On the test form, `open`, `snapshot -i`, `fill`,
-  `select`, `check`, `click`, `get`, `eval` and `screenshot` worked, 57 of
-  59 commands in one run, with trusted (`isTrusted`) input even with the
-  window hidden. Not yet shown: real sites (the accessibility tree is built
-  in JavaScript and covers a subset of roles), running inside Herdr's
-  window rather than a standalone app, network capture (WebKit has no
-  per-request API for it) and phone/tablet emulation beyond the viewport
-  size. People debug pages with Safari's Web Inspector instead of Chrome's
-  DevTools.
-- **A separate browser app** whose page Herdr shows in a block. It runs in
-  its own process, under its own signature and updates; Herdr never loads
-  Chromium. Herdr would need an "external surface" block (the app's frames
-  plus forwarded input) instead of a native view.
+### Other operating systems
 
-Either way the core asks shrink to the two engine-neutral hooks above: a
-block that shows a view, and the overlay cover. The question for Can is
-which engine stance he'd accept, not whether Herdr ships Chromium. Of the
-options, only the system web view leaves Herdr no engine to own and adds
-nothing to the download, and the spike shows agents can drive it.
+Nothing below has been built. It is research: the platform docs and the
+source of wry and `gpui-webview` (longbridge's crate that already hosts
+these web views in GPUI windows).
+
+| | macOS | Windows | Linux |
+|---|---|---|---|
+| Engine | WKWebView (built) | WebView2. Microsoft ships and patches it, and it is part of Windows 11 | WebKitGTK |
+| Agents | the CDP translator | CDP built in, per web view, with no port, so the proxy passes it through with no translator | the translator, ported |
+| People's tools | Safari Web Inspector | Edge DevTools | WebKit's inspector, in a window. Its remote inspector opens a port and stays off |
+| Embedding | a child `NSView`, as today | a child window. Open question: does it show above GPUI's DirectComposition layer? | X11 and XWayland only. Native Wayland can't embed another toolkit's view |
+| Default build | +0.74 MB | small (estimated) | nothing: an optional module, so GTK and WebKitGTK never become startup requirements |
+
+Servers pay nothing on any OS, because the browser lives only in
+herdr-app's window code, never in herdr-core.
+
+### What Can would maintain
+
+The engine-neutral pieces, which every engine shares and which have to sit
+in the app for consent: the block, the overlay cover, key routing, the
+native dialog, the token proxy, the allowlist and revocation. Plus one small
+adapter per OS. The adapters could come from outside crates: `gpui-webview`
+or wry for hosting the view, and the CDP translator as its own crate. There
+is no Chromium update cycle to follow.
+
+Two other shapes were looked at and both cost the core more:
+
+- **An engine plugin, or a separate browser app drawing into a block.** No
+  OS supports embedding another process's native view, so the engine would
+  have to send frames. The core would then need GPU frame import in three
+  renderers, plus input, IME, accessibility, popup and drag-and-drop
+  bridges: several thousand lines, more than the web view adapters.
+- **CEF, bundled or downloaded:** Herdr owns Chromium (above).
+
+People who want Chromium itself can run it outside Herdr: agent-browser can
+launch its own Chrome, and terminal browsers that draw Chromium with the
+kitty graphics protocol run in a Herdr terminal, which already renders
+kitty graphics. Neither was run inside Herdr.
 
 ## The browser bar and the commands
 
@@ -150,18 +189,18 @@ viewport button, DevTools) is a mod, `defaults/mods/pane/browser.js`: zero
 core lines of its own.
 
 Zoom and responsive size are two small core commands the bar, keys and
-agents call, since only the app holds the CEF browser: `browser.zoom` (CEF's
-host zoom along Chromium's own steps, kept per host name) and `browser.viewport`
-(Chromium's device emulation over the page's DevTools session: phone,
-tablet, a custom size, or fit). Together with their keys.json `browser`
+agents call, since only the app holds the page: `browser.zoom` (on CEF,
+Chromium's host zoom kept per host name; on WebKit, per pane) and
+`browser.viewport` (phone, tablet, a custom size, or fit; on CEF, Chromium's
+device emulation; on WebKit, the size only). Together with their keys.json `browser`
 section (`cmd-=`, `cmd--`, `cmd-0` zoom the page that has the keyboard) they
 are about 350 lines of Rust outside tests (about 165 more in tests), 169 of
 them in `src/browser/emulate.rs`.
 
 Later, and mod-shaped where possible: browser tabs, docked
-DevTools (today `browser.devtools` opens CEF's own window), design mode
-(pick an element and send it to the agent), a clear-data command, Linux and
-Windows.
+DevTools (today `browser.devtools` opens CEF's own window, or makes a WebKit
+page inspectable from Safari), design mode (pick an element and send it to
+the agent), a clear-data command, Linux and Windows.
 
 ## Security, in short
 
@@ -171,11 +210,11 @@ page](browser-dev.md#agents-drive-a-page-agent-access) in
 `docs/browser-dev.md`.
 
 - **Agent profile only.** Agents can drive only a browser opened with
-  `profile: "agent"`, a separate Chromium profile whose header always says
-  "Test profile: don't sign into real accounts." Both profiles encrypt
-  cookies with Chromium's public test key (`--use-mock-keychain`), so any
-  process running as you can read them: don't sign into real accounts in
-  either.
+  `profile: "agent"`, a separate profile whose header always says "Test
+  profile: don't sign into real accounts." On WebKit it is an in-memory
+  data store that ends with the app. On CEF both profiles encrypt cookies
+  with Chromium's public test key (`--use-mock-keychain`), so any process
+  running as you can read them: don't sign into real accounts in either.
 - **Native consent.** Access is off by default and never saved. Only
   **Allow** in an app-modal `NSAlert` turns it on; the control socket, mods
   and keys can only turn it off. The one exception is a debug test build
@@ -229,7 +268,9 @@ Smaller ones are in [browser-dev.md](browser-dev.md#known-gaps).
 Needs macOS on Apple silicon, `cmake` and `ninja`, and for the agent part
 `agent-browser` (tested with 0.39.1). Steps: [Try it](browser-dev.md#try-it)
 and [Agents drive a page](browser-dev.md#agents-drive-a-page-agent-access)
-in `docs/browser-dev.md`; show it on `just browser-dev --release`.
+in `docs/browser-dev.md`; show it on `just browser-dev --release`. The
+WebKit engine needs no CEF download: `scripts/browser-dev-run --webkit`
+(macOS 13.3 or later).
 
 ## Manual checks
 
@@ -247,6 +288,13 @@ while a page has the keyboard; how a phone or tablet viewport looks in the
 pane. That the app's other work waits while the dialog is open is read
 from the code, not measured.
 
+On the WebKit engine everything above is still open by hand: agent tests
+ran on a window that was never on screen. Three checks are WebKit-specific.
+An agent `press` of Tab and Space while another pane's consent dialog is
+open must not press Allow. An agent drag over a link must not drop
+anything where the real cursor is. An agent click on an input that calls
+`focus()` must not take the keyboard from the person's terminal.
+
 ---
 
 ## Details: measured facts
@@ -254,8 +302,9 @@ from the code, not measured.
 | Fact | Value | How measured |
 |---|---|---|
 | App size, plain release | 62 MB `.app`, 25.8 MB `.tar.gz` | `scripts/package` (default features), then `du -sh Herdr.app` and the tarball's size |
-| App size, browser release | 387 MB `.app`, 172 MB `.tar.gz` | `scripts/browser-dev-bundle --release`, then `du -sh "Herdr Dev.app"`; `tar -czf` of it |
-| Where the browser size goes | CEF framework 325 MB, app binary 59 MB, 5 helper apps 468 KB each | `du -sh` on each bundle part |
+| App size, WebKit release | binary +771,760 B (+0.74 MiB), gzip -9 +318,199 B; `.app` 62 MB | `HERDR_APP_RELEASE=1 cargo build --release --locked` with and without `--features browser-webkit`, one build each; `scripts/browser-dev-bundle --webkit --release`; `otool -L` shows the OS's `WebKit.framework` |
+| App size, CEF release | 387 MB `.app`, 172 MB `.tar.gz` | `scripts/browser-dev-bundle --release`, then `du -sh "Herdr Dev.app"`; `tar -czf` of it |
+| Where the CEF size goes | CEF framework 325 MB, app binary 59 MB, 5 helper apps 468 KB each | `du -sh` on each bundle part |
 | Change size | about 6,800 lines added in 34 files, about 5,360 in `src/browser/` (tests included); `src/window.rs` about 570 | `git diff --shortstat origin/master...HEAD -- . ':!docs'`, `git diff --numstat` |
 | CEF pin | `cef` crate `=156.2.0` (`156.2.0+156.0.14` in `Cargo.lock`), CEF 156.0.14 | `Cargo.toml`, `Cargo.lock` |
 | Chromium version | 156.0.8078.48 | `CEF_VERSION` in the distribution's `include/cef_version.h`; the framework's `Info.plist` carries only `156.0.14.0` and branch 8078 |
