@@ -3,7 +3,7 @@
 //! Pure: runtime.rs applies them to CEF.
 
 // Default builds compile these rules only for their tests; the browser feature uses them.
-#![cfg_attr(not(all(target_os = "macos", feature = "browser")), allow(dead_code))]
+#![cfg_attr(not(all(target_os = "macos", feature = "browser-pane")), allow(dead_code))]
 
 use serde_json::{Value, json};
 
@@ -17,11 +17,13 @@ pub const MIN_ZOOM: f64 = 25.0;
 pub const MAX_ZOOM: f64 = 500.0;
 
 /// Chromium's zoom level for a percent: each level is 20% bigger (`1.2^level`).
+#[cfg_attr(not(feature = "browser"), allow(dead_code))] // CEF only
 pub fn level_of(percent: f64) -> f64 {
     (percent / 100.0).ln() / 1.2f64.ln()
 }
 
 /// The percent for a Chromium zoom level.
+#[cfg_attr(not(feature = "browser"), allow(dead_code))] // CEF only
 pub fn percent_of(level: f64) -> f64 {
     100.0 * 1.2f64.powf(level)
 }
@@ -137,6 +139,7 @@ pub fn viewport(args: &Value) -> Result<Option<Viewport>, String> {
 
 /// How much to shrink an emulated viewport so all of it shows in a pane of
 /// `pane` (width, height) points: 1 when it fits.
+#[cfg_attr(not(feature = "browser"), allow(dead_code))] // CEF only
 pub fn fit_scale(v: &Viewport, pane: (f64, f64)) -> f64 {
     let (w, h) = pane;
     if w <= 0.0 || h <= 0.0 {
@@ -148,6 +151,7 @@ pub fn fit_scale(v: &Viewport, pane: (f64, f64)) -> f64 {
 /// The DevTools calls (method, params) that put `v` on the page, or take
 /// any override off it (None). `scale` < 1 shrinks the emulated page to
 /// fit its pane (`fit_scale`).
+#[cfg_attr(not(feature = "browser"), allow(dead_code))] // CEF only
 pub fn calls(v: Option<&Viewport>, scale: f64) -> Vec<(&'static str, Value)> {
     match v {
         Some(v) => {

@@ -169,6 +169,9 @@ pub fn reload(id: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// CEF's DevTools opens in a window of its own: nothing to tell the person.
+pub const DEVTOOLS_NOTE: Option<&str> = None;
+
 /// Opens or closes CEF's own DevTools window for a browser (None toggles).
 /// Returns whether it's open now. No debugging port: DevTools talks to the
 /// browser inside CEF.
@@ -235,9 +238,34 @@ pub fn set_viewport(id: &str, viewport: Option<Viewport>) -> Result<(), String> 
     Ok(())
 }
 
-/// Browser `id`'s pane changed size (view.rs): a viewport on it is shrunk
-/// to fit again, if the fit changed.
-pub fn refit(id: &str) {
+/// The block placed `id`'s container at `size` this frame (view.rs): the
+/// page fills it. CEF sizes its view once, at creation, maybe before the
+/// block first placed the container. `resized`: the container changed size,
+/// so an emulated viewport is refitted (CEF's view follows its container on
+/// its own, so the container's size is the one to watch).
+pub fn fit(id: &str, size: objc2_foundation::NSSize, resized: bool) {
+    if let Some(page) = page_view(id) {
+        // SAFETY: CEF's live browser view, main thread.
+        let page = unsafe { page.as_ref() };
+        let fill = objc2_foundation::NSRect::new(objc2_foundation::NSPoint::new(0.0, 0.0), size);
+        let had = page.frame();
+        if had.origin != fill.origin || had.size != fill.size {
+            tracing::debug!("browser: {id}'s page fills its block: {}x{} -> {}x{}", had.size.width, had.size.height, size.width, size.height, id = super::log_safe(id));
+            page.setFrame(fill);
+        }
+    }
+    if resized {
+        refit(id);
+    }
+}
+
+/// A mouse press landed in `id`'s page (view.rs). CEF reports the focus
+/// that follows on its own (`on_got_focus`), so nothing to do here.
+pub fn pressed(_id: &str) {}
+
+/// Browser `id`'s pane changed size: a viewport on it is shrunk to fit
+/// again, if the fit changed.
+fn refit(id: &str) {
     let Some(v) = STATE.with_borrow(|s| s.pages.get(id).and_then(|p| p.viewport.clone())) else { return };
     let pane = pane_size(id);
     if STATE.with_borrow(|s| s.fits.get(id).is_some_and(|f| (f - emulate::fit_scale(&v, pane)).abs() < 0.005)) {

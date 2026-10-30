@@ -1,11 +1,12 @@
 //! The agents' loopback websocket: `ws://127.0.0.1:<port>/<token>`
-//! for one browser, passed through `agent::Link`'s allowlist to that page's
-//! in-process DevTools session (runtime.rs: `SendDevToolsMessage` and an
-//! observer). No CEF remote-debugging port exists; this is the only way in.
+//! for one browser, passed through `agent::Link`'s allowlist to the engine
+//! (`engine::send_devtools`): CEF's in-process DevTools session (runtime.rs),
+//! or WebKit's translator (webkit.rs). No remote-debugging port exists; this
+//! is the only way in.
 //!
-//! Threads: one accepts, one serves each connection. CEF is called only on
-//! the main thread: messages for a page queue here and the CEF pump
-//! (runtime.rs) drains them. Tokens and ports are never logged.
+//! Threads: one accepts, one serves each connection. Engines are called only
+//! on the main thread: messages for a page queue here and the engine drains
+//! them there (CEF's pump; WebKit's wake task). Tokens and ports are never logged.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{ErrorKind, Write as _};
@@ -19,7 +20,7 @@ use tungstenite::Message;
 use tungstenite::protocol::WebSocketConfig;
 
 use super::agent::{self, FromAgent, Link, Tokens};
-use super::runtime;
+use super::engine;
 
 /// Messages from a page waiting for an agent that isn't reading: past
 /// either limit its connection ends, so an agent can't grow the app's memory.
@@ -165,7 +166,7 @@ pub fn attach(browser: &str) -> Result<String, String> {
     let token = h.tokens.issue(browser, random);
     if h.end_conn(browser) {
         drop(h);
-        runtime::wake();
+        engine::wake();
         tracing::info!("browser: agent session for {browser} replaced by a new attach", browser = super::log_safe(browser));
     }
     Ok(format!("ws://127.0.0.1:{port}/{token}"))
@@ -175,7 +176,7 @@ pub fn attach(browser: &str) -> Result<String, String> {
 /// CEF's agent host gone). True when something was live.
 pub fn revoke(browser: &str) -> bool {
     let live = hub().end_agent(browser);
-    runtime::wake();
+    engine::wake();
     live
 }
 
@@ -183,7 +184,7 @@ pub fn revoke(browser: &str) -> bool {
 /// one or had access on.
 pub fn revoke_all() -> Vec<String> {
     let all = hub().quit();
-    runtime::wake();
+    engine::wake();
     all
 }
 
@@ -218,12 +219,12 @@ pub fn from_page(browser: &str, bytes: &[u8]) {
     if !c.push(text) {
         h.end_agent(browser);
         drop(h);
-        runtime::wake();
+        engine::wake();
         tracing::warn!("browser: the agent for {browser} stopped reading; its connection and token ended", browser = super::log_safe(browser));
     }
 }
 
-/// Runs queued work for pages; the CEF pump calls it on the main thread.
+/// Runs queued work for pages; the engine calls it on the main thread.
 pub fn drain() {
     loop {
         let Some(job) = hub().jobs.pop_front() else { return };
@@ -233,7 +234,7 @@ pub fn drain() {
                 if hub().conns.get(&browser).map(|c| c.id) != Some(conn) {
                     continue;
                 }
-                if !runtime::send_devtools(&browser, message.as_bytes()) {
+                if !engine::send_devtools(&browser, message.as_bytes()) {
                     let mut h = hub();
                     if let Some(c) = h.conns.get_mut(&browser).filter(|c| c.id == conn)
                         && let Some(reply) = c.link.fail(id, "herdr: the page isn't there right now (opening or reopening): try again")
@@ -243,7 +244,7 @@ pub fn drain() {
                     }
                 }
             }
-            Job::Gone { browser } => runtime::agent_gone(&browser),
+            Job::Gone { browser } => engine::agent_gone(&browser),
         }
     }
 }
@@ -348,7 +349,7 @@ impl Drop for Ending {
             }
         };
         if own {
-            runtime::wake();
+            engine::wake();
         }
         if std::thread::panicking() {
             tracing::error!("browser: the agent connection to {} stopped on an error in Herdr", super::log_safe(&self.browser));
@@ -457,7 +458,7 @@ fn from_agent(browser: &str, conn: u64, text: &str) -> Option<String> {
             }
             h.jobs.push_back(Job::ToPage { browser: browser.to_owned(), conn, id, message });
             drop(h);
-            runtime::wake();
+            engine::wake();
             None
         }
         FromAgent::Reply(reply) => {

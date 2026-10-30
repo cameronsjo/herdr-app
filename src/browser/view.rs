@@ -23,7 +23,7 @@ use objc2_foundation::{NSPoint, NSRect, NSSize};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use super::keys::{self, Native, Press};
-use super::{Rect, Responder, runtime};
+use super::{Rect, Responder, engine};
 
 struct Container {
     view: Retained<NSView>,
@@ -130,24 +130,9 @@ pub fn place(id: &str, bounds: Bounds<Pixels>, window: &Window) {
             tracing::debug!("browser: {id} placed at {x},{y} {w}x{h} (window points, top left)", id = super::log_safe(id));
             c.view.setFrame(frame);
         }
-        // The page fills its container. CEF sizes it once, at creation, maybe
-        // before the block first placed the container; checked every frame,
-        // not only when the container moves, so a page created late still fills it.
-        if let Some(page) = runtime::page_view(id) {
-            // SAFETY: CEF's live browser view, main thread.
-            let page = unsafe { page.as_ref() };
-            let fill = NSRect::new(NSPoint::new(0.0, 0.0), frame.size);
-            let had = page.frame();
-            if had.origin != fill.origin || had.size != fill.size {
-                tracing::debug!("browser: {id}'s page fills its block: {}x{} -> {w}x{h}", had.size.width, had.size.height, id = super::log_safe(id));
-                page.setFrame(fill);
-            }
-        }
-        // An emulated viewport keeps fitting its pane (CEF's view follows its
-        // container on its own, so the container's size is the one to watch).
-        if resized {
-            runtime::refit(id);
-        }
+        // The engine puts the page in its container (checked every frame, so
+        // a page created late still fits) and refits an emulated viewport.
+        engine::fit(id, frame.size, resized);
     });
 }
 
@@ -202,7 +187,7 @@ pub fn end_frame(window: &Window) {
         take_keys(window);
     }
     if changed {
-        runtime::covers_changed();
+        engine::covers_changed();
     }
 }
 
@@ -212,6 +197,7 @@ pub fn end_frame(window: &Window) {
 /// container makes it report `hidden`). Showing and hiding
 /// the container again in the same main-thread turn tells it: AppKit sends
 /// the unhide and hide to the page's view at once, and nothing draws between.
+#[cfg_attr(not(feature = "browser"), allow(dead_code))] // CEF only
 pub fn page_created(id: &str) {
     VIEWS.with_borrow(|views| {
         let Some(c) = views.get(id) else { return };
@@ -240,7 +226,7 @@ pub fn remove(id: &str) {
 
 /// The page takes the keyboard. False while its view doesn't exist yet.
 pub fn give_keys(id: &str, window: &Window) -> bool {
-    let Some(page) = runtime::page_view(id) else {
+    let Some(page) = engine::page_view(id) else {
         tracing::debug!("browser: {id} can't take the keyboard yet: no page view", id = super::log_safe(id));
         return false;
     };
@@ -273,6 +259,7 @@ pub fn set_wanted(page: Option<&str>) {
 }
 
 /// CEF asks whether page `id` may take focus (`super::may_focus`).
+#[cfg_attr(not(feature = "browser"), allow(dead_code))] // CEF only
 pub fn may_take_focus(id: &str) -> bool {
     let pressed = PRESSED.with_borrow(|p| p.as_ref().is_some_and(|(page, at)| page == id && at.elapsed() < CLICK_FOCUS));
     WANTED.with_borrow(|w| super::may_focus(id, w.as_ref().map(Option::as_deref), pressed))
@@ -380,7 +367,10 @@ fn pressed(ev: &NSEvent) {
         .map(|(id, _)| id.clone())
     });
     match page {
-        Some(id) => PRESSED.with_borrow_mut(|p| *p = Some((id, Instant::now()))),
+        Some(id) => {
+            PRESSED.with_borrow_mut(|p| *p = Some((id.clone(), Instant::now())));
+            engine::pressed(&id);
+        }
         None => {
             PRESSED.with_borrow_mut(|p| *p = None);
             let in_page = window.firstResponder().is_some_and(|r| {
@@ -388,7 +378,7 @@ fn pressed(ev: &NSEvent) {
                 r.downcast_ref::<NSView>().and_then(page_of).is_some()
             });
             if in_page {
-                runtime::clicked_herdr();
+                engine::clicked_herdr();
             }
         }
     }

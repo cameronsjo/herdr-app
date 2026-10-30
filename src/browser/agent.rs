@@ -12,7 +12,7 @@
 //! allowlist below. CEF opens no remote-debugging port.
 
 // Default builds compile these rules only for their tests; the browser feature uses them.
-#![cfg_attr(not(all(target_os = "macos", feature = "browser")), allow(dead_code))]
+#![cfg_attr(not(all(target_os = "macos", feature = "browser-pane")), allow(dead_code))]
 
 use serde_json::{Map, Value, json};
 
@@ -78,8 +78,10 @@ fn origin(url: &str) -> String {
 
 /// Chromium switches that would open a DevTools port or let pages reach one.
 /// Herdr refuses to start CEF when its command line carries any of them.
+#[cfg_attr(not(feature = "browser"), allow(dead_code))] // CEF only
 pub const FORBIDDEN_SWITCHES: [&str; 4] = ["remote-debugging-port", "remote-debugging-pipe", "remote-debugging-address", "remote-allow-origins"];
 
+#[cfg_attr(not(feature = "browser"), allow(dead_code))] // CEF only
 pub fn forbidden_switch<'a>(args: impl IntoIterator<Item = &'a str>) -> Option<&'static str> {
     args.into_iter().find_map(|a| {
         let name = a.trim_start_matches('-').split('=').next().unwrap_or_default().to_ascii_lowercase();

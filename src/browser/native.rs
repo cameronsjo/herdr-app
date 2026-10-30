@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 
 use super::agent::{self, Caller, Candidate};
 use super::registry::{self, Page, Registry};
-use super::{Hand, Look, Responder, Source, Update, emulate, proxy, runtime, view};
+use super::{Hand, Look, Responder, Source, Update, emulate, engine, proxy, view};
 use crate::layout::Node;
 use crate::model::Model;
 
@@ -39,7 +39,7 @@ pub struct Browsers {
 impl Browsers {
     pub fn new() -> Self {
         let (tx, rx) = async_channel::unbounded();
-        runtime::set_events(tx);
+        engine::set_events(tx);
         Browsers { registry: Registry::default(), events: Some(rx), wanted: None, holder: None, error: None, asking: None }
     }
 
@@ -92,13 +92,13 @@ impl Browsers {
             if proxy::close(id) {
                 tracing::info!("{}", super::access_line(false, id, Source::Close));
             }
-            runtime::close(id);
+            engine::close(id);
             view::remove(id);
         }
         if changes.open.is_empty() {
             return;
         }
-        if let Err(e) = runtime::start(cx) {
+        if let Err(e) = engine::start(cx) {
             tracing::error!("browser: {e:#}");
             self.error = Some(format!("{e:#}"));
             return;
@@ -106,7 +106,7 @@ impl Browsers {
         for (id, url) in changes.open {
             let agent_profile = self.registry.get(&id).is_some_and(|e| e.agent_profile);
             match view::container(&id, window) {
-                Ok(parent) => runtime::open(&id, parent, url, agent_profile),
+                Ok(parent) => engine::open(&id, parent, url, agent_profile),
                 Err(e) => tracing::error!("browser: no view for {id}: {e:#}", id = super::log_safe(&id)),
             }
         }
@@ -125,25 +125,30 @@ impl Browsers {
             "browser.navigate" => {
                 let url = args.get("url").and_then(Value::as_str).unwrap_or_default();
                 let url = registry::normalize_url(url)?;
-                runtime::navigate(browser, &url)?;
+                engine::navigate(browser, &url)?;
                 Ok(json!({ "browser": browser, "url": url }))
             }
-            "browser.back" => runtime::history(browser, -1).map(|()| json!({ "browser": browser })),
-            "browser.forward" => runtime::history(browser, 1).map(|()| json!({ "browser": browser })),
-            "browser.reload" => runtime::reload(browser).map(|()| json!({ "browser": browser })),
+            "browser.back" => engine::history(browser, -1).map(|()| json!({ "browser": browser })),
+            "browser.forward" => engine::history(browser, 1).map(|()| json!({ "browser": browser })),
+            "browser.reload" => engine::reload(browser).map(|()| json!({ "browser": browser })),
             "browser.devtools" => {
                 let open = args.get("open").and_then(Value::as_bool);
-                runtime::devtools(browser, open).map(|open| json!({ "browser": browser, "devtools": open }))
+                // `note`: where the engine's inspector opens, if not in a window
+                // of its own (WebKit's is Safari's); the window shows it as a toast.
+                engine::devtools(browser, open).map(|open| match engine::DEVTOOLS_NOTE.filter(|_| open) {
+                    Some(note) => json!({ "browser": browser, "devtools": open, "note": note }),
+                    None => json!({ "browser": browser, "devtools": open }),
+                })
             }
             "browser.zoom" => {
-                let percent = emulate::zoom_target(args, runtime::zoom(browser)?)?;
-                let now = runtime::set_zoom(browser, percent)?;
+                let percent = emulate::zoom_target(args, engine::zoom(browser)?)?;
+                let now = engine::set_zoom(browser, percent)?;
                 Ok(json!({ "browser": browser, "zoom": emulate::shown(now) }))
             }
             "browser.viewport" => {
                 let viewport = emulate::viewport(args)?;
                 let shown = viewport.as_ref().map(emulate::Viewport::json);
-                runtime::set_viewport(browser, viewport)?;
+                engine::set_viewport(browser, viewport)?;
                 Ok(json!({ "browser": browser, "viewport": shown }))
             }
             other => Err(format!("{other} is not a browser command")),
@@ -185,7 +190,7 @@ impl Browsers {
                 Responder::Herdr
             }
             Hand::Give(id) => {
-                runtime::set_focus(id);
+                engine::set_focus(id);
                 Responder::Page(id.to_owned())
             }
             Hand::TakeBack => {
@@ -212,7 +217,7 @@ impl Browsers {
 
     /// Agent access on or off (`agent::may_set_access`: on only from the
     /// pane's own control). Off ends the agent's token and connection; the
-    /// connection's end reopens the page (runtime::agent_gone).
+    /// connection's end reopens the page (engine::agent_gone).
     pub fn set_agent_access(&mut self, browser: &str, on: bool, from: Source) -> Result<(), String> {
         agent::may_set_access(on, from).map_err(str::to_owned)?;
         let e = self.registry.get(browser).ok_or_else(|| format!("no open browser {browser:?}: see `herdr-app ls`"))?;
