@@ -100,11 +100,11 @@ core lines of its own.
 
 Zoom and responsive size are two small core commands the bar, keys and
 agents call, since only the app holds the CEF browser: `browser.zoom` (CEF's
-host zoom along Chromium's own steps, kept per site) and `browser.viewport`
+host zoom along Chromium's own steps, kept per host name) and `browser.viewport`
 (Chromium's device emulation over the page's DevTools session: phone,
 tablet, a custom size, or fit). Together with their keys.json `browser`
 section (`cmd-=`, `cmd--`, `cmd-0` zoom the page that has the keyboard) they
-are about 340 lines of Rust outside tests (about 160 more in tests), 164 of
+are about 350 lines of Rust outside tests (about 165 more in tests), 169 of
 them in `src/browser/emulate.rs`.
 
 Later, and mod-shaped where possible: browser tabs, docked

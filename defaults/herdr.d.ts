@@ -228,11 +228,13 @@ export interface BrowserInfo {
   /** Its pane is the focused one. */
   focused: boolean;
   /** Page zoom in whole percent (100 = normal), as browser.zoom set it. Chromium keeps
-   *  one zoom per site in the profile, so every page on that site shows the same. */
+   *  one zoom per host name (all its ports) in each profile, saved across restarts, so every
+   *  page on that host shows the same. */
   zoom: number;
   /** The responsive viewport browser.viewport set (preset "phone" or "tablet", or null
    *  for a custom size); null: the page fills its pane. An agent's own
-   *  Emulation.setDeviceMetricsOverride replaces it on the page but doesn't show here. */
+   *  Emulation.setDeviceMetricsOverride replaces it on the page but doesn't show here; a pane
+   *  resize that refits a shrunk viewport sends this one again, over the agent's. */
   viewport: { width: number; height: number; mobile: boolean; preset: "phone" | "tablet" | null } | null;
 }
 

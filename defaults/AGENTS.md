@@ -543,7 +543,7 @@ The main ones:
   says `{browser, pane}`), `browser.navigate {browser, url}`, `browser.back {browser}`,
   `browser.forward {browser}`, `browser.reload {browser}`, `browser.close {browser}`,
   `browser.devtools {browser, open?}`, `browser.zoom {step?: "in"|"out"|"reset", level?: 25-500,
-  browser?}` (percent, Chromium's steps, kept per site), `browser.viewport {preset?: "phone"|"tablet"|"fit",
+  browser?}` (percent, Chromium's steps, kept per host), `browser.viewport {preset?: "phone"|"tablet"|"fit",
   width?, height?, mobile?, browser?}` (responsive size; zoom and viewport default to the focused
   browser; an agent's own Emulation override replaces it, last one wins). `herdr-app ls` and `browsers()` list them
   (with `zoom` and `viewport`);

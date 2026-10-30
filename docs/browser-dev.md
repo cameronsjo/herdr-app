@@ -98,11 +98,14 @@ a new-window link.
   friends hide the app as usual.
 - **Zoom.** `browser.zoom {step: "in" | "out" | "reset"}` walks Chromium's
   own steps (25, 33, 50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200, 250,
-  300, 400, 500 %); `{level: 125}` sets a percent from 25 to 500. Chromium
-  keeps one zoom per site in each profile, as Chrome does: every open page on
-  that site follows, a page that moves to another site takes that site's
-  zoom, and it stays after a reopen. `browsers()` and `herdr-app ls` show it
-  as `zoom` (percent).
+  300, 400, 500 %); `{level: 125}` (or the shorthand `browser.zoom:125`)
+  sets a percent from 25 to 500. Chromium keeps one zoom per host name in
+  each profile, as Chrome does: every port on that host shares it
+  (`127.0.0.1:8765` and `127.0.0.1:8799` zoom together, `localhost` is
+  another host), every open page there follows, a page that moves to another
+  host takes that host's zoom, and the profile saves it, so it outlasts a
+  restart. The person's and the agent profile keep separate zooms.
+  `browsers()` and `herdr-app ls` show it as `zoom` (percent).
 - **Responsive size.** `browser.viewport {preset: "phone"}` lays the page out
   at 390x844 (pixel ratio 3), `"tablet"` at 820x1180 (ratio 2), both as
   mobile pages with touch (`navigator.maxTouchPoints` 5, `pointer: coarse`);
@@ -117,8 +120,13 @@ a new-window link.
   how it looks in the pane has not been checked by a person. An agent uses the
   same DevTools session, so its own `agent-browser set viewport` or `set device`
   replaces the person's size and the other way round: the last one set wins,
-  and `viewport` in `browsers()` shows only what `browser.viewport` set. When an
-  agent's connection ends the page reopens without any override. A page
+  and `viewport` in `browsers()` shows only what `browser.viewport` set. Two
+  exceptions. The person's touch emulation (from phone or tablet) stays on
+  under an agent's size until the person picks fit. And when the pane
+  changes size while the person's viewport is shrunk to fit, Herdr sends the
+  person's viewport again, over any agent override, without telling the
+  agent. When an agent's connection ends the page reopens without any
+  override. A page
   without a `<meta name="viewport">` lays out 980 px wide as a mobile page,
   as it would on a phone.
 - Herdr never gives out a browser id (`b1`, `b2`, ...) twice while the app
@@ -330,4 +338,11 @@ Smaller ones:
 - **A frame of lag while resizing.** The view follows its block every frame;
   GPUI has no layout-change event or hosted native view.
 - **`herdr-app shot` can't see pages.** It renders GPUI only, so a shot shows
-  the placeholder where a page is; a demo needs a screen recording.
+  the placeholder where a page is; a demo needs a screen recording. While the
+  window isn't frontmost, `shot` can return a stale frame (the same image
+  across changes); raise the window first (`{"raise": true}` on the socket).
+- **The bar's width is known only after the pointer crosses it.** Mods get
+  no layout size, so the bar measures itself on mouse move. Until then it
+  draws its narrow form (no `-`/`+`, a bare zoom number, the viewport icon
+  without its name). The address keeps at least 64 px; in a pane under about
+  220 pt what's right of it (zoom, viewport, DevTools) clips instead.
