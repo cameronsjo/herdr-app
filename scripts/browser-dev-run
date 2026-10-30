@@ -58,7 +58,8 @@ new=0
 if [ ! -d "$root/home" ]; then
   new=1
   [ -d "$root" ] || mkdir -m 700 "$root"
-  mkdir -m 700 "$root/home" "$root/state"
+  mkdir -m 700 "$root/home"
+  [ -d "$root/state" ] || mkdir -m 700 "$root/state"
   # The welcome and the "Updated to …" toast already seen.
   printf '{"frame.welcomed":"finished"}\n' > "$root/home/shared.json"
   version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
