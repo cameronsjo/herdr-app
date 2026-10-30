@@ -923,6 +923,9 @@ fn screenshot(id: &str, web: &WKWebView, shot: Shot, done: impl FnOnce(Result<Va
     // SAFETY: main-thread reads of a live view.
     let zoom = unsafe { web.pageZoom() };
     let view = web.bounds().size;
+    if shot.too_big((view.width / zoom, view.height / zoom), zoom) {
+        return done(Err("the screenshot is too large: clip it to under 32 million pixels".into()));
+    }
     let restore = shot.grow_to((view.width / zoom, view.height / zoom)).map(|(w, h)| {
         STATE.with_borrow_mut(|s| s.pages.get_mut(id).map(|p| p.growing = true));
         let old = web.frame();
@@ -1139,7 +1142,12 @@ define_class!(
             if current(id, *generation).is_none() {
                 return;
             }
-            // SAFETY: a main-thread read of the message WebKit passed in.
+            // The relay runs in the main frame only, but the handler is
+            // reachable from every frame: an iframe's post is not the page's.
+            // SAFETY: main-thread reads of the message WebKit passed in.
+            if !unsafe { message.frameInfo().isMainFrame() } {
+                return;
+            }
             let body = unsafe { message.body() };
             let Some(text) = body.downcast_ref::<NSString>().map(|s| s.to_string()) else { return };
             if let Some(event) = translate::console(&text, now_secs() * 1000.0) {

@@ -18,6 +18,8 @@ pub const FRAME: &str = "F1";
 pub const CONTEXT: i64 = 1;
 /// The largest console message relayed to an agent, in bytes of JSON.
 pub const MAX_CONSOLE: usize = 64 << 10;
+/// The most device pixels one screenshot may have.
+pub const MAX_SHOT_PIXELS: f64 = 32.0 * 1024.0 * 1024.0;
 
 /// What one allowed CDP method does on a WKWebView.
 #[derive(Debug, PartialEq)]
@@ -343,6 +345,16 @@ impl Shot {
         }
     }
 
+    /// Whether the snapshot, in device pixels at `zoom`, is past what one
+    /// screenshot may cost (`MAX_SHOT_PIXELS`, about 128 MB as RGBA).
+    pub fn too_big(&self, view: (f64, f64), zoom: f64) -> bool {
+        let (w, h) = match self.clip {
+            Some((_, _, w, h)) => (w, h),
+            None => view,
+        };
+        w * h * zoom * zoom > MAX_SHOT_PIXELS
+    }
+
     /// The size the page must be laid out at for the clip to be on it
     /// (None: it already is, at `view`).
     pub fn grow_to(&self, view: (f64, f64)) -> Option<(f64, f64)> {
@@ -620,6 +632,19 @@ mod tests {
         // A zero or broken clip is no clip.
         let Step::Screenshot(s) = plan("Page.captureScreenshot", &json!({ "clip": { "width": 0, "height": 5 } }), &ctx()) else { panic!() };
         assert_eq!(s.clip, None);
+    }
+
+    #[test]
+    fn a_screenshot_past_the_pixel_limit_is_refused() {
+        let shot = |w: f64, h: f64| Shot { clip: Some((0.0, 0.0, w, h)), beyond: true, jpeg: false };
+        // A long full page at 2x is fine; the old 20,000 x 20,000 clip is not.
+        assert!(!shot(1280.0, 6000.0).too_big((1280.0, 800.0), 2.0));
+        assert!(shot(20_000.0, 20_000.0).too_big((1280.0, 800.0), 1.0));
+        // Zoom counts: the same clip doubles each side at 2x.
+        assert!(!shot(4096.0, 4096.0).too_big((1280.0, 800.0), 1.0));
+        assert!(shot(4096.0, 4096.0).too_big((1280.0, 800.0), 2.0));
+        // No clip: the visible page.
+        assert!(!Shot { clip: None, beyond: false, jpeg: false }.too_big((1280.0, 800.0), 2.0));
     }
 
     #[test]
