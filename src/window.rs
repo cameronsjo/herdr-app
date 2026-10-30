@@ -370,6 +370,9 @@ pub struct AppWindow {
     model: Model,
     /// Browser blocks' pages (`browser/`): placeholders where browsers aren't built in.
     browsers: crate::browser::Browsers,
+    /// The layout block's page the person clicked into (a browser id): it
+    /// keeps the keyboard while it shows, until focus moves on purpose.
+    layout_page: Option<String>,
     /// Terminal views by block id (panes and chrome terminal blocks).
     terms: HashMap<String, Term>,
     /// Mod copies by slot (block id, `<stack>#header`, or `overlay:<id>`).
@@ -467,6 +470,7 @@ impl AppWindow {
             float_leave: HashMap::new(),
             model: Model::default(),
             browsers: crate::browser::Browsers::new(),
+            layout_page: None,
             terms: HashMap::new(),
             copies: HashMap::new(),
             overlays: Vec::new(),
@@ -1445,6 +1449,10 @@ impl AppWindow {
         self.synced_model_pane = model_pane;
         let pane_changed = focused != self.focused_pane;
         self.focused_pane = focused.clone();
+        if pane_changed {
+            // Focus moved on purpose: a layout block's page stops holding the keyboard.
+            self.layout_page = None;
+        }
         let no_dialog = !self.overlays.iter().any(|o| o.kind.modal_keys());
         if terminal_block(&self.chrome, focused.as_deref()).is_some() {
             if pane_changed && no_dialog && let Some(f) = focused.as_deref().and_then(|p| self.pane_focus(p)) {
@@ -1478,15 +1486,24 @@ impl AppWindow {
         cx.notify();
     }
 
-    /// The focused pane's page has the keyboard while its tab shows and no
-    /// dialog is open; otherwise GPUI has it.
+    /// Who has the keyboard (`browser::keyboard_page`): a dialog or popup,
+    /// else a layout block's page the person clicked, else the focused pane's
+    /// page while its tab shows and no layout terminal block has focus, else
+    /// GPUI. Runs after every request, overlay change and page event, so a
+    /// change that skips `sync` (a restore, a popup) still moves the keyboard.
     fn sync_browser_keys(&mut self, window: &mut Window) {
-        let no_dialog = !self.overlays.iter().any(|o| o.kind.modal_keys());
+        let dialog = self.overlays.iter().any(|o| o.kind.modal_keys());
+        if let Some(b) = &self.layout_page
+            && !self.chrome.visible_blocks().iter().any(|n| n.browser() == Some(b.as_str()))
+        {
+            self.layout_page = None;
+        }
         let block = terminal_block(&self.chrome, self.focused_pane.as_deref()).is_some();
-        let page = (no_dialog && !block && self.shows_tab())
+        let pane_page = (!block && self.shows_tab())
             .then(|| self.model.focused_pane())
             .flatten()
             .and_then(|p| self.model.active_tab().and_then(|t| t.shown().find(&p)).and_then(|n| n.browser()).map(str::to_owned));
+        let page = crate::browser::keyboard_page(dialog, self.layout_page.as_deref(), pane_page.as_deref()).map(str::to_owned);
         self.browsers.keys(page.as_deref(), window);
     }
 
@@ -1498,6 +1515,12 @@ impl AppWindow {
     /// A page changed, took the keyboard or asked to close.
     fn browser_event(&mut self, event: crate::browser::Event, window: &mut Window, cx: &mut Context<Self>) {
         let u = self.browsers.apply(event);
+        if u.clicked_herdr {
+            // A click on Herdr: a layout block's page lets go (a pane's page
+            // keeps it until the click moves the focused pane).
+            self.layout_page = None;
+            return self.sync_browser_keys(window);
+        }
         let pane = self.browser_pane(&u.browser);
         if let Some(url) = &u.url {
             self.save_browser_url(&u.browser, url);
@@ -1509,11 +1532,15 @@ impl AppWindow {
             }
             return;
         }
-        if u.focused && let Some(pane) = pane.filter(|p| self.model.focused_pane().as_ref() != Some(p)) {
-            // The person clicked into the page: its pane is the focused one.
-            self.model.focus_pane(&pane);
-            self.focused_pane = None;
-            return self.sync(window, cx);
+        if u.focused {
+            // The person clicked into the page: a layout block's page holds the
+            // keyboard; a pane's page makes its pane the focused one.
+            self.layout_page = pane.is_none().then(|| u.browser.clone());
+            if let Some(pane) = pane.filter(|p| self.model.focused_pane().as_ref() != Some(p) || self.focused_pane.as_ref() != Some(p)) {
+                self.model.focus_pane(&pane);
+                self.focused_pane = None;
+                return self.sync(window, cx);
+            }
         }
         self.sync_browser_keys(window);
         self.publish(cx);
@@ -3445,6 +3472,8 @@ impl AppWindow {
         } else {
             self.publish_shown_copies();
         }
+        // A dialog or popup takes the keyboard from a page (AppKit's, not only GPUI's).
+        self.sync_browser_keys(window);
         cx.notify();
     }
 
@@ -3498,6 +3527,7 @@ impl AppWindow {
             if o.kind.modal_keys() {
                 self.restore_focus(window, cx);
             }
+            self.sync_browser_keys(window);
             cx.notify();
         }
     }
@@ -3537,6 +3567,8 @@ impl AppWindow {
                 let _ = reply.send(self.control(cmd, window, cx));
             }
         }
+        // Whatever the request changed (a tab, a popup, a restore), the keyboard follows.
+        self.sync_browser_keys(window);
     }
 
     fn control(&mut self, cmd: Value, window: &mut Window, cx: &mut Context<Self>) -> Value {

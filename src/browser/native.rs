@@ -12,15 +12,20 @@ use crate::model::Model;
 /// What CEF reports about one browser (main thread, from the pump).
 pub enum Event {
     Page { browser: String, page: Page },
+    /// CEF says the page got focus: a click into it, or CEF on its own.
     Focused(String),
     CloseAsked(String),
+    /// A mouse press on Herdr (outside every page) while a page had the keyboard.
+    ClickedHerdr,
 }
 
 pub struct Browsers {
     registry: Registry,
     events: Option<async_channel::Receiver<Event>>,
-    /// The browser the window gave the keyboard to (or the person clicked into).
-    keyed: Option<String>,
+    /// For the log: who the window last decided has the keyboard, and who
+    /// last had it (None: Herdr).
+    wanted: Option<Option<String>>,
+    holder: Option<Option<String>>,
     /// Why CEF can't run, shown in every browser block.
     error: Option<String>,
 }
@@ -29,7 +34,7 @@ impl Browsers {
     pub fn new() -> Self {
         let (tx, rx) = async_channel::unbounded();
         runtime::set_events(tx);
-        Browsers { registry: Registry::default(), events: Some(rx), keyed: None, error: None }
+        Browsers { registry: Registry::default(), events: Some(rx), wanted: None, holder: None, error: None }
     }
 
     pub fn events(&mut self) -> Option<async_channel::Receiver<Event>> {
@@ -43,12 +48,20 @@ impl Browsers {
                 let moved = self.registry.page(&browser, page);
                 Update { url: moved.then_some(url), browser, ..Update::default() }
             }
-            Event::Focused(browser) => {
+            // Only a press in the page makes it the person's choice; CEF also
+            // focuses a page it just created, which must not move Herdr's focus
+            // (sync_browser_keys then puts the keyboard back where it belongs).
+            Event::Focused(browser) if view::clicked(&browser) => {
+                tracing::debug!("browser: the person clicked into {browser}");
                 self.registry.focused(&browser, crate::model::now_ms());
-                self.keyed = Some(browser.clone());
                 Update { browser, focused: true, ..Update::default() }
             }
+            Event::Focused(browser) => {
+                tracing::debug!("browser: {browser} took focus on its own (not a click)");
+                Update { browser, ..Update::default() }
+            }
             Event::CloseAsked(browser) => Update { browser, close: true, ..Update::default() },
+            Event::ClickedHerdr => Update { clicked_herdr: true, ..Update::default() },
         }
     }
 
@@ -67,9 +80,6 @@ impl Browsers {
         for id in &changes.close {
             runtime::close(id);
             view::remove(id);
-            if self.keyed.as_deref() == Some(id) {
-                self.keyed = None;
-            }
         }
         if changes.open.is_empty() {
             return;
@@ -119,26 +129,37 @@ impl Browsers {
         self.registry.list().iter().map(|e| e.json(e.pane.is_some() && e.pane.as_deref() == focused_pane)).collect()
     }
 
-    /// Gives the keyboard to `page` (the focused pane's browser, when no
-    /// dialog is open), or back to GPUI when it's None.
+    /// Gives the keyboard to `page` (`super::keyboard_page`), or back to GPUI
+    /// when it's None. Compared with who really has it (AppKit's first
+    /// responder), so a page that took focus on its own loses it again.
     pub fn keys(&mut self, page: Option<&str>, window: &mut Window) {
-        if self.keyed.as_deref() == page {
-            return;
+        if self.wanted.as_ref().map(Option::as_deref) != Some(page) {
+            tracing::debug!("browser: the keyboard belongs to {}", page.unwrap_or("Herdr"));
+            self.wanted = Some(page.map(str::to_owned));
         }
-        match page {
-            Some(id) => {
+        let actual = view::keyed_page(window);
+        let holder = if actual.as_deref() == page {
+            actual
+        } else {
+            match page {
                 // Not yet created: the next sync tries again.
-                if view::give_keys(id, window) {
-                    tracing::debug!("browser: {id} has the keyboard");
+                Some(id) if !view::give_keys(id, window) => actual,
+                Some(id) => {
                     runtime::set_focus(id);
-                    self.keyed = Some(id.to_owned());
+                    Some(id.to_owned())
+                }
+                None => {
+                    if let Some(from) = &actual {
+                        tracing::debug!("browser: taking the keyboard back from {from}");
+                    }
+                    view::take_keys(window);
+                    None
                 }
             }
-            None => {
-                tracing::debug!("browser: Herdr has the keyboard");
-                view::take_keys(window);
-                self.keyed = None;
-            }
+        };
+        if self.holder.as_ref() != Some(&holder) {
+            tracing::debug!("browser: {} has the keyboard", holder.as_deref().unwrap_or("Herdr"));
+            self.holder = Some(holder);
         }
     }
 

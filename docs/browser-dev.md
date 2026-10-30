@@ -60,6 +60,10 @@ a new-window link.
   painted (another tab, a zoomed pane, a hidden column) hides its page.
   Overlays (dialogs, menus, toasts) still draw under a page.
 - Clicking a page gives it the keyboard and makes its pane the focused one.
+  A layout block's page keeps the keyboard until a click elsewhere in Herdr
+  or a focus change. A dialog or popup (the palette, a menu, a rename
+  prompt) takes the keyboard while it's open. A page that focuses itself
+  (CEF does when it creates one) doesn't keep it.
   While a page has the keyboard, keys bound in keys.json's `global` section
   (and the shown layout's), plus `ctrl-alt-shift-escape`, still go to Herdr.
 - A popup or a `target="_blank"` link opens in the same pane.

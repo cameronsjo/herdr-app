@@ -75,6 +75,11 @@ pub fn set_events(tx: async_channel::Sender<Event>) {
     EVENTS.with_borrow_mut(|e| *e = Some(tx));
 }
 
+/// The person pressed the mouse on Herdr while a page had the keyboard (view.rs).
+pub fn clicked_herdr() {
+    send(Event::ClickedHerdr);
+}
+
 fn send(event: Event) {
     EVENTS.with_borrow(|e| {
         if let Some(tx) = e {

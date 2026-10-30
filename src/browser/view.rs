@@ -1,7 +1,8 @@
 //! The native side of a browser block: one container `NSView` per browser
 //! over GPUI's view, moved to its block's bounds each frame and hidden when
-//! its block isn't painted; who has the keyboard; and the key monitor that
-//! keeps Herdr's global keys working while a page has it.
+//! its block isn't painted; who has the keyboard; and the event monitor that
+//! keeps Herdr's global keys working while a page has it and tells a click
+//! into a page from CEF taking focus on its own.
 //!
 //! GPUI has no hosted-native-view element and no layout-change event, so a
 //! block's canvas reports its bounds while painting (`place`) and a canvas
@@ -10,13 +11,14 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ptr::NonNull;
+use std::time::{Duration, Instant};
 
 use block2::RcBlock;
 use gpui::{Bounds, Pixels, Window};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{MainThreadMarker, MainThreadOnly as _};
-use objc2_app_kit::{NSEvent, NSEventMask, NSEventModifierFlags, NSView, NSWindowOrderingMode};
+use objc2_app_kit::{NSEvent, NSEventMask, NSEventModifierFlags, NSEventType, NSView, NSWindowOrderingMode};
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
@@ -33,7 +35,12 @@ thread_local! {
     static VIEWS: RefCell<HashMap<String, Container>> = RefCell::new(HashMap::new());
     static BINDINGS: RefCell<Vec<(String, String)>> = const { RefCell::new(Vec::new()) };
     static MONITOR: RefCell<Option<Retained<AnyObject>>> = const { RefCell::new(None) };
+    /// The page the last mouse press landed in, and when.
+    static PRESSED: RefCell<Option<(String, Instant)>> = const { RefCell::new(None) };
 }
+
+/// How long after a press in a page CEF's "got focus" still counts as that click.
+const CLICK_FOCUS: Duration = Duration::from_secs(1);
 
 /// GPUI's own view for a window (its window handle).
 fn gpui_view(window: &Window) -> anyhow::Result<&NSView> {
@@ -132,6 +139,31 @@ pub fn give_keys(id: &str, window: &Window) -> bool {
     taken
 }
 
+/// The page whose view (or a view inside it) is the window's first responder.
+pub fn keyed_page(window: &Window) -> Option<String> {
+    let ns_window = gpui_view(window).ok()?.window()?;
+    let responder = ns_window.firstResponder()?;
+    let responder: &AnyObject = &responder;
+    page_of(responder.downcast_ref::<NSView>()?)
+}
+
+fn page_of(view: &NSView) -> Option<String> {
+    VIEWS.with_borrow(|views| views.iter().find(|(_, c)| view.isDescendantOf(&c.view)).map(|(id, _)| id.clone()))
+}
+
+/// Whether the person just pressed the mouse in this page: CEF's "got focus"
+/// is then their click, not the page taking focus on its own (CEF does that
+/// when it creates a browser). Answers once per press.
+pub fn clicked(id: &str) -> bool {
+    PRESSED.with_borrow_mut(|p| match p.take() {
+        Some((page, at)) if page == id && at.elapsed() < CLICK_FOCUS => true,
+        other => {
+            *p = other;
+            false
+        }
+    })
+}
+
 /// GPUI takes the keyboard back.
 pub fn take_keys(window: &Window) {
     if let Ok(gpui) = gpui_view(window)
@@ -145,9 +177,13 @@ pub fn set_bindings(bindings: Vec<(String, String)>) {
     BINDINGS.with_borrow_mut(|b| *b = bindings);
 }
 
-/// Once: a key-down monitor in front of AppKit's dispatch. While a page has
-/// the keyboard, a key bound globally in keys.json (or the escape hatch)
-/// runs its action in Herdr and never reaches the page.
+/// Once: an event monitor in front of AppKit's dispatch.
+/// - Key down: while a page has the keyboard, a key bound globally in
+///   keys.json (or the escape hatch) runs its action in Herdr and never
+///   reaches the page.
+/// - Mouse down: notes which page was pressed (`clicked`); a press outside
+///   every page while one has the keyboard is a click on Herdr, and the
+///   window hears of it (a layout block's page stops holding the keyboard).
 pub fn install_monitor() {
     if MONITOR.with_borrow(Option::is_some) {
         return;
@@ -155,6 +191,10 @@ pub fn install_monitor() {
     let handler = RcBlock::new(|event: NonNull<NSEvent>| -> *mut NSEvent {
         // SAFETY: AppKit hands the monitor a live event, on the main thread.
         let ev = unsafe { event.as_ref() };
+        if ev.r#type() != NSEventType::KeyDown {
+            pressed(ev);
+            return event.as_ptr();
+        }
         match route(ev) {
             Some(action) => {
                 tracing::info!("browser: a page had the keyboard; {action} goes to Herdr");
@@ -165,8 +205,41 @@ pub fn install_monitor() {
         }
     });
     // SAFETY: the handler returns the event it was given, or null to drop it.
-    let monitor = unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::KeyDown, &handler) };
+    let mask = NSEventMask::KeyDown | NSEventMask::LeftMouseDown | NSEventMask::RightMouseDown | NSEventMask::OtherMouseDown;
+    let monitor = unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(mask, &handler) };
     MONITOR.with_borrow_mut(|m| *m = monitor);
+}
+
+/// A mouse press: in which shown page, if any.
+fn pressed(ev: &NSEvent) {
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    // Another window (DevTools) has its own coordinates and no pages.
+    let Some(window) = ev.window(mtm) else { return };
+    let at = ev.locationInWindow();
+    let page = VIEWS.with_borrow(|views| {
+        views.iter().find(|(_, c)| {
+            if c.view.isHidden() || c.view.window().is_none_or(|w| !std::ptr::eq(&*w, &*window)) {
+                return false;
+            }
+            let p = c.view.convertPoint_fromView(at, None);
+            let b = c.view.bounds();
+            p.x >= b.origin.x && p.y >= b.origin.y && p.x < b.origin.x + b.size.width && p.y < b.origin.y + b.size.height
+        })
+        .map(|(id, _)| id.clone())
+    });
+    match page {
+        Some(id) => PRESSED.with_borrow_mut(|p| *p = Some((id, Instant::now()))),
+        None => {
+            PRESSED.with_borrow_mut(|p| *p = None);
+            let in_page = window.firstResponder().is_some_and(|r| {
+                let r: &AnyObject = &r;
+                r.downcast_ref::<NSView>().and_then(page_of).is_some()
+            });
+            if in_page {
+                runtime::clicked_herdr();
+            }
+        }
+    }
 }
 
 /// The action for a key pressed while a page has the keyboard.
@@ -174,11 +247,7 @@ fn route(ev: &NSEvent) -> Option<String> {
     let mtm = MainThreadMarker::new()?;
     let responder = ev.window(mtm)?.firstResponder()?;
     let responder: &AnyObject = &responder;
-    let view = responder.downcast_ref::<NSView>()?;
-    let in_page = VIEWS.with_borrow(|views| views.values().any(|c| view.isDescendantOf(&c.view)));
-    if !in_page {
-        return None;
-    }
+    page_of(responder.downcast_ref::<NSView>()?)?;
     let flags = ev.modifierFlags();
     let text = |s: Option<Retained<objc2_foundation::NSString>>| s.map(|s| s.to_string().to_lowercase()).filter(|s| !s.is_empty());
     let key = keys::named(ev.keyCode())
