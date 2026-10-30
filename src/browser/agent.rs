@@ -600,6 +600,11 @@ impl Link {
             }
             _ => {}
         }
+        // The page's own events carry no sessionId. agent-browser's direct
+        // page path names this page's session "" and drops events whose
+        // sessionId differs (so console, errors and reload's load wait saw
+        // nothing): tag them with "".
+        msg.entry("sessionId").or_insert_with(|| json!(""));
         Some(Value::Object(msg).to_string())
     }
 }
@@ -1213,6 +1218,24 @@ mod tests {
         assert!(link.from_page(ev.to_string().as_bytes()).is_some());
         let r = send(&mut link, &mut next, json!({ "id": 9, "method": "Runtime.evaluate", "sessionId": "S1" }));
         assert!(refused(&r).is_some());
+    }
+
+    /// agent-browser's direct-page session id is "": a page event without
+    /// that tag never reaches its console, errors or reload wait.
+    #[test]
+    fn page_events_carry_the_direct_page_session_id() {
+        let mut link = Link::default();
+        let out = |link: &mut Link, ev: Value| serde_json::from_str::<Value>(&link.from_page(ev.to_string().as_bytes()).unwrap()).unwrap();
+        for method in ["Runtime.consoleAPICalled", "Runtime.exceptionThrown", "Page.loadEventFired"] {
+            assert_eq!(out(&mut link, json!({ "method": method, "params": {} }))["sessionId"], "", "{method}");
+        }
+        // A child session keeps its own id.
+        link.from_page(json!({ "method": "Target.attachedToTarget", "params": { "sessionId": "S1", "targetInfo": { "targetId": "T1" } } }).to_string().as_bytes()).unwrap();
+        assert_eq!(out(&mut link, json!({ "method": "Runtime.consoleAPICalled", "sessionId": "S1", "params": {} }))["sessionId"], "S1");
+        // Answers are matched by id and stay untagged.
+        let mut next = 0;
+        let FromAgent::Forward { id, .. } = send(&mut link, &mut next, json!({ "id": 7, "method": "Page.reload" })) else { panic!() };
+        assert_eq!(out(&mut link, json!({ "id": id, "result": {} })), json!({ "id": 7, "result": {} }));
     }
 
     #[test]
