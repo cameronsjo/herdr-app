@@ -3,7 +3,7 @@
 #
 #   browser-dev-run [bundle args]       build, then run in this terminal
 #   browser-dev-run --background [...]  build, then run detached (log: <root>/app.log)
-#   browser-dev-run --relaunch [...]    quit the running one, rebuild, run detached
+#   browser-dev-run --relaunch [...]    rebuild, then quit the running one and run detached
 #   browser-dev-run --stop              quit the app and stop its core
 #
 # The home (/tmp/hbd.dev) is kept between runs, so the welcome, spaces, pages
@@ -46,13 +46,26 @@ if [ "$mode" = stop ]; then
   exit 0
 fi
 
-if [ "$mode" = relaunch ]; then quit_app; mode=background; fi
-if running; then
+if [ "$mode" != relaunch ] && running; then
   echo "a dev app is already running on $root; use --relaunch or --stop" >&2
   exit 1
 fi
 
+# The toolchain CI uses (.github/workflows/ci.yml): Rust 1.95.0, Zig 0.16
+# (ghostty-sys builds with it), from rustup and mise when they're not on PATH.
+if ! command -v cargo >/dev/null && [ -x "$HOME/.cargo/bin/cargo" ]; then PATH=$HOME/.cargo/bin:$PATH; fi
+if [ -z "${RUSTUP_TOOLCHAIN:-}" ] && command -v rustup >/dev/null && rustup toolchain list | grep -q '^1\.95\.0'; then
+  export RUSTUP_TOOLCHAIN=1.95.0
+fi
+case $(zig version 2>/dev/null) in
+  0.16.*) ;;
+  *) if command -v mise >/dev/null && zig_dir=$(mise where zig@0.16.0 2>/dev/null); then PATH=$zig_dir:$PATH; fi ;;
+esac
+export PATH
+
+# Build first: a failed build leaves a running app alone.
 bash scripts/browser-dev-bundle "$@"
+if [ "$mode" = relaunch ]; then quit_app; mode=background; fi
 
 new=0
 if [ ! -d "$root/home" ]; then
