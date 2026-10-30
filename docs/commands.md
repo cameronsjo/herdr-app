@@ -217,7 +217,7 @@ Close a browser and its pane.
 
 ## `browser.devtools`
 
-Open or close Chromium's DevTools window for a browser (no open: toggle).
+Open or close a browser's web inspector (no open: toggle): Chromium's DevTools window on the CEF engine; on the WebKit engine the page becomes inspectable from Safari's Develop menu.
 
 | Argument | Required |
 |---|---|
@@ -226,7 +226,7 @@ Open or close Chromium's DevTools window for a browser (no open: toggle).
 
 ## `browser.zoom`
 
-Zoom a browser's page (default: the focused browser): step "in" or "out" along Chromium's steps (25% to 500%), "reset" to 100%, or level, a percent from 25 to 500. Chromium keeps one zoom per host name (all its ports) in each profile, saved across restarts, so other pages on that host follow. A number alone (browser.zoom:125) is a level. Says the zoom now, in percent.
+Zoom a browser's page (default: the focused browser): step "in" or "out" along Chromium's steps (25% to 500%), "reset" to 100%, or level, a percent from 25 to 500. The CEF engine keeps one zoom per host name (all its ports) in each profile, saved across restarts, so other pages on that host follow; the WebKit engine keeps it per pane. A number alone (browser.zoom:125) is a level. Says the zoom now, in percent.
 
 | Argument | Required |
 |---|---|
@@ -236,7 +236,7 @@ Zoom a browser's page (default: the focused browser): step "in" or "out" along C
 
 ## `browser.viewport`
 
-Lay a browser's page out at another screen size (default: the focused browser): preset "phone" (390x844), "tablet" (820x1180), both mobile with touch, or "fit" (the pane's own size again); or width and height in pixels, with mobile true or false. A size bigger than the pane is shrunk to fit it.
+Lay a browser's page out at another screen size (default: the focused browser): preset "phone" (390x844), "tablet" (820x1180), both mobile with touch, or "fit" (the pane's own size again); or width and height in pixels, with mobile true or false. A size bigger than the pane is shrunk to fit it. The WebKit engine sets the size only: no mobile, touch or pixel ratio.
 
 | Argument | Required |
 |---|---|

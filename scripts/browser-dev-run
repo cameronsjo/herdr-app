@@ -92,6 +92,7 @@ lsof -iTCP:8765 -sTCP:LISTEN >/dev/null 2>&1 && serve=':'
 
 seed='exit 0'
 if [ "$new" = 1 ]; then
+  # shellcheck disable=SC2016 # expands later, in the app's own shell
   seed='for _ in $(seq 150); do "$0" status >/dev/null 2>&1 && break; sleep 0.2; done
 "$0" do space.new >/dev/null && "$0" do browser.open --url http://127.0.0.1:8765/browser-test-page.html >/dev/null'
 fi
