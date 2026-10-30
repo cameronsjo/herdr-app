@@ -36,6 +36,19 @@ fancy-regex = "0.19"
 notify = "7"
 sha2 = "0.10"
 
+[features]
+# A Chromium browser inside the window (macOS only, CEF in windowed mode).
+# Off by default: it needs the CEF binary distribution and a dev bundle
+# with CEF's helper apps (`just browser-dev`).
+browser = ["dep:cef", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation", "dep:raw-window-handle"]
+
+# CEF starts its renderer, GPU and network processes from this helper; a
+# bundle names its copies "Herdr Helper*" (scripts/browser-dev-bundle).
+[[bin]]
+name = "herdr-helper"
+path = "src/bin/herdr-helper.rs"
+required-features = ["browser"]
+
 [[test]]
 name = "shot_pixels"
 path = "tests/shot_pixels.rs"
@@ -52,6 +65,13 @@ gpui_linux = { package = "gpui-pre-linux", version = "=0.3.8", features = ["rend
 [target.'cfg(target_os = "macos")'.dependencies]
 gpui_macos = { package = "gpui-pre-macos", version = "=0.3.8", features = ["render-to-image"] }
 libc = "0.2"
+# The `browser` feature only. The `+156.0.14` build decides which CEF binary
+# the build downloads; bindings and framework must match exactly.
+cef = { version = "=156.2.0", default-features = false, features = ["sandbox"], optional = true }
+objc2 = { version = "0.6", optional = true }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSApplication", "NSGraphics", "NSResponder", "NSView", "NSWindow", "objc2-core-foundation"], optional = true }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSGeometry", "NSObject", "NSString", "objc2-core-foundation", "std"], optional = true }
+raw-window-handle = { version = "0.6", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 gpui_windows = { package = "gpui-pre-windows", version = "=0.3.8", features = ["render-to-image"] }

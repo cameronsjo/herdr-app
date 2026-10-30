@@ -49,6 +49,24 @@ docs-check: build
     bun test scripts/docs.test.ts
     bun scripts/docs.ts check
 
+# Builds target/browser-dev/Herdr Dev.app (scripts/browser-dev-bundle) and
+# runs it on a scratch home and its own core, never your real ones. Quit it
+# (cmd-q) to end; the scratch folder stays for its logs.
+# Herdr with a Chromium browser in the window (macOS, `browser` feature)
+[macos]
+browser-dev *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bash scripts/browser-dev-bundle {{args}}
+    # Short: hc's socket path inside it has a 103-byte limit.
+    root=$(mktemp -d /tmp/hbd.XXXXXX)
+    export HERDR_APP_HOME=$root/home XDG_STATE_HOME=$root/state HC_SESSION=hbd-${root##*.}
+    export HERDR_APP_ID=herdr-browser-dev HERDR_APP_NO_SOUND=1 HERDR_TELEMETRY=0 HERDR_BROWSER_SPIKE=1
+    echo "scratch: $root (log: $root/app.log)"
+    # Stops only this run's core (HC_SESSION, XDG_STATE_HOME above).
+    trap 'hc server stop >/dev/null 2>&1 || true' EXIT
+    "target/browser-dev/Herdr Dev.app/Contents/MacOS/Herdr" 2>&1 | tee "$root/app.log"
+
 [linux]
 install:
     bash scripts/install-linux

@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+# Builds target/browser-dev/Herdr Dev.app: herdr-app with the `browser`
+# feature, CEF's framework and its five helper apps. CEF on macOS only starts
+# from such a bundle. Ad hoc signed, for this machine only.
+#
+#   scripts/browser-dev-bundle [--release]
+#
+# CEF_PATH: where the CEF binary distribution is downloaded and kept, outside
+# the repo (default ~/.cache/herdr-app/cef; about 500 MB). RUSTUP_TOOLCHAIN
+# picks the Rust toolchain as usual.
+set -euo pipefail
+
+[[ $(uname -s) == Darwin ]] || { echo 'browser-dev-bundle: macOS only' >&2; exit 1; }
+cd "$(dirname "$0")/.."
+
+profile=debug
+cargo_args=(--locked --features browser --bin herdr-app --bin herdr-helper)
+case ${1:-} in
+  --release) profile=release; cargo_args+=(--release) ;;
+  '') ;;
+  *) echo "usage: scripts/browser-dev-bundle [--release]" >&2; exit 2 ;;
+esac
+
+export CEF_PATH=${CEF_PATH:-${XDG_CACHE_HOME:-$HOME/.cache}/herdr-app/cef}
+# The CEF build the bindings were made for: cef-dll-sys 156.2.0+156.0.14 -> 156.0.14.
+cef_version=$(awk '/^name = "cef-dll-sys"$/ { getline; sub(/.*\+/, ""); sub(/"$/, ""); print; exit }' Cargo.lock)
+[[ -n $cef_version ]] || { echo 'browser-dev-bundle: no cef-dll-sys in Cargo.lock' >&2; exit 1; }
+
+cargo build "${cargo_args[@]}"
+
+cef_dir=$CEF_PATH/$cef_version/cef_macos_aarch64
+[[ $(uname -m) == arm64 ]] || cef_dir=$CEF_PATH/$cef_version/cef_macos_x86_64
+framework="$cef_dir/Chromium Embedded Framework.framework"
+[[ -d $framework ]] || { echo "browser-dev-bundle: no CEF framework at $framework" >&2; exit 1; }
+
+id=dev.herdr.app.browser-dev
+app="target/browser-dev/Herdr Dev.app"
+rm -rf "$app"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$app/Contents/Frameworks"
+
+# The executable is "Herdr": CEF finds its helpers as "<executable> Helper*.app".
+cp "target/$profile/herdr-app" "$app/Contents/MacOS/Herdr"
+cp assets/icons/Herdr.icns "$app/Contents/Resources/Herdr.icns"
+cat > "$app/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+    <key>CFBundleExecutable</key><string>Herdr</string>
+    <key>CFBundleIdentifier</key><string>$id</string>
+    <key>CFBundleName</key><string>Herdr Dev</string>
+    <key>CFBundleDisplayName</key><string>Herdr Dev</string>
+    <key>CFBundleIconFile</key><string>Herdr</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>0.0.1</string>
+    <key>CFBundleVersion</key><string>1</string>
+    <key>NSPrincipalClass</key><string>NSApplication</string>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>LSMinimumSystemVersion</key><string>13.0</string>
+</dict></plist>
+PLIST
+
+# A copy-on-write clone where the disk allows it: the framework is ~300 MB.
+cp -cR "$framework" "$app/Contents/Frameworks/" 2>/dev/null || cp -R "$framework" "$app/Contents/Frameworks/"
+
+# CEF's five helper variants (cef_variables.cmake: CEF_HELPER_APP_SUFFIXES).
+for variant in ":" " (GPU):.gpu" " (Renderer):.renderer" " (Plugin):.plugin" " (Alerts):.alerts"; do
+  suffix=${variant%%:*}
+  id_suffix=${variant#*:}
+  name="Herdr Helper$suffix"
+  helper="$app/Contents/Frameworks/$name.app"
+  mkdir -p "$helper/Contents/MacOS"
+  cp "target/$profile/herdr-helper" "$helper/Contents/MacOS/$name"
+  cat > "$helper/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+    <key>CFBundleExecutable</key><string>$name</string>
+    <key>CFBundleIdentifier</key><string>$id.helper$id_suffix</string>
+    <key>CFBundleName</key><string>$name</string>
+    <key>CFBundleDisplayName</key><string>$name</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>0.0.1</string>
+    <key>CFBundleVersion</key><string>1</string>
+    <key>LSUIElement</key><string>1</string>
+    <key>LSFileQuarantineEnabled</key><true/>
+    <key>LSMinimumSystemVersion</key><string>13.0</string>
+    <key>LSEnvironment</key><dict><key>MallocNanoZone</key><string>0</string></dict>
+    <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
+</dict></plist>
+PLIST
+done
+
+# Inside out, never --deep: the framework's libraries, the framework, each
+# helper, then the app (CEF's code-signing notes). Ad hoc, no hardened
+# runtime: a dev bundle, not something to ship.
+sign() { codesign --force --sign - "$@"; }
+for lib in "$app/Contents/Frameworks/Chromium Embedded Framework.framework/Libraries/"*.dylib; do sign "$lib"; done
+sign "$app/Contents/Frameworks/Chromium Embedded Framework.framework"
+for helper in "$app/Contents/Frameworks/Herdr Helper"*.app; do sign "$helper"; done
+sign "$app"
+codesign --verify --strict "$app"
+
+echo "$app"
+echo "size: $(du -sh "$app" | cut -f1) ($(du -sh "$app/Contents/Frameworks/Chromium Embedded Framework.framework" | cut -f1) of it CEF's framework)"
