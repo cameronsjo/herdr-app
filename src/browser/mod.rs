@@ -10,6 +10,8 @@
 #[cfg(any(test, all(target_os = "macos", feature = "browser")))]
 pub mod agent;
 #[cfg(any(test, all(target_os = "macos", feature = "browser")))]
+pub mod emulate;
+#[cfg(any(test, all(target_os = "macos", feature = "browser")))]
 pub mod keys;
 #[cfg(any(test, all(target_os = "macos", feature = "browser")))]
 pub mod registry;

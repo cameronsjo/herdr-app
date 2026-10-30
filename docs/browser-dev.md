@@ -49,6 +49,8 @@ herdr-app do browser.open --url example.com --place tab
 herdr-app ls
 herdr-app do browser.navigate --browser b1 --url https://example.com/
 herdr-app do browser.devtools --browser b1
+herdr-app do browser.zoom --browser b1 --step in
+herdr-app do browser.viewport --browser b1 --preset phone
 herdr-app do browser.close --browser b2
 ```
 
@@ -85,9 +87,40 @@ a new-window link.
   unless it's the page that should have the keyboard. Closing the page that
   has the keyboard gives it back to Herdr.
   While a page has the keyboard, `ctrl-alt-shift-escape` and the keys bound in
-  keys.json's `global` section (and the shown layout's) still go to Herdr,
-  from the last keys.json that loaded. `send:` keys stay with the page;
-  `app.hide` and friends hide the app as usual.
+  keys.json's `browser` section, then the shown layout's, then `global`, still
+  go to Herdr, from the last keys.json that loaded. `browser` applies only
+  there: the macOS defaults bind `cmd-=` and `cmd-+` to `browser.zoom:in`,
+  `cmd--` to `browser.zoom:out` and `cmd-0` to `browser.zoom:reset`, so they
+  zoom the page instead of Herdr (outside a page they still zoom Herdr;
+  `cmd-1`…`cmd-9` still switch tabs). A key bound to `terminal` there goes to
+  the page instead of Herdr. A keys.json written before this build has no
+  `browser` section: add it. `send:` keys stay with the page; `app.hide` and
+  friends hide the app as usual.
+- **Zoom.** `browser.zoom {step: "in" | "out" | "reset"}` walks Chromium's
+  own steps (25, 33, 50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200, 250,
+  300, 400, 500 %); `{level: 125}` sets a percent from 25 to 500. Chromium
+  keeps one zoom per site in each profile, as Chrome does: every open page on
+  that site follows, a page that moves to another site takes that site's
+  zoom, and it stays after a reopen. `browsers()` and `herdr-app ls` show it
+  as `zoom` (percent).
+- **Responsive size.** `browser.viewport {preset: "phone"}` lays the page out
+  at 390x844 (pixel ratio 3), `"tablet"` at 820x1180 (ratio 2), both as
+  mobile pages with touch (`navigator.maxTouchPoints` 5, `pointer: coarse`);
+  `{width, height, mobile?}` sets any size (1 to 10000); `"fit"` goes back to
+  the pane's own size. It is Chromium's device emulation
+  (`Emulation.setDeviceMetricsOverride`, `setTouchEmulationEnabled`, sent over
+  the page's own DevTools session), not a user agent change. What the person
+  sees: Chromium lays the page out at the emulated size at the pane's top
+  left; a size bigger than the pane is shrunk (`scale`) until all of it fits,
+  and it is fitted again whenever the pane changes size. This is read from
+  Chromium's emulation and the log (`b1 viewport 390x844 mobile scale 0.83`);
+  how it looks in the pane has not been checked by a person. An agent uses the
+  same DevTools session, so its own `agent-browser set viewport` or `set device`
+  replaces the person's size and the other way round: the last one set wins,
+  and `viewport` in `browsers()` shows only what `browser.viewport` set. When an
+  agent's connection ends the page reopens without any override. A page
+  without a `<meta name="viewport">` lays out 980 px wide as a mobile page,
+  as it would on a phone.
 - Herdr never gives out a browser id (`b1`, `b2`, ...) twice while the app
   runs. A layout block can still open a page under any id, a closed
   browser's included.
@@ -174,7 +207,12 @@ downloads; `Cookie`, `Set-Cookie`, `Authorization` and
 `Proxy-Authorization` headers are stripped from network events. Script in
 the page is allowed, so it still reads the page's non-HttpOnly cookies
 (`document.cookie`), and `Page.navigate` takes the pane to any http or
-https site. The proxy refuses any upgrade with an `Origin` header or a
+https site. Page-scoped emulation is allowed (`Emulation.setDeviceMetricsOverride`,
+`setUserAgentOverride`, touch, media, locale, timezone): agent-browser 0.39.1's
+`set viewport 390 844` and `set device "iPhone 16 Pro"` work. Both also ask
+for `Browser.getWindowForTarget` (the native window's bounds), which stays
+refused; agent-browser carries on without it. (0.39.1 has no "iPhone 15 Pro"
+device; it says so itself.) The proxy refuses any upgrade with an `Origin` header or a
 `Host` other than `127.0.0.1:<port>` or `localhost:<port>`, and answers
 anything but an upgrade with a bare 404. Turning access off, a
 new attach for the same page, closing the browser and quitting end the

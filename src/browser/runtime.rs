@@ -21,6 +21,7 @@ use objc2::{MainThreadMarker, msg_send};
 use objc2_app_kit::NSView;
 
 use super::agent;
+use super::emulate::{self, Viewport};
 use super::native::Event;
 use super::proxy;
 use super::registry::Page;
@@ -81,6 +82,8 @@ struct State {
     agent_context: Option<RequestContext>,
     /// DevTools observers, by CEF identifier: one per browser an agent talked to.
     observers: HashMap<c_int, Registration>,
+    /// The scale each page's viewport last fit its pane at (`refit`).
+    fits: HashMap<String, f64>,
 }
 
 impl State {
@@ -93,6 +96,10 @@ thread_local! {
     static STATE: RefCell<State> = RefCell::new(State::default());
     static PUMPING: Cell<bool> = const { Cell::new(false) };
     static EVENTS: RefCell<Option<async_channel::Sender<Event>>> = const { RefCell::new(None) };
+    /// Herdr's own DevTools request ids (`browser.viewport`): far above the
+    /// agent proxy's, which count up from 1, so an answer to one of them is
+    /// never an agent's (the proxy drops ids it didn't send).
+    static OWN_ID: Cell<i64> = const { Cell::new(1_000_000_000) };
 }
 
 /// `on_schedule_message_pump_work` → the foreground pump task.
@@ -176,6 +183,91 @@ pub fn devtools(id: &str, open: Option<bool>) -> Result<bool, String> {
         host.close_dev_tools();
     }
     Ok(want)
+}
+
+/// A page's zoom in percent, as Chromium has it for its site.
+fn zoom_of(b: &Browser) -> f64 {
+    b.host().map_or(100.0, |h| emulate::percent_of(h.zoom_level()))
+}
+
+/// Browser `id`'s zoom in percent.
+pub fn zoom(id: &str) -> Result<f64, String> {
+    Ok(zoom_of(&need(id)?))
+}
+
+/// Sets browser `id`'s zoom (percent; 100 is Chromium's default, level 0).
+/// Chromium keeps a zoom per site in the profile, as Chrome does, so every
+/// page on that site in the same profile follows. Returns the zoom now.
+pub fn set_zoom(id: &str, percent: f64) -> Result<f64, String> {
+    let b = need(id)?;
+    let host = b.host().ok_or("the browser has no host")?;
+    host.set_zoom_level(if (percent - 100.0).abs() < 1e-9 { 0.0 } else { emulate::level_of(percent) });
+    refresh_zoom();
+    Ok(zoom_of(&b))
+}
+
+/// Every page's zoom, read again: a zoom change reaches every page on that site.
+fn refresh_zoom() {
+    let open: Vec<(String, u64, Browser)> = STATE.with_borrow(|s| {
+        s.browsers.iter().filter(|o| s.is_current(&o.id, o.generation)).map(|o| (o.id.clone(), o.generation, o.browser.clone())).collect()
+    });
+    for (id, generation, b) in open {
+        let zoom = zoom_of(&b);
+        if STATE.with_borrow(|s| s.pages.get(&id).is_some_and(|p| (p.zoom - zoom).abs() > 1e-6)) {
+            page_changed(&id, generation, |p| p.zoom = zoom);
+        }
+    }
+}
+
+/// Puts a responsive viewport on browser `id`'s page, or takes it off
+/// (None): Chromium's device emulation over the page's own DevTools session,
+/// the one an agent's CDP goes through too, so the last one to set it wins.
+/// A viewport bigger than the pane is shrunk to fit it (`emulate::fit_scale`;
+/// `refit` keeps it fitting as the pane changes size). A reopen (an agent's
+/// session ending) starts a new session without it.
+pub fn set_viewport(id: &str, viewport: Option<Viewport>) -> Result<(), String> {
+    let generation = STATE
+        .with_borrow(|s| s.browsers.iter().find(|o| o.id == id && s.is_current(&o.id, o.generation)).map(|o| o.generation))
+        .ok_or_else(|| format!("browser {id} is still opening"))?;
+    let scale = send_viewport(id, viewport.as_ref())?;
+    tracing::info!("browser: {} viewport {}", super::log_safe(id), viewport.as_ref().map_or_else(|| "fit".to_owned(), |v| format!("{}x{}{} scale {scale:.2}", v.width, v.height, if v.mobile { " mobile" } else { "" })));
+    page_changed(id, generation, |p| p.viewport = viewport);
+    Ok(())
+}
+
+/// Browser `id`'s pane changed size (view.rs): a viewport on it is shrunk
+/// to fit again, if the fit changed.
+pub fn refit(id: &str) {
+    let Some(v) = STATE.with_borrow(|s| s.pages.get(id).and_then(|p| p.viewport.clone())) else { return };
+    let pane = pane_size(id);
+    if STATE.with_borrow(|s| s.fits.get(id).is_some_and(|f| (f - emulate::fit_scale(&v, pane)).abs() < 0.005)) {
+        return;
+    }
+    match send_viewport(id, Some(&v)) {
+        Ok(scale) => tracing::debug!("browser: {}'s viewport fits its pane again at scale {scale:.2}", super::log_safe(id)),
+        Err(e) => tracing::warn!("browser: {}'s viewport not refitted: {e}", super::log_safe(id)),
+    }
+}
+
+fn pane_size(id: &str) -> (f64, f64) {
+    // SAFETY: CEF's browser view, read on the main thread.
+    page_view(id).map(|v| unsafe { v.as_ref() }.frame().size).map_or((0.0, 0.0), |s| (s.width, s.height))
+}
+
+/// Sends the viewport's DevTools calls to the page; the scale it fit at.
+fn send_viewport(id: &str, viewport: Option<&Viewport>) -> Result<f64, String> {
+    let host = need(id)?.host().ok_or("the browser has no host")?;
+    let scale = viewport.map_or(1.0, |v| emulate::fit_scale(v, pane_size(id)));
+    for (method, params) in emulate::calls(viewport, scale) {
+        let own = OWN_ID.get();
+        OWN_ID.set(own + 1);
+        let message = serde_json::json!({ "id": own, "method": method, "params": params }).to_string();
+        if host.send_dev_tools_message(Some(message.as_bytes())) != 1 {
+            return Err(format!("Chromium didn't take {method} for browser {id}"));
+        }
+    }
+    STATE.with_borrow_mut(|s| s.fits.insert(id.to_owned(), scale));
+    Ok(scale)
 }
 
 /// Tells CEF its page has the keyboard (the view is first responder already).
@@ -438,6 +530,7 @@ pub fn close(id: &str) {
         // `on_after_created` sees that; later callbacks of this open change nothing.
         s.current.remove(id);
         s.pages.remove(id);
+        s.fits.remove(id);
     });
     if let Some(b) = b {
         tracing::info!("browser: closing {id} (cef {})", b.identifier(), id = super::log_safe(id));
@@ -831,8 +924,13 @@ wrap_load_handler! {
     }
 
     impl LoadHandler {
-        fn on_loading_state_change(&self, _browser: Option<&mut Browser>, is_loading: c_int, can_go_back: c_int, can_go_forward: c_int) {
+        fn on_loading_state_change(&self, browser: Option<&mut Browser>, is_loading: c_int, can_go_back: c_int, can_go_forward: c_int) {
+            // The new page's site may have a zoom of its own.
+            let zoom = browser.map(|b| zoom_of(b));
             page_changed(&self.id, self.generation, |p| {
+                if let Some(zoom) = zoom {
+                    p.zoom = zoom;
+                }
                 p.loading = is_loading == 1;
                 p.can_go_back = can_go_back == 1;
                 p.can_go_forward = can_go_forward == 1;

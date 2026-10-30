@@ -34,13 +34,23 @@ pub fn is_agent(profile: Option<&str>) -> bool {
 }
 
 /// What the page in an open browser says about itself.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Page {
     pub url: String,
     pub title: String,
     pub loading: bool,
     pub can_go_back: bool,
     pub can_go_forward: bool,
+    /// Its zoom in percent (Chromium keeps one per site in the profile).
+    pub zoom: f64,
+    /// The viewport `browser.viewport` set on this page; None: it fills its pane.
+    pub viewport: Option<super::emulate::Viewport>,
+}
+
+impl Default for Page {
+    fn default() -> Self {
+        Page { url: String::new(), title: String::new(), loading: false, can_go_back: false, can_go_forward: false, zoom: 100.0, viewport: None }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -76,6 +86,7 @@ impl Entry {
             "last_agent": self.last_agent,
             "loading": self.page.loading, "can_go_back": self.page.can_go_back, "can_go_forward": self.page.can_go_forward,
             "space": self.space, "pane": self.pane, "agent_access": self.agent_access, "focused": focused,
+            "zoom": super::emulate::shown(self.page.zoom), "viewport": self.page.viewport.as_ref().map(super::emulate::Viewport::json),
         })
     }
 }
@@ -317,6 +328,19 @@ mod tests {
         r.set_access("b2", true);
         let on = r.get("b2").unwrap().json(false);
         assert_eq!((on["url"].as_str(), on["title"].as_str()), (Some(url), Some("127.0.0.1:18766/notitle.html?code=SECRETQ2")));
+    }
+
+    #[test]
+    fn ls_shows_a_pages_zoom_and_viewport() {
+        let mut r = Registry::default();
+        r.reconcile(&[block("b1", "https://a/", "p1", Some("sp1"))]);
+        let e = r.get("b1").unwrap().json(false);
+        assert_eq!((e["zoom"].clone(), e["viewport"].clone()), (serde_json::json!(100), Value::Null));
+        let phone = super::super::emulate::viewport(&serde_json::json!({ "preset": "phone" })).unwrap();
+        r.page("b1", Page { url: "https://a/".into(), zoom: 200.0 / 3.0, viewport: phone, ..Page::default() });
+        let e = r.get("b1").unwrap().json(false);
+        assert_eq!(e["zoom"], 67);
+        assert_eq!(e["viewport"], serde_json::json!({ "width": 390, "height": 844, "mobile": true, "preset": "phone" }));
     }
 
     #[test]

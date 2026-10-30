@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 
 use super::agent::{self, Caller, Candidate};
 use super::registry::{self, Page, Registry};
-use super::{Hand, Look, Responder, Source, Update, proxy, runtime, view};
+use super::{Hand, Look, Responder, Source, Update, emulate, proxy, runtime, view};
 use crate::layout::Node;
 use crate::model::Model;
 
@@ -113,8 +113,11 @@ impl Browsers {
         view::install_monitor();
     }
 
-    /// navigate / back / forward / reload / devtools.
+    /// navigate / back / forward / reload / devtools / zoom / viewport.
     pub fn command(&mut self, name: &str, browser: &str, args: &Value) -> Result<Value, String> {
+        if browser.is_empty() {
+            return Err(format!("{name} needs browser (an id from `herdr-app ls`), or a focused browser pane"));
+        }
         if self.registry.get(browser).is_none() {
             return Err(format!("no open browser {browser:?}: see `herdr-app ls`"));
         }
@@ -131,6 +134,17 @@ impl Browsers {
             "browser.devtools" => {
                 let open = args.get("open").and_then(Value::as_bool);
                 runtime::devtools(browser, open).map(|open| json!({ "browser": browser, "devtools": open }))
+            }
+            "browser.zoom" => {
+                let percent = emulate::zoom_target(args, runtime::zoom(browser)?)?;
+                let now = runtime::set_zoom(browser, percent)?;
+                Ok(json!({ "browser": browser, "zoom": emulate::shown(now) }))
+            }
+            "browser.viewport" => {
+                let viewport = emulate::viewport(args)?;
+                let shown = viewport.as_ref().map(emulate::Viewport::json);
+                runtime::set_viewport(browser, viewport)?;
+                Ok(json!({ "browser": browser, "viewport": shown }))
             }
             other => Err(format!("{other} is not a browser command")),
         }

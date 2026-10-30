@@ -125,7 +125,8 @@ pub fn place(id: &str, bounds: Bounds<Pixels>, window: &Window) {
         let Some(c) = views.get_mut(id) else { return };
         c.placed = Some(rect(bounds));
         let old = c.view.frame();
-        if old.origin != frame.origin || old.size != frame.size {
+        let resized = old.size != frame.size;
+        if old.origin != frame.origin || resized {
             tracing::debug!("browser: {id} placed at {x},{y} {w}x{h} (window points, top left)", id = super::log_safe(id));
             c.view.setFrame(frame);
         }
@@ -141,6 +142,11 @@ pub fn place(id: &str, bounds: Bounds<Pixels>, window: &Window) {
                 tracing::debug!("browser: {id}'s page fills its block: {}x{} -> {w}x{h}", had.size.width, had.size.height, id = super::log_safe(id));
                 page.setFrame(fill);
             }
+        }
+        // An emulated viewport keeps fitting its pane (CEF's view follows its
+        // container on its own, so the container's size is the one to watch).
+        if resized {
+            runtime::refit(id);
         }
     });
 }

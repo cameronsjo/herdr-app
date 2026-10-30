@@ -126,6 +126,9 @@ browser when there are two; agent-browser reads it only when its session
 starts, so export it with a new `AGENT_BROWSER_SESSION` name. Only a browser opened with `--profile agent` can
 be driven; open one with `herdr-app do browser.open --profile agent --url <url>`
 only when asked.
+The person's zoom and responsive size are `browser.zoom` and `browser.viewport`;
+your own `agent-browser set viewport` / `set device` work too, and the last one
+set wins.
 
 ## Problems and safety
 

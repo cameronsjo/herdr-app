@@ -1534,6 +1534,15 @@ impl AppWindow {
         self.browsers.keys(page.as_deref(), window);
     }
 
+    /// The browser the person is on: a layout block's page they clicked
+    /// into, else the focused pane's page while its tab shows.
+    fn focused_browser(&self) -> Option<String> {
+        self.layout_page.clone().or_else(|| {
+            let pane = self.model.focused_pane()?;
+            self.model.active_tab().and_then(|t| t.shown().find(&pane)).and_then(|n| n.browser()).map(str::to_owned)
+        })
+    }
+
     /// The pane showing a browser.
     fn browser_pane(&self, browser: &str) -> Option<String> {
         self.model.tabs().flat_map(|t| t.root.walk()).find(|n| n.browser() == Some(browser)).map(|n| n.id.clone())
@@ -3318,8 +3327,9 @@ impl AppWindow {
                 };
                 return self.answer(r);
             }
-            "browser.navigate" | "browser.back" | "browser.forward" | "browser.reload" | "browser.devtools" => {
-                let b = Self::arg(a, "browser").unwrap_or_default().to_owned();
+            "browser.navigate" | "browser.back" | "browser.forward" | "browser.reload" | "browser.devtools" | "browser.zoom" | "browser.viewport" => {
+                // Zoom and viewport default to the focused browser (keys.json's `browser` keys name none).
+                let b = Self::owned(a, "browser").or_else(|| self.focused_browser()).unwrap_or_default();
                 let r = self.browsers.command(name, &b, a);
                 if let Some(url) = r.as_ref().ok().and_then(|v| v.get("url")).and_then(Value::as_str) {
                     let url = url.to_owned();

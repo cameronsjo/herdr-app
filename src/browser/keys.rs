@@ -23,27 +23,30 @@ pub struct Press {
 /// The action bound to `press`, if any. The escape hatch comes first,
 /// whatever else is bound to the same keys (as GPUI ranks it). `bindings`:
 /// `page_bindings`. Sequences (`cmd-k cmd-s`) are skipped: a page keeps
-/// keys one at a time.
+/// keys one at a time. A `browser` key bound to `terminal` is the page's.
 pub fn find<'a>(bindings: &'a [(String, String)], press: &Press) -> Option<&'a str> {
     if matches(crate::keys::ESCAPE_HATCH, press) {
         return Some(HATCH_ACTION);
     }
-    bindings.iter().find(|(keys, _)| matches(keys, press)).map(|(_, action)| action.as_str())
+    bindings.iter().find(|(keys, _)| matches(keys, press)).map(|(_, action)| action.as_str()).filter(|a| *a != "terminal")
 }
 
 const HATCH_ACTION: &str = "app.reset";
 
 /// The keys Herdr keeps while a page has the keyboard, as (keys, action),
-/// from `crate::keys::listing()` of a keys.json that loaded: the shown
-/// layout's section first (GPUI ranks it above `global`), then `global`.
-/// Left to the page: `terminal` (the program gets the key) and `send:`
-/// (it types into a terminal, and a page isn't one). The escape hatch is
+/// from `crate::keys::listing()` of a keys.json that loaded: the `browser`
+/// section first (it applies only here: `cmd-=` zooms the page, not
+/// Herdr), then the shown layout's (GPUI ranks it above `global`), then
+/// `global`. Left to the page: `send:` (it types into a terminal, and a page
+/// isn't one) and `terminal`, which in `browser` also hides the same keys'
+/// layout and global bindings from the page (`find`). The escape hatch is
 /// `find`'s own.
 pub fn page_bindings(listing: &[(String, String, String)], layout: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
-    for section in [format!("layout:{layout}"), "global".to_owned()] {
+    for section in ["browser".to_owned(), format!("layout:{layout}"), "global".to_owned()] {
         for (_, keys, action) in listing.iter().filter(|(s, _, _)| *s == section) {
-            if keys != crate::keys::ESCAPE_HATCH && action != "terminal" && !action.starts_with("send:") {
+            let passes = action == "terminal" && section == "browser";
+            if keys != crate::keys::ESCAPE_HATCH && (passes || action != "terminal") && !action.starts_with("send:") {
                 out.push((keys.clone(), action.clone()));
             }
         }
@@ -215,6 +218,52 @@ mod tests {
         // The page gets cmd-left (send:) and cmd-c (terminal).
         assert_eq!(find(&b, &press("m", "left", None)), None);
         assert_eq!(find(&b, &press("m", "c", Some("c"))), None);
+    }
+
+    #[test]
+    fn the_browser_section_ranks_first_and_can_give_a_key_to_the_page() {
+        let listing: Vec<(String, String, String)> = [
+            ("global", "cmd-=", "app.zoom_in"),
+            ("global", "cmd-0", "app.zoom_reset"),
+            ("global", "cmd-1", "tab.select:1"),
+            ("global", "cmd-2", "tab.select:2"),
+            ("layout:main", "cmd-0", "app.palette"),
+            ("browser", "cmd-=", "browser.zoom:in"),
+            ("browser", "cmd-0", "browser.zoom:reset"),
+            ("browser", "cmd-2", "terminal"),
+            ("browser", "cmd-left", "send:\u{1}"),
+        ]
+        .into_iter()
+        .map(|(s, k, a)| (s.to_owned(), k.to_owned(), a.to_owned()))
+        .collect();
+        let b = page_bindings(&listing, "main");
+        // A page's cmd-= and cmd-0 zoom the page, above the layout and global.
+        assert_eq!(find(&b, &press("m", "=", Some("+"))), Some("browser.zoom:in"));
+        assert_eq!(find(&b, &press("m", "0", Some(")"))), Some("browser.zoom:reset"));
+        // Tab switching stays global; `terminal` gives cmd-2 to the page.
+        assert_eq!(find(&b, &press("m", "1", Some("!"))), Some("tab.select:1"));
+        assert_eq!(find(&b, &press("m", "2", Some("@"))), None);
+        assert_eq!(find(&b, &press("m", "left", None)), None);
+        // `terminal` outside `browser` still just leaves the key to the page.
+        let global_only = page_bindings(&listing[..4], "main");
+        assert_eq!(find(&global_only, &press("m", "0", Some(")"))), Some("app.zoom_reset"));
+    }
+
+    #[test]
+    fn the_shipped_mac_keys_zoom_a_page_and_keep_tab_switching() {
+        let sections: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>> =
+            serde_json::from_str(include_str!("../../defaults/keys.macos.json")).unwrap();
+        let listing: Vec<(String, String, String)> =
+            sections.into_iter().flat_map(|(s, keys)| keys.into_iter().map(move |(k, a)| (s.clone(), k, a))).collect();
+        let b = page_bindings(&listing, "main");
+        assert_eq!(find(&b, &press("m", "=", Some("+"))), Some("browser.zoom:in"));
+        assert_eq!(find(&b, &press("ms", "=", Some("+"))), Some("browser.zoom:in"));
+        assert_eq!(find(&b, &press("m", "-", Some("_"))), Some("browser.zoom:out"));
+        assert_eq!(find(&b, &press("m", "0", Some(")"))), Some("browser.zoom:reset"));
+        for n in 1..=9 {
+            let key = n.to_string();
+            assert_eq!(find(&b, &press("m", &key, None)), Some(format!("tab.select:{n}").as_str()));
+        }
     }
 
     #[test]

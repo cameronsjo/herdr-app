@@ -54,6 +54,10 @@ pub const COMMANDS: &[Command] = &[
     cmd("browser.reload", &[req("browser")], "Reload a browser's page."),
     cmd("browser.close", &[req("browser")], "Close a browser and its pane."),
     cmd("browser.devtools", &[req("browser"), opt("open")], "Open or close Chromium's DevTools window for a browser (no open: toggle)."),
+    cmd("browser.zoom", &[opt("step"), opt("browser"), opt("level")],
+        "Zoom a browser's page (default: the focused browser): step \"in\" or \"out\" along Chromium's steps (25% to 500%), \"reset\" to 100%, or level, a percent from 25 to 500. Chromium keeps the zoom per site, so other pages on that site follow. Says the zoom now, in percent."),
+    cmd("browser.viewport", &[opt("preset"), opt("browser"), opt("width"), opt("height"), opt("mobile")],
+        "Lay a browser's page out at another screen size (default: the focused browser): preset \"phone\" (390x844), \"tablet\" (820x1180), both mobile with touch, or \"fit\" (the pane's own size again); or width and height in pixels, with mobile true or false. A size bigger than the pane is shrunk to fit it."),
     cmd("browser.agent_access", &[req("browser"), req("on")],
         "Turn agent access off for a browser (on: false): its agent's connection ends and the page reopens. Turning it on is only for the person: \"Allow agent…\" in an agent-profile browser's header opens a macOS dialog, and only its Allow turns it on; this command refuses on: true."),
     // What you see.

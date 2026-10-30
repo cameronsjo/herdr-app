@@ -469,8 +469,10 @@ the build doesn't do.
 ```
 
 - Sections: `global`, `layout:<name>` (while `layouts/<name>.json` shows),
-  `terminal` (a terminal has focus), `mod:<name>`. The more specific section
-  wins: `layout:terminals` over `global`, `terminal` over both.
+  `terminal` (a terminal has focus), `mod:<name>`, `browser` (a browser pane's page has
+  the keyboard, macOS: `cmd-=`/`cmd--`/`cmd-0` zoom the page; `terminal` there gives
+  the page the key). The more specific section wins: `layout:terminals` over `global`,
+  `terminal` and `browser` over both.
 - An action is a command (`name`, or `name:value`: the value fills the
   command's first argument), `send:<text>` (types into the terminal),
   `<mod>.<command>` (delivered to that mod's `nextCommand()`), or `terminal`
@@ -540,7 +542,11 @@ The main ones:
   `browser.open {url, place?, pane?, profile?}` (place `"right"` default, `"down"`, `"tab"`;
   says `{browser, pane}`), `browser.navigate {browser, url}`, `browser.back {browser}`,
   `browser.forward {browser}`, `browser.reload {browser}`, `browser.close {browser}`,
-  `browser.devtools {browser, open?}`. `herdr-app ls` and `browsers()` list them;
+  `browser.devtools {browser, open?}`, `browser.zoom {step?: "in"|"out"|"reset", level?: 25-500,
+  browser?}` (percent, Chromium's steps, kept per site), `browser.viewport {preset?: "phone"|"tablet"|"fit",
+  width?, height?, mobile?, browser?}` (responsive size; zoom and viewport default to the focused
+  browser; an agent's own Emulation override replaces it, last one wins). `herdr-app ls` and `browsers()` list them
+  (with `zoom` and `viewport`);
   a pane's `browser` names its page. Click a page to type in it; global keys still work.
   Pages are http, https or about:blank. `profile: "agent"` opens a separate test
   profile; the person can let agents drive it (`agent-browser`): the pane header's
@@ -734,7 +740,8 @@ has 120 programs (agents, editors, runtimes, tools, databases, infra);
   `tabs` (the tab bar), `menu`, `prompt`, `confirm`, `help`, `toast`,
   Terminals' `picker`, `peek`, and `pane` (an
   example pane header, not used by the default layouts; a browser pane gets
-  back, forward, reload, an address field and DevTools from its `browser.js`), and `worktree`
+  back, forward, reload, an address field, zoom, a viewport picker and DevTools from its
+  `browser.js`), and `worktree`
   (git worktrees as spaces: the space menu's and the + menu's New worktree,
   Open worktree (the repo's checkouts, filtered; one already shown is gone
   to) and Remove worktree open it as a dialog with props `{space, folder?,

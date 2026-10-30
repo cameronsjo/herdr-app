@@ -224,6 +224,28 @@ Open or close Chromium's DevTools window for a browser (no open: toggle).
 | `browser` | yes |
 | `open` | no |
 
+## `browser.zoom`
+
+Zoom a browser's page (default: the focused browser): step "in" or "out" along Chromium's steps (25% to 500%), "reset" to 100%, or level, a percent from 25 to 500. Chromium keeps the zoom per site, so other pages on that site follow. Says the zoom now, in percent.
+
+| Argument | Required |
+|---|---|
+| `step` | no |
+| `browser` | no |
+| `level` | no |
+
+## `browser.viewport`
+
+Lay a browser's page out at another screen size (default: the focused browser): preset "phone" (390x844), "tablet" (820x1180), both mobile with touch, or "fit" (the pane's own size again); or width and height in pixels, with mobile true or false. A size bigger than the pane is shrunk to fit it.
+
+| Argument | Required |
+|---|---|
+| `preset` | no |
+| `browser` | no |
+| `width` | no |
+| `height` | no |
+| `mobile` | no |
+
 ## `browser.agent_access`
 
 Turn agent access off for a browser (on: false): its agent's connection ends and the page reopens. Turning it on is only for the person: "Allow agent…" in an agent-profile browser's header opens a macOS dialog, and only its Allow turns it on; this command refuses on: true.
