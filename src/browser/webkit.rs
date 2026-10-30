@@ -37,8 +37,8 @@ use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{DefinedClass as _, MainThreadMarker, MainThreadOnly, Message as _, define_class, msg_send, sel};
 use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSEvent, NSEventModifierFlags, NSEventType, NSImage, NSView};
 use objc2_foundation::{
-    NSData, NSDataBase64EncodingOptions, NSDictionary, NSError, NSKeyValueObservingOptions, NSObjectNSKeyValueObserverRegistration as _,
-    NSPoint, NSProcessInfo, NSRect, NSSize, NSString, NSURL, NSURLRequest,
+    NSArray, NSData, NSDataBase64EncodingOptions, NSDictionary, NSError, NSJSONSerialization, NSJSONWritingOptions, NSKeyValueObservingOptions,
+    NSObjectNSKeyValueObserverRegistration as _, NSPoint, NSProcessInfo, NSRect, NSSize, NSString, NSURL, NSURLRequest,
 };
 use objc2_web_kit::{
     WKContentWorld, WKNavigation, WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate, WKNavigationResponse,
@@ -572,6 +572,7 @@ fn run(id: &str, generation: u64, web: &WKWebView, pid: i64, step: Step, params:
     match step {
         Step::Reply(v) => done(Ok(v)),
         Step::Fail(e) => done(Err(e)),
+        Step::World(op @ ("evaluate" | "callFunctionOn")) => world_code(web, op, params, done),
         Step::World(op) => in_world(web, op, params, done),
         Step::AxTree => in_world(web, "getFullAXTree", params, move |r| done(r.and_then(|raw| translate::ax_tree(&raw)))),
         Step::PageEval => page_eval(web, params, done),
@@ -639,15 +640,27 @@ fn answer_navigations(id: &str, generation: u64, only: Option<i64>, error: Optio
     }
 }
 
+/// WebKit's JavaScript error codes (`WKErrorDomain`).
+const JS_THREW: isize = 4;
+const JS_RESULT_UNSUPPORTED: isize = 5;
+
+/// The script's own message for a JavaScript error ("SyntaxError: …"), else
+/// WebKit's description.
+fn js_error(e: &NSError) -> String {
+    let message = e.userInfo().objectForKey(&ns("WKJavaScriptExceptionMessage"));
+    message.as_deref().and_then(|m| m.downcast_ref::<NSString>()).map_or_else(|| e.localizedDescription().to_string(), |m| m.to_string())
+}
+
 /// Runs `body` (a function body; `return` gives its result) in `world`;
-/// `done` gets the JSON its string result holds.
+/// `done` gets the JSON its string result holds, or WebKit's error
+/// (`js_error`: a body that didn't compile says "SyntaxError").
 fn call_js(web: &WKWebView, body: &str, world: &WKContentWorld, done: impl FnOnce(Result<Value, String>) + 'static) {
     let done = Cell::new(Some(done));
     let block = RcBlock::new(move |result: *mut AnyObject, error: *mut NSError| {
         let Some(done) = done.take() else { return };
         // SAFETY: WebKit hands the completion a valid object or null for each.
         if let Some(e) = unsafe { error.as_ref() } {
-            return done(Err(e.localizedDescription().to_string()));
+            return done(Err(js_error(e)));
         }
         let text = unsafe { result.as_ref() }.and_then(|r| r.downcast_ref::<NSString>()).map(|s| s.to_string());
         done(match text {
@@ -673,36 +686,128 @@ fn isolated_world(mtm: MainThreadMarker) -> Retained<WKContentWorld> {
     world
 }
 
-/// `__cdp[op](params)` in the isolated world, installing the helper first in
-/// a document that doesn't have it yet. The params go in as a JSON literal.
+/// The isolated world's call of `__cdp[op](params, got)`, installing the
+/// helper first in a document that doesn't have it yet. The params go in as
+/// a JSON literal; `pre` (agent code, `translate::spliced`) runs first and
+/// leaves `got`.
+fn world_body(op: &str, params: &Value, pre: Option<&str>) -> String {
+    let (pre, got) = pre.map_or(("", "undefined"), |p| (p, translate::GOT));
+    format!(
+        "{pre}const __herdr_p = {params};\nif (!globalThis.__cdp) {{\n{RUNTIME}\n}}\ntry {{ return JSON.stringify(await globalThis.__cdp[{op:?}](__herdr_p, {got})); }} catch (e) {{ return JSON.stringify({{ __error: String(e && e.message || e) }}); }}"
+    )
+}
+
+/// What the helper answered: its result, or the error it reported.
+fn helper_answer(v: Value) -> Result<Value, String> {
+    match v.get("__error").and_then(Value::as_str) {
+        Some(e) => Err(e.to_owned()),
+        None => Ok(v),
+    }
+}
+
+/// `__cdp[op](params)` in the isolated world (`world_body`).
 fn in_world(web: &WKWebView, op: &'static str, params: &Value, done: impl FnOnce(Result<Value, String>) + 'static) {
     let Ok(mtm) = mtm() else { return done(Err("not on the main thread".into())) };
-    let body = format!(
-        "const p = {params};\nif (!globalThis.__cdp) {{\n{RUNTIME}\n}}\ntry {{ return JSON.stringify(await globalThis.__cdp[{op:?}](p)); }} catch (e) {{ return JSON.stringify({{ __error: String(e && e.message || e) }}); }}"
-    );
     let world = isolated_world(mtm);
-    call_js(web, &body, &world, move |r| {
-        done(r.and_then(|v| match v.get("__error").and_then(Value::as_str) {
-            Some(e) => Err(e.to_owned()),
-            None => Ok(v),
-        }))
+    call_js(web, &world_body(op, params, None), &world, move |r| done(r.and_then(helper_answer)));
+}
+
+/// The agent's code in `params[key]`.
+fn agent_code(params: &Value, key: &str) -> Result<String, String> {
+    params.get(key).and_then(Value::as_str).map(str::to_owned).ok_or_else(|| format!("Invalid parameters: {key} must be a string"))
+}
+
+/// `Runtime.evaluate` (`op` "evaluate") or `Runtime.callFunctionOn` in the
+/// isolated world: the agent's code is spliced into the call
+/// (`translate::spliced`), so a page's CSP doesn't apply. An expression
+/// that is a statement list runs as a script instead (`run_script`, by
+/// value); a function that doesn't compile is CDP's exception.
+fn world_code(web: &WKWebView, op: &'static str, params: &Value, done: impl FnOnce(Result<Value, String>) + 'static) {
+    let Ok(mtm) = mtm() else { return done(Err("not on the main thread".into())) };
+    let key = if op == "evaluate" { "expression" } else { "functionDeclaration" };
+    let code = match agent_code(params, key) {
+        Ok(c) => c,
+        Err(e) => return done(Err(e)),
+    };
+    let world = isolated_world(mtm);
+    let body = world_body(op, params, Some(&translate::spliced(&code)));
+    let web_ref: Retained<WKWebView> = web.retain();
+    call_js(web, &body, &world.clone(), move |r| match r {
+        Err(e) if translate::is_syntax_error(&e) && op == "evaluate" => run_script(&web_ref, &code, &world, done),
+        Err(e) if translate::is_syntax_error(&e) => done(Ok(translate::thrown(&e))),
+        r => done(r.and_then(helper_answer)),
     });
 }
 
-/// `Runtime.evaluate` by value, in the page's own world (indirect eval), as
-/// CDP's default context: the agent runs script as the page.
+/// `Runtime.evaluate` by value, in the page's own world, as CDP's default
+/// context: the agent runs script as the page. The expression is spliced
+/// into the call (`translate::spliced`), so a page's CSP doesn't apply; a
+/// statement list runs as a script instead (`run_script`).
 fn page_eval(web: &WKWebView, params: &Value, done: impl FnOnce(Result<Value, String>) + 'static) {
     let Ok(mtm) = mtm() else { return done(Err("not on the main thread".into())) };
+    let code = match agent_code(params, "expression") {
+        Ok(c) => c,
+        Err(e) => return done(Err(e)),
+    };
+    let wait = params.get("awaitPromise").and_then(Value::as_bool).unwrap_or(false);
+    let got = translate::GOT;
     let body = format!(
-        r#"const p = {params};
-const ser = (v) => {{ const t = typeof v; if (v === undefined) return {{ type: "undefined" }}; if (v === null) return {{ type: "object", subtype: "null", value: null }};
+        r#"{pre}const __herdr_ser = (v) => {{ const t = typeof v; if (v === undefined) return {{ type: "undefined" }}; if (v === null) return {{ type: "object", subtype: "null", value: null }};
   if (t === "string" || t === "boolean" || t === "number") return {{ type: t, value: v }}; let value; try {{ value = JSON.parse(JSON.stringify(v)); }} catch (_) {{}} return {{ type: t === "function" ? "function" : "object", value }}; }};
-try {{ let v = (0, eval)(p.expression); if (p.awaitPromise) v = await v; return JSON.stringify({{ result: ser(v) }}); }}
-catch (e) {{ const d = e instanceof Error ? e.name + ": " + e.message : String(e); return JSON.stringify({{ result: {{ type: "object", subtype: "error", description: d }}, exceptionDetails: {{ exceptionId: 1, text: "Uncaught", lineNumber: 0, columnNumber: 0, exception: {{ type: "object", subtype: "error", description: d }} }} }}); }}"#
+try {{ if ("err" in {got}) throw {got}.err; let v = {got}.ok; if ({wait}) v = await v; return JSON.stringify({{ result: __herdr_ser(v) }}); }}
+catch (e) {{ const d = e instanceof Error ? e.name + ": " + e.message : String(e); return JSON.stringify({{ result: {{ type: "object", subtype: "error", description: d }}, exceptionDetails: {{ exceptionId: 1, text: "Uncaught", lineNumber: 0, columnNumber: 0, exception: {{ type: "object", subtype: "error", description: d }} }} }}); }}"#,
+        pre = translate::spliced(&code),
     );
     // SAFETY: a main-thread WebKit constructor.
     let world = unsafe { WKContentWorld::pageWorld(mtm) };
-    call_js(web, &body, &world, done);
+    let web_ref: Retained<WKWebView> = web.retain();
+    call_js(web, &body, &world.clone(), move |r| match r {
+        Err(e) if translate::is_syntax_error(&e) => run_script(&web_ref, &code, &world, done),
+        r => done(r),
+    });
+}
+
+/// Runs the agent's `script` in `world` as a script, not inside a function
+/// body, so a statement list gives its completion value (by value: WebKit
+/// passes back only JSON-like values). WebKit compiles it itself: the
+/// page's CSP doesn't apply. No `await` at its top level, as in CDP.
+fn run_script(web: &WKWebView, script: &str, world: &WKContentWorld, done: impl FnOnce(Result<Value, String>) + 'static) {
+    let done = Cell::new(Some(done));
+    let block = RcBlock::new(move |result: *mut AnyObject, error: *mut NSError| {
+        let Some(done) = done.take() else { return };
+        // SAFETY: WebKit hands the completion a valid object or null for each.
+        if let Some(e) = unsafe { error.as_ref() } {
+            let webkit = e.domain().to_string() == "WKErrorDomain";
+            return done(match e.code() {
+                JS_THREW if webkit => Ok(translate::thrown(&js_error(e))),
+                JS_RESULT_UNSUPPORTED if webkit => Ok(translate::script_opaque()),
+                _ => Err(js_error(e)),
+            });
+        }
+        done(Ok(match unsafe { result.as_ref() } {
+            None => translate::script_result(None),
+            Some(v) => to_json(v).map_or_else(translate::script_opaque, |v| translate::script_result(Some(v))),
+        }));
+    });
+    // SAFETY: a main-thread call on a live view, the main frame.
+    unsafe { web.evaluateJavaScript_inFrame_inContentWorld_completionHandler(&ns(script), None, world, Some(&block)) };
+}
+
+/// A value WebKit passed back (strings, numbers, arrays, dictionaries, null)
+/// as JSON; None for anything JSON can't hold (a date, NaN).
+fn to_json(value: &AnyObject) -> Option<Value> {
+    // In an array: `isValidJSONObject` checks the whole tree and never
+    // throws, where `dataWithJSONObject` raises on what it can't write.
+    let wrapped = NSArray::from_slice(&[value]);
+    // SAFETY: an NSArray is a valid argument for both.
+    if !unsafe { NSJSONSerialization::isValidJSONObject(&wrapped) } {
+        return None;
+    }
+    let data = unsafe { NSJSONSerialization::dataWithJSONObject_options_error(&wrapped, NSJSONWritingOptions::empty()) }.ok()?;
+    match serde_json::from_slice::<Value>(&data.to_vec()).ok()? {
+        Value::Array(mut a) if a.len() == 1 => a.pop(),
+        _ => None,
+    }
 }
 
 fn flags(m: Mods) -> NSEventModifierFlags {

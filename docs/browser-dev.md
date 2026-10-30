@@ -55,7 +55,14 @@ allowlist and revocation are unchanged. Behind the proxy, a translator
 agent-browser makes from WebKit: script in an isolated content world for
 the DOM and the accessibility tree, `NSEvent`s sent to the view for trusted
 clicks and keys, `takeSnapshot` for screenshots. A method it doesn't map
-answers "wasn't found". Gaps against CEF:
+answers "wasn't found". An agent's script is never evaluated from a
+string: it goes into the script WebKit runs, so a page whose
+Content-Security-Policy forbids `eval` (github.com,
+`scripts/browser-csp-fixture.html`) still answers `eval`, `get title` and
+`back`. A statement list runs as a script and returns its last value by
+value only. WebKit hands a key the page didn't handle back to the app;
+for an agent's key, the window's event monitor drops it, so it never
+reaches a terminal, a keys.json action or a menu. Gaps against CEF:
 
 - **No network events for agents.** WebKit has no per-request API, so
   `network requests`, HAR and `route` see nothing.

@@ -28,8 +28,8 @@ pub enum Step {
     Fail(String),
     /// Call `__cdp[op](params)` in the isolated world (webkit.js) and answer with what it returns.
     World(&'static str),
-    /// `Runtime.evaluate` with `returnByValue`: indirect eval in the page's own
-    /// world, so page globals are visible as in CDP's default context.
+    /// `Runtime.evaluate` with `returnByValue`: in the page's own world, so
+    /// page globals are visible as in CDP's default context (`spliced`).
     PageEval,
     /// `Accessibility.getFullAXTree`: the isolated world's raw tree, shaped by `ax_tree`.
     AxTree,
@@ -120,6 +120,55 @@ pub fn answer(id: i64, result: Result<Value, String>) -> Value {
         Ok(r) => json!({ "id": id, "result": r }),
         Err(e) => json!({ "id": id, "error": { "code": -32000, "message": e } }),
     }
+}
+
+/// The name an agent's spliced code's outcome goes by (`spliced`). Every
+/// name the WebKit call declares starts `__herdr_`, so the agent's code,
+/// which sees them, doesn't take one for a page global.
+pub const GOT: &str = "__herdr_got";
+
+/// Script that runs an agent's `Runtime.evaluate` expression (or
+/// `callFunctionOn` function) as part of a `callAsyncJavaScript` body.
+/// WebKit compiles that body itself, so a page's CSP doesn't stop it: no
+/// string eval, which a CSP without `unsafe-eval` refuses. It leaves
+/// `{ ok: value }` or `{ err: thrown }` in `GOT`, with `this` the global
+/// object as at a script's top level. A statement list is no expression:
+/// the body then doesn't compile (`is_syntax_error`), nothing ran, and the
+/// caller runs the code as a script instead. The newlines keep a trailing
+/// `//` comment from eating the rest.
+pub fn spliced(code: &str) -> String {
+    format!("const {GOT} = await (async function () {{ try {{ return {{ ok: (\n{code}\n) }}; }} catch (e) {{ return {{ err: e }}; }} }}).call(globalThis);\n")
+}
+
+/// WebKit's message for a call whose script didn't compile.
+pub fn is_syntax_error(message: &str) -> bool {
+    message.starts_with("SyntaxError")
+}
+
+/// `Runtime.evaluate`'s answer for code WebKit ran as a script: its
+/// completion value, by value (None: undefined).
+pub fn script_result(value: Option<Value>) -> Value {
+    let remote = match value {
+        None => json!({ "type": "undefined" }),
+        Some(Value::Null) => json!({ "type": "object", "subtype": "null", "value": null }),
+        Some(Value::String(s)) => json!({ "type": "string", "value": s }),
+        Some(Value::Bool(b)) => json!({ "type": "boolean", "value": b }),
+        Some(Value::Number(n)) => json!({ "type": "number", "value": n, "description": n.to_string() }),
+        Some(v) => json!({ "type": "object", "value": v }),
+    };
+    json!({ "result": remote })
+}
+
+/// `Runtime.evaluate`'s answer for a script whose value WebKit can't pass
+/// back (a node, a function, a promise, a date).
+pub fn script_opaque() -> Value {
+    json!({ "result": { "type": "object", "description": "a value WebKit can't return by value" } })
+}
+
+/// `Runtime.evaluate`'s answer when the code threw (or didn't compile).
+pub fn thrown(message: &str) -> Value {
+    let error = json!({ "type": "object", "subtype": "error", "description": message });
+    json!({ "result": error, "exceptionDetails": { "exceptionId": 1, "text": "Uncaught", "lineNumber": 0, "columnNumber": 0, "exception": error } })
 }
 
 /// `Page.navigate`'s answer once the load ended: an error text if it failed.
@@ -589,6 +638,39 @@ mod tests {
         assert_eq!(answer(8, Err("nope".into())), json!({ "id": 8, "error": { "code": -32000, "message": "nope" } }));
         assert_eq!(navigated(4, None), json!({ "frameId": "F1", "loaderId": "L4" }));
         assert_eq!(navigated(4, Some("timeout"))["errorText"], "timeout");
+    }
+
+    #[test]
+    fn agent_script_is_compiled_with_the_call_never_string_evaluated() {
+        // A page's CSP without 'unsafe-eval' refuses string eval: the helper
+        // must not have any (github.com broke `get title`, `back` and `eval`).
+        // Its code, comments cut, as identifier tokens: `(0, eval)(s)` and
+        // `globalThis["eval"]` count too.
+        let code: String = include_str!("webkit.js").lines().map(|l| l.split("//").next().unwrap_or_default()).collect::<Vec<_>>().join("\n");
+        let tokens: Vec<&str> = code.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$')).collect();
+        assert!(!tokens.contains(&"eval"), "webkit.js evaluates a string");
+        assert!(!tokens.contains(&"Function"), "webkit.js compiles a string");
+        let s = spliced("document.title // a comment");
+        assert!(s.starts_with(&format!("const {GOT} = ")));
+        assert!(s.contains("ok: (\ndocument.title // a comment\n)"), "the comment can't eat the closing paren");
+        assert!(s.contains(".call(globalThis)"));
+        assert!(!s.contains("eval"));
+        assert!(is_syntax_error("SyntaxError: Unexpected token ';'"));
+        assert!(!is_syntax_error("EvalError: Refused to evaluate a string"));
+    }
+
+    #[test]
+    fn a_scripts_value_and_its_exception_have_cdps_shape() {
+        assert_eq!(script_result(None), json!({ "result": { "type": "undefined" } }));
+        assert_eq!(script_result(Some(json!(null)))["result"]["subtype"], "null");
+        assert_eq!(script_result(Some(json!(42))), json!({ "result": { "type": "number", "value": 42, "description": "42" } }));
+        assert_eq!(script_result(Some(json!("armed")))["result"], json!({ "type": "string", "value": "armed" }));
+        assert_eq!(script_result(Some(json!(true)))["result"]["type"], "boolean");
+        assert_eq!(script_result(Some(json!({ "a": [1] })))["result"], json!({ "type": "object", "value": { "a": [1] } }));
+        assert_eq!(script_opaque()["result"]["type"], "object");
+        let t = thrown("SyntaxError: Unexpected end of script");
+        assert_eq!(t["exceptionDetails"]["exception"]["description"], "SyntaxError: Unexpected end of script");
+        assert_eq!(t["result"]["subtype"], "error");
     }
 
     #[test]

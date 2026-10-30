@@ -29,6 +29,15 @@
     const sub = Array.isArray(v) ? "array" : v instanceof Error ? "error" : undefined;
     return { type: t === "function" ? "function" : "object", subtype: sub, className: v.constructor?.name, description: v instanceof Error ? v.name + ": " + v.message : (v.constructor?.name || "Object"), objectId: "o:" + k };
   };
+  // CDP's unserializable values, parsed (not eval'd).
+  const unserializable = (s) => {
+    if (s === "NaN") return NaN;
+    if (s === "Infinity") return Infinity;
+    if (s === "-Infinity") return -Infinity;
+    if (s === "-0") return -0;
+    if (typeof s === "string" && /^-?\d+n$/.test(s)) return BigInt(s.slice(0, -1));
+    throw new Error("Couldn't parse value object in call argument");
+  };
   const exc = (e) => ({ result: remote(e, false), exceptionDetails: { exceptionId: 1, text: "Uncaught", lineNumber: 0, columnNumber: 0,
     exception: { type: "object", subtype: "error", className: e?.name || "Error", description: e instanceof Error ? e.name + ": " + e.message : String(e) } } });
 
@@ -172,14 +181,19 @@
       (scrollable(at) || window).scrollBy(+p.deltaX || 0, +p.deltaY || 0);
       return {};
     },
-    evaluate: async (p) => {
-      try { let v = (0, eval)(p.expression); if (p.awaitPromise) v = await v; return { result: remote(v, p.returnByValue) }; } catch (e) { return exc(e); }
+    // No string eval here: a page's CSP would refuse it. webkit.rs puts the
+    // agent's expression or function in the call's own script, which WebKit
+    // compiles itself, and hands over what it gave: { ok: value } or { err: thrown }.
+    evaluate: async (p, got) => {
+      try { if ("err" in got) throw got.err; let v = got.ok; if (p.awaitPromise) v = await v; return { result: remote(v, p.returnByValue) }; } catch (e) { return exc(e); }
     },
-    callFunctionOn: async (p) => {
+    callFunctionOn: async (p, got) => {
       try {
+        if ("err" in got) throw got.err;
+        const fn = got.ok;
+        if (typeof fn !== "function") throw new Error("Given expression does not evaluate to a function");
         const self = p.objectId ? fromOid(p.objectId) : undefined;
-        const fn = (0, eval)("(" + p.functionDeclaration + ")");
-        const args = (p.arguments || []).map((a) => a.objectId ? fromOid(a.objectId) : "unserializableValue" in a ? (0, eval)(a.unserializableValue) : a.value);
+        const args = (p.arguments || []).map((a) => a.objectId ? fromOid(a.objectId) : "unserializableValue" in a ? unserializable(a.unserializableValue) : a.value);
         let v = fn.apply(self, args); if (p.awaitPromise) v = await v;
         return { result: remote(v, p.returnByValue) };
       } catch (e) { return exc(e); }

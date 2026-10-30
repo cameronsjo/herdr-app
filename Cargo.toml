@@ -52,7 +52,7 @@ browser-webkit = [
     "browser-pane", "dep:objc2-web-kit",
     "objc2-app-kit/NSBitmapImageRep", "objc2-app-kit/NSGraphicsContext", "objc2-app-kit/NSImage", "objc2-app-kit/NSImageRep",
     "objc2-foundation/NSArray", "objc2-foundation/NSData", "objc2-foundation/NSDictionary", "objc2-foundation/NSError",
-    "objc2-foundation/NSKeyValueObserving", "objc2-foundation/NSProcessInfo", "objc2-foundation/NSURL", "objc2-foundation/NSURLRequest",
+    "objc2-foundation/NSJSONSerialization", "objc2-foundation/NSKeyValueObserving", "objc2-foundation/NSProcessInfo", "objc2-foundation/NSURL", "objc2-foundation/NSURLRequest",
     "objc2-foundation/NSValue",
 ]
 # Automated tests of agent access only: a debug build with this feature,
