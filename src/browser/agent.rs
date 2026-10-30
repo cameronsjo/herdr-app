@@ -10,6 +10,9 @@
 //! CDP messages to that one page's in-process DevTools session, through the
 //! allowlist below. CEF opens no remote-debugging port.
 
+// Default builds compile these rules only for their tests; the browser feature uses them.
+#![cfg_attr(not(all(target_os = "macos", feature = "browser")), allow(dead_code))]
+
 use serde_json::{Map, Value, json};
 
 pub use super::{Source, not_in_herdr};

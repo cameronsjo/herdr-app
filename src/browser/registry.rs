@@ -6,6 +6,9 @@
 //! its saved url. `reconcile` compares the blocks with what is open and says
 //! what to open and what to close.
 
+// Default builds compile these rules only for their tests; the browser feature uses them.
+#![cfg_attr(not(all(target_os = "macos", feature = "browser")), allow(dead_code))]
+
 use crate::layout::{Content, Node};
 use crate::model::Model;
 use serde_json::{Value, json};
