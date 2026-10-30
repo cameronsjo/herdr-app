@@ -254,16 +254,17 @@ impl Browsers {
 
     /// Goes inside an agent access button (absolute, its full size): reports
     /// its bounds while painting, for its input protection.
-    pub fn access_button(&self, node: &str, sets: bool) -> Option<AnyElement> {
-        let node = node.to_owned();
-        Some(canvas(|_, _, _| {}, move |bounds, _, _, _| view::access_button(&node, sets, bounds)).absolute().size_full().into_any_element())
+    pub fn access_button(&self, node: &str, browser: &str, sets: bool) -> Option<AnyElement> {
+        let (node, browser) = (node.to_owned(), browser.to_owned());
+        Some(canvas(|_, _, _| {}, move |bounds, _, _, _| view::access_button(&node, &browser, sets, bounds)).absolute().size_full().into_any_element())
     }
 
     /// Whether a click on `node`'s access button counts: "Allow agent" only
-    /// after it showed unchanged and uncovered for `super::ALLOW_AFTER`, and
-    /// never a double click's second click; "Stop agent" always.
-    pub fn may_click(&self, node: &str, sets: bool, click_count: usize) -> bool {
-        view::may_click(node, sets, click_count)
+    /// after it showed unchanged (label, place, browser) and uncovered for
+    /// `super::ALLOW_AFTER`, and never a double click's second click; "Stop
+    /// agent" always.
+    pub fn may_click(&self, node: &str, browser: &str, sets: bool, click_count: usize) -> bool {
+        view::may_click(node, browser, sets, click_count)
     }
 
     pub fn set_bindings(&mut self, bindings: Vec<(String, String)>) {

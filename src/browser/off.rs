@@ -76,12 +76,12 @@ impl Browsers {
     }
 
     /// No agent browsers, so no access buttons.
-    pub fn access_button(&self, _node: &str, _sets: bool) -> Option<AnyElement> {
+    pub fn access_button(&self, _node: &str, _browser: &str, _sets: bool) -> Option<AnyElement> {
         None
     }
 
     /// Only "Stop agent" would count; there is no button to click here.
-    pub fn may_click(&self, _node: &str, sets: bool, _click_count: usize) -> bool {
+    pub fn may_click(&self, _node: &str, _browser: &str, sets: bool, _click_count: usize) -> bool {
         !sets
     }
 

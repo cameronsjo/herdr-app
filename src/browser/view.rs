@@ -106,15 +106,15 @@ pub fn cover(label: &str, bounds: Bounds<Pixels>) {
 }
 
 /// An agent access button painted this frame over these bounds, in block
-/// `node`; `sets`: what a click on it sets. `end_frame` checks it against
-/// the overlays painted after it.
-pub fn access_button(node: &str, sets: bool, bounds: Bounds<Pixels>) {
-    ALLOW.with_borrow_mut(|g| g.painted(node, sets, rect(bounds)));
+/// `node`, for `browser`; `sets`: what a click on it sets. `end_frame`
+/// checks it against the overlays painted after it and last frame's place.
+pub fn access_button(node: &str, browser: &str, sets: bool, bounds: Bounds<Pixels>) {
+    ALLOW.with_borrow_mut(|g| g.painted(node, browser, sets, rect(bounds)));
 }
 
-/// Whether a click on `node`'s access button counts (`AllowGuard::may_click`).
-pub fn may_click(node: &str, sets: bool, click_count: usize) -> bool {
-    ALLOW.with_borrow(|g| g.may_click(node, sets, click_count, Instant::now()))
+/// Whether a click on `node`'s access button for `browser` counts (`AllowGuard::may_click`).
+pub fn may_click(node: &str, browser: &str, sets: bool, click_count: usize) -> bool {
+    ALLOW.with_borrow(|g| g.may_click(node, browser, sets, click_count, Instant::now()))
 }
 
 /// The pages hidden under an overlay now: they can't have the keyboard.

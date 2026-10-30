@@ -67,6 +67,16 @@ fn separator_line(row: bool, width: f32, color: Hsla, top: f32) -> Div {
         .when(!row, |d| d.h(px(width)).w_full())
 }
 
+/// Whether a pane frame's header is drawn over the pane (`reveal: "hover"`)
+/// rather than beside it. Never over a browser pane: there it would sit on
+/// the agent header, hide "Allow agent" from the person, and pass their
+/// clicks through to it (GPUI hit-tests through a box that doesn't occlude,
+/// and the access button's input protection counts only overlays Herdr
+/// registers as covers).
+fn header_over(hover: bool, content: Option<&Content>) -> bool {
+    hover && !matches!(content, Some(Content::Browser { .. }))
+}
+
 fn c(name: &str) -> Hsla {
     settings::color_or_literal(name)
 }
@@ -1615,15 +1625,16 @@ impl AppWindow {
                     .relative()
                     .child(label)
                     // Reports where it painted, for the input protection below.
-                    .children(self.browsers.access_button(node, sets))
+                    .children(self.browsers.access_button(node, browser, sets))
                     // A person's click: the one path that turns agent access on.
                     // It does what the label said, not a toggle of the live state.
                     // "Allow agent" counts only once it has shown unchanged and
-                    // uncovered for half a second, and never as a double click's
-                    // second click (`browser::AllowGuard`); "Stop agent" at once.
+                    // uncovered, in the same place, for half a second, and never
+                    // as a double click's second click (`browser::AllowGuard`);
+                    // "Stop agent" at once.
                     .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
-                        if !this.browsers.may_click(&node_id, sets, ev.click_count()) {
-                            tracing::info!("browser: ignored an Allow agent click on {b} (it changed or was covered under 500 ms ago, or a double click)");
+                        if !this.browsers.may_click(&node_id, &b, sets, ev.click_count()) {
+                            tracing::info!("browser: ignored an Allow agent click on {b} (it changed, moved or was covered under 500 ms ago, or a double click)");
                             cx.notify();
                             return;
                         }
@@ -4047,7 +4058,10 @@ impl AppWindow {
     }
 
     /// A pane in its frame: the look, and the header mod above or below it
-    /// (on hover: drawn over the terminal, so it never resizes).
+    /// (on hover: drawn over the terminal, so it never resizes). A browser
+    /// pane's header is always beside the page (`header_over`): GPUI can't
+    /// draw over the page, and over the agent header it would hide "Allow
+    /// agent" from the person while passing their clicks through to it.
     fn frame_pane(&self, n: &Node, f: &PaneFrame, on: bool, inner: AnyElement, cx: &mut Context<Self>) -> AnyElement {
         let line = if on { f.focus.as_ref().or(f.border.as_ref()) } else { f.border.as_ref() };
         let group = SharedString::from(format!("pane-{}", n.id));
@@ -4064,9 +4078,11 @@ impl AppWindow {
         el = shadow(el, f.shadow.as_deref());
         let body = div().flex_1().min_h_0().flex().child(inner);
         let Some(h) = &f.header else { return el.child(body).into_any_element() };
-        let head = div().flex_none().h(settings::z(h.height.unwrap_or(HEADER_HEIGHT))).w_full().flex()
+        // Clipped to its own box: a mod's content can't spill over the pane, and
+        // GPUI clips hit testing with it.
+        let head = div().flex_none().h(settings::z(h.height.unwrap_or(HEADER_HEIGHT))).w_full().flex().overflow_hidden()
             .child(self.render_slot(&format!("{}#frame", n.id), cx));
-        if h.hover() {
+        if header_over(h.hover(), n.content()) {
             let head = head.absolute().left_0().right_0().opacity(0.).group_hover(group, |s| s.opacity(1.));
             let head = if h.bottom() { head.bottom_0() } else { head.top_0() };
             return el.child(body).child(head).into_any_element();
@@ -5020,6 +5036,17 @@ mod tests {
         assert_eq!(super::browser_status(None, "b1", "p1", saved), serde_json::json!({ "browser": "b1", "pane": "p1", "url": "https://example.test/cb" }));
         let open = serde_json::json!({ "url": "https://example.test/cb?step=2", "title": "T" });
         assert_eq!(super::browser_status(Some(open), "b1", "p1", saved)["url"], "https://example.test/cb?step=2");
+    }
+
+    #[test]
+    fn a_hover_header_is_never_drawn_over_a_browser_pane() {
+        use crate::layout::Content;
+        let browser = Content::Browser { browser: "b1".into(), url: "https://example.test/".into(), profile: Some("agent".into()) };
+        assert!(!super::header_over(true, Some(&browser)), "a hover header would sit on the agent header");
+        assert!(!super::header_over(false, Some(&browser)));
+        let terminal = Content::Terminal { terminal: "t1".into() };
+        assert!(super::header_over(true, Some(&terminal)));
+        assert!(!super::header_over(false, Some(&terminal)));
     }
 
     #[test]

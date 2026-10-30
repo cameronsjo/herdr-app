@@ -204,7 +204,8 @@ pub fn access_button(shown_on: bool) -> (&'static str, bool) {
 
 #[cfg(any(test, all(target_os = "macos", feature = "browser")))]
 /// How long "Allow agent" must have been on screen, with that label, no
-/// overlay over it and the window active, before a click on it counts.
+/// overlay over it, the window active, and the same place and browser,
+/// before a click on it counts.
 /// Chromium waits the same 500 ms before its permission prompts take a click
 /// (`InputEventActivationProtector`).
 pub const ALLOW_AFTER: std::time::Duration = std::time::Duration::from_millis(500);
@@ -212,24 +213,34 @@ pub const ALLOW_AFTER: std::time::Duration = std::time::Duration::from_millis(50
 #[cfg(any(test, all(target_os = "macos", feature = "browser")))]
 /// Input protection for the access buttons, as Chromium's
 /// `InputEventActivationProtector` does for its prompts. "Allow agent" takes
-/// a click only after `ALLOW_AFTER` on screen unchanged (same label, no
-/// overlay over it, window active), and never a second click of a double
-/// click. So neither a double click on "Stop agent" nor a click aimed at
-/// something that changed under the pointer turns access on: an overlay that
-/// closed on the first click, a socket `off` just before the person clicked
-/// "Stop agent", or a window activated by the click. "Stop agent" takes
-/// every click at once. Keyed by the block (node) the button is in.
+/// a click only after `ALLOW_AFTER` on screen unchanged (same label, same
+/// place, same browser in the block, no overlay over it, window active), and
+/// never a second click of a double click. So neither a double click on
+/// "Stop agent" nor a click aimed at something that changed under the
+/// pointer turns access on: an overlay that closed on the first click, a
+/// socket `off` just before the person clicked "Stop agent", a window
+/// activated by the click, or a button an agent slid under the pointer
+/// (`layout.resize`, `pane.swap`, `pane.zoom`, `layout.set`) or swapped for
+/// another browser's. "Stop agent" takes every click at once. Keyed by the
+/// block (node) the button is in. Only overlays Herdr registers as covers
+/// (`Browsers::cover`) count as "over it"; anything else drawn over the
+/// agent header must not exist (a pane frame's hover header is drawn beside
+/// a browser pane, never over it).
 #[derive(Default)]
 pub struct AllowGuard {
     shown: std::collections::HashMap<String, Shown>,
-    /// The buttons painted this frame: node, what a click sets, bounds.
-    painted: Vec<(String, bool, Rect)>,
+    /// The buttons painted this frame: node, browser, what a click sets, bounds.
+    painted: Vec<(String, String, bool, Rect)>,
 }
 
 #[cfg(any(test, all(target_os = "macos", feature = "browser")))]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct Shown {
+    /// The browser whose header it is.
+    browser: String,
     sets: bool,
+    /// Where it painted (window points).
+    at: Rect,
     /// Under an overlay, or the window inactive, this frame.
     covered: bool,
     /// When it started to show as it does now.
@@ -238,35 +249,45 @@ struct Shown {
 
 #[cfg(any(test, all(target_os = "macos", feature = "browser")))]
 impl AllowGuard {
-    /// A button painted this frame (window points).
-    pub fn painted(&mut self, node: &str, sets: bool, at: Rect) {
-        self.painted.push((node.to_owned(), sets, at));
+    /// A button painted this frame in block `node`, for `browser`'s header (window points).
+    pub fn painted(&mut self, node: &str, browser: &str, sets: bool, at: Rect) {
+        self.painted.push((node.to_owned(), browser.to_owned(), sets, at));
     }
 
     /// The frame's end, with the overlays painted in it. A button that
-    /// changed what it does, is covered, has just come out from under a
-    /// cover, or first shows now, starts its wait again. One not painted in
-    /// this frame is forgotten (it starts again when it comes back).
+    /// changed what it does, moved, now belongs to another browser, is
+    /// covered, has just come out from under a cover, or first shows now,
+    /// starts its wait again. One not painted in this frame is forgotten (it
+    /// starts again when it comes back).
     pub fn end_frame(&mut self, covers: &[(String, Rect)], window_active: bool, now: std::time::Instant) {
         let mut shown = std::collections::HashMap::new();
-        for (node, sets, at) in self.painted.drain(..) {
+        for (node, browser, sets, at) in self.painted.drain(..) {
             let covered = !window_active || covers.iter().any(|(_, c)| c.overlaps(&at));
             let since = match self.shown.get(&node) {
-                Some(s) if s.sets == sets && !s.covered && !covered => s.since,
+                Some(s) if s.sets == sets && s.browser == browser && same_place(&s.at, &at) && !s.covered && !covered => s.since,
                 _ => now,
             };
-            shown.insert(node, Shown { sets, covered, since });
+            shown.insert(node, Shown { browser, sets, at, covered, since });
         }
         self.shown = shown;
     }
 
-    /// Whether a click on `node`'s button, which sets `sets`, counts.
-    pub fn may_click(&self, node: &str, sets: bool, click_count: usize, now: std::time::Instant) -> bool {
+    /// Whether a click on `node`'s button, for `browser`, which sets `sets`, counts.
+    pub fn may_click(&self, node: &str, browser: &str, sets: bool, click_count: usize, now: std::time::Instant) -> bool {
         if !sets {
             return true;
         }
-        click_count <= 1 && self.shown.get(node).is_some_and(|s| s.sets && !s.covered && now.saturating_duration_since(s.since) >= ALLOW_AFTER)
+        click_count <= 1
+            && self.shown.get(node).is_some_and(|s| s.sets && s.browser == browser && !s.covered && now.saturating_duration_since(s.since) >= ALLOW_AFTER)
     }
+}
+
+#[cfg(any(test, all(target_os = "macos", feature = "browser")))]
+/// The same place on screen: every edge within half a point (float noise
+/// from layout, not a move a person could miss).
+fn same_place(a: &Rect, b: &Rect) -> bool {
+    const SLACK: f32 = 0.5;
+    (a.x - b.x).abs() <= SLACK && (a.y - b.y).abs() <= SLACK && (a.w - b.w).abs() <= SLACK && (a.h - b.h).abs() <= SLACK
 }
 
 #[cfg(all(debug_assertions, feature = "dev-agent-access"))]
@@ -341,12 +362,12 @@ mod allow_tests {
     /// One frame at `at` with p1's header button painted (`shown_on`: access
     /// on, so "Stop agent") and these overlays.
     fn frame(g: &mut AllowGuard, shown_on: bool, covers: &[(String, Rect)], at: Instant) {
-        g.painted("p1", access_button(shown_on).1, BUTTON);
+        g.painted("p1", "b1", access_button(shown_on).1, BUTTON);
         g.end_frame(covers, true, at);
     }
 
     fn allow(g: &AllowGuard, clicks: usize, at: Instant) -> bool {
-        g.may_click("p1", true, clicks, at)
+        g.may_click("p1", "b1", true, clicks, at)
     }
 
     #[test]
@@ -368,7 +389,7 @@ mod allow_tests {
         let mut g = AllowGuard::default();
         frame(&mut g, ON, &[], t);
         // First click: "Stop agent", at once.
-        assert!(g.may_click("p1", false, 1, t + ms(10)));
+        assert!(g.may_click("p1", "b1", false, 1, t + ms(10)));
         // The next frame paints "Allow agent" under the pointer.
         frame(&mut g, !ON, &[], t + ms(20));
         assert!(!allow(&g, 2, t + ms(120)), "the double click's second click turned access on");
@@ -409,7 +430,7 @@ mod allow_tests {
         let t = Instant::now();
         let mut g = AllowGuard::default();
         frame(&mut g, !ON, &[], t);
-        g.painted("p1", true, BUTTON);
+        g.painted("p1", "b1", true, BUTTON);
         g.end_frame(&[], false, t + ms(1_000));
         assert!(!allow(&g, 1, t + ms(5_000)), "a click into an inactive window counted");
         frame(&mut g, !ON, &[], t + ms(6_000));
@@ -431,9 +452,50 @@ mod allow_tests {
         frame(&mut g, !ON, &toast, t + ms(300));
         assert!(allow(&g, 1, t + ms(500)));
         // Never painted: no click counts.
-        assert!(!g.may_click("p9", true, 1, t + ms(60_000)));
+        assert!(!g.may_click("p9", "b1", true, 1, t + ms(60_000)));
         // "Stop agent": any click, any time, painted or not.
-        assert!(g.may_click("p9", false, 3, t));
+        assert!(g.may_click("p9", "b9", false, 3, t));
+    }
+
+    #[test]
+    fn a_button_that_moved_under_the_pointer_starts_the_wait_again() {
+        let t = Instant::now();
+        let mut g = AllowGuard::default();
+        frame(&mut g, !ON, &[], t);
+        assert!(allow(&g, 1, t + ms(10_000)));
+        // The agent resizes or swaps panes: the same block's button slides 40 pt left.
+        let moved = Rect { x: BUTTON.x - 40.0, ..BUTTON };
+        g.painted("p1", "b1", true, moved);
+        g.end_frame(&[], true, t + ms(10_000));
+        assert!(!allow(&g, 1, t + ms(10_100)), "a button that just moved took a click");
+        assert!(allow(&g, 1, t + ms(10_500)));
+        // It moves down, then stays put: the wait runs from the last move.
+        let lower = Rect { y: BUTTON.y + 30.0, ..moved };
+        g.painted("p1", "b1", true, lower);
+        g.end_frame(&[], true, t + ms(11_000));
+        g.painted("p1", "b1", true, lower);
+        g.end_frame(&[], true, t + ms(11_300));
+        assert!(!allow(&g, 1, t + ms(11_400)));
+        assert!(allow(&g, 1, t + ms(11_500)));
+        // Layout noise under half a point is not a move.
+        g.painted("p1", "b1", true, Rect { x: lower.x + 0.25, ..lower });
+        g.end_frame(&[], true, t + ms(12_000));
+        assert!(allow(&g, 1, t + ms(12_000)));
+    }
+
+    #[test]
+    fn a_block_that_now_holds_another_browser_starts_the_wait_again() {
+        let t = Instant::now();
+        let mut g = AllowGuard::default();
+        frame(&mut g, !ON, &[], t);
+        assert!(allow(&g, 1, t + ms(10_000)));
+        // A layout edit puts b2 into p1, its button where b1's was.
+        g.painted("p1", "b2", true, BUTTON);
+        g.end_frame(&[], true, t + ms(10_000));
+        assert!(!g.may_click("p1", "b2", true, 1, t + ms(10_100)), "another browser's button took a click at once");
+        assert!(g.may_click("p1", "b2", true, 1, t + ms(10_500)));
+        // A click handler for the browser the block no longer shows never counts.
+        assert!(!allow(&g, 1, t + ms(60_000)));
     }
 }
 

@@ -113,9 +113,16 @@ person allows it for that pane:
    Its header says "Test profile: don't sign into real accounts." Downloads
    are refused in it.
 2. Click **Allow agent** in that header. It takes a click only after it
-   has shown for half a second with that label, nothing over it and the
-   window active, and never the second click of a double click, so a
-   double click on **Stop agent** can't turn access back on.
+   has shown for half a second with that label, in the same place, for the
+   same browser, with no Herdr overlay over it and the window active, and
+   never the second click of a double click. So a double click on **Stop
+   agent** can't turn access back on, and an agent can't slide the button
+   under the pointer (`layout.resize`, `pane.swap`, `layout.set`) or swap
+   in another browser's header just before a click. "Over it" counts only
+   the overlays Herdr registers (dialogs, popups, toasts, floats, the pane
+   grip, the update pill). A pane frame's `reveal: "hover"` header is drawn
+   beside a browser pane, never over it, so it can't hide the button while
+   passing the click through.
    Nothing else turns agent access on:
    `herdr-app do browser.agent_access --on true` and a mod's `run()` are
    refused, because an agent can reach both. Turning it off works from
