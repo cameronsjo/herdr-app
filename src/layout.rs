@@ -6,19 +6,48 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// What a block shows.
+/// What a block shows. Saved as [`Saved`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
+#[serde(from = "Saved", into = "Saved")]
 pub enum Content {
     Terminal { terminal: String },
+    Mod { name: String, props: Value },
+    /// A tab's terminals as it arranges them (`"active"`: the selected one),
+    /// each pane wrapped as `pane` says.
+    Context { tab: String, pane: Option<PaneFrame> },
+    /// An agent's terminal, full size (`"focused"`: the selected agent).
+    Agent { agent: String },
+    /// A web page (macOS builds with a browser engine; a placeholder
+    /// elsewhere). `browser` is the app's id for it (`b1`); `url` is where it
+    /// was last, so a block whose browser isn't open (a restart, another
+    /// screen) opens there again. `profile: "agent"`: a separate profile for
+    /// test accounts; only such a browser can be driven by an agent.
+    /// Saved as a mod block named [`BROWSER_MOD`], so a herdr-app without
+    /// browsers shows that one pane as a mod that didn't load and keeps it.
+    Browser { browser: String, url: String, profile: Option<String> },
+}
+
+/// The mod name a browser block is saved under: `{ "mod": "browser",
+/// "props": { "browser": "b1", "url": "…", "profile"?: "agent" } }`. A mod
+/// block by this name whose props name a browser is a browser, not a mod.
+pub const BROWSER_MOD: &str = "browser";
+
+/// How a block is written in a layout file or a tab document. Every herdr-app
+/// that shares a core reads the whole document with this, and a block that
+/// matches no variant fails all of it, so new kinds of block are saved as one
+/// of these, never as a new variant.
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum Saved {
+    Terminal {
+        terminal: String,
+    },
     Mod {
         #[serde(rename = "mod")]
         name: String,
         #[serde(default, skip_serializing_if = "Value::is_null")]
         props: Value,
     },
-    /// A tab's terminals as it arranges them (`"active"`: the selected one),
-    /// each pane wrapped as `pane` says.
     Context {
         /// `context`: 0.1.0's word, in layouts made then.
         #[serde(alias = "context")]
@@ -26,21 +55,62 @@ pub enum Content {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pane: Option<PaneFrame>,
     },
-    /// An agent's terminal, full size (`"focused"`: the selected agent).
-    Agent { agent: String },
-    /// A Chromium page (macOS builds with the `browser` feature; a
-    /// placeholder elsewhere). `browser` is the app's id for it (`b1`);
-    /// `url` is where it was last, so a block whose browser isn't open
-    /// (a restart, another screen) opens there again.
-    /// `profile: "agent"`: a separate Chromium profile for test accounts;
-    /// only such a browser can be driven by an agent.
-    Browser {
-        browser: String,
-        #[serde(default)]
-        url: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        profile: Option<String>,
+    Agent {
+        agent: String,
     },
+    /// The prototype's first browser block, `{ "browser": "b1", … }`: read,
+    /// never written.
+    // debt: reads layouts saved by earlier prototype builds only; drop it before any upstream PR.
+    BrowserBlock(BrowserProps),
+}
+
+/// A browser block's fields, as a mod block's props.
+#[derive(Serialize, Deserialize)]
+struct BrowserProps {
+    browser: String,
+    #[serde(default)]
+    url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    profile: Option<String>,
+}
+
+impl From<Saved> for Content {
+    fn from(saved: Saved) -> Content {
+        match saved {
+            Saved::Terminal { terminal } => Content::Terminal { terminal },
+            Saved::Mod { name, props } => match browser_props(&name, &props) {
+                Some(BrowserProps { browser, url, profile }) => Content::Browser { browser, url, profile },
+                None => Content::Mod { name, props },
+            },
+            Saved::Context { tab, pane } => Content::Context { tab, pane },
+            Saved::Agent { agent } => Content::Agent { agent },
+            Saved::BrowserBlock(BrowserProps { browser, url, profile }) => Content::Browser { browser, url, profile },
+        }
+    }
+}
+
+impl From<Content> for Saved {
+    fn from(content: Content) -> Saved {
+        match content {
+            Content::Terminal { terminal } => Saved::Terminal { terminal },
+            Content::Mod { name, props } => Saved::Mod { name, props },
+            Content::Context { tab, pane } => Saved::Context { tab, pane },
+            Content::Agent { agent } => Saved::Agent { agent },
+            Content::Browser { browser, url, profile } => Saved::Mod {
+                name: BROWSER_MOD.to_string(),
+                // A struct of strings always converts.
+                props: serde_json::to_value(BrowserProps { browser, url, profile }).unwrap_or_default(),
+            },
+        }
+    }
+}
+
+/// A `browser` mod block's props, when they name a browser.
+fn browser_props(name: &str, props: &Value) -> Option<BrowserProps> {
+    if name != BROWSER_MOD {
+        return None;
+    }
+    serde_json::from_value::<BrowserProps>(props.clone()).ok().filter(|p| !p.browser.is_empty())
 }
 
 /// Which side of its node a floating block sits on. Left/right make it
@@ -76,8 +146,8 @@ pub enum Align {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Float {
     pub id: String,
-    /// Never a browser: its native view can't float over GPUI's drawing.
-    #[serde(deserialize_with = "float_content")]
+    /// A browser here never opens: its native view can't float over GPUI's
+    /// drawing, and browsers open only from blocks in the tree.
     pub content: Content,
     #[serde(default)]
     pub edge: Edge,
@@ -89,15 +159,6 @@ pub struct Float {
     pub peek: Option<f32>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub hidden: bool,
-}
-
-fn float_content<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Content, D::Error> {
-    match Content::deserialize(d)? {
-        Content::Browser { browser, .. } => Err(serde::de::Error::custom(format!(
-            "a floating block can't show a browser ({browser}): put it in a pane or a layout block"
-        ))),
-        content => Ok(content),
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -799,15 +860,34 @@ mod tests {
     }
 
     #[test]
-    fn floating_blocks_refuse_browsers() {
+    fn browser_blocks_are_saved_as_mod_blocks() {
+        let n = Node::block("p1", Content::Browser { browser: "b1".into(), url: "https://example.com/".into(), profile: Some("agent".into()) });
+        let saved = serde_json::to_value(&n).unwrap();
+        // The shape a herdr-app without browsers reads as one mod pane.
+        assert_eq!(
+            saved["content"],
+            serde_json::json!({ "mod": "browser", "props": { "browser": "b1", "url": "https://example.com/", "profile": "agent" } })
+        );
+        assert_eq!(serde_json::from_value::<Node>(saved).unwrap(), n);
+        // The prototype's first shape still reads as a browser.
+        let old: Node = serde_json::from_str(r#"{ "id": "p1", "type": "block", "content": { "browser": "b1", "url": "https://example.com/", "profile": "agent" } }"#).unwrap();
+        assert_eq!(old, n);
+        // A `browser` mod block that names no browser is a mod, as before.
+        for props in [serde_json::json!(null), serde_json::json!({ "browser": "" }), serde_json::json!({ "url": "https://example.com/" })] {
+            let c: Content = serde_json::from_value(serde_json::json!({ "mod": "browser", "props": props })).unwrap();
+            assert_eq!(c, Content::Mod { name: "browser".into(), props: props.clone() }, "{props}");
+        }
+    }
+
+    #[test]
+    fn a_browser_in_a_floating_block_never_fails_the_layout() {
         let json = r#"{ "id": "root", "type": "block", "content": {"agent": "focused"},
-          "floating": [ { "id": "f", "content": { "browser": "b1", "url": "https://example.com/" } } ] }"#;
-        let error = serde_json::from_str::<Node>(json).unwrap_err().to_string();
-        assert!(error.contains("a floating block can't show a browser (b1)"), "{error}");
-        // Other floats are unaffected.
-        let ok = r#"{ "id": "root", "type": "block", "content": {"agent": "focused"},
-          "floating": [ { "id": "f", "content": { "mod": "team" } } ] }"#;
-        assert!(serde_json::from_str::<Node>(ok).is_ok());
+          "floating": [ { "id": "f", "content": { "mod": "browser", "props": { "browser": "b1" } } },
+                        { "id": "g", "content": { "mod": "team" } } ] }"#;
+        let n: Node = serde_json::from_str(json).unwrap();
+        assert_eq!(n.floating.len(), 2);
+        // Browsers open only from blocks in the tree, which never includes floats.
+        assert!(n.walk().iter().all(|x| x.browser().is_none()));
     }
 
     fn term(id: &str) -> Node {

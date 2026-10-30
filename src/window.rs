@@ -232,7 +232,8 @@ fn missing_mods(name: &str) -> Vec<String> {
     walk(&layout, &mut used);
     used.sort();
     used.dedup();
-    used.retain(|m| !m.starts_with("frame-") && !mods::mods_dir().join(m).is_dir());
+    // A `browser` block is the app's own, not a mod folder.
+    used.retain(|m| !m.starts_with("frame-") && m != crate::layout::BROWSER_MOD && !mods::mods_dir().join(m).is_dir());
     used
 }
 

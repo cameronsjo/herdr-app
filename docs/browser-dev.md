@@ -131,10 +131,14 @@ into the agent's console. It writes your answers to a results file.
 
 ## How it behaves
 
-- A browser block is `{ "browser": "b1", "url": "..." }`, as a pane in a tab
-  (saved with the tab, so it reopens at its last page after a restart) or as
-  a block in a layout. Floating blocks refuse it: a native view can't float
-  over GPUI's drawing.
+- A browser block is `{ "mod": "browser", "props": { "browser": "b1", "url": "..." } }`,
+  as a pane in a tab (saved with the tab, so it reopens at its last page
+  after a restart) or as a block in a layout. It is saved as a mod block so
+  a herdr-app without browsers, sharing the same core, shows that one pane
+  as a mod that didn't load instead of failing to read the whole layout.
+  The earlier `{ "browser": "b1", … }` shape is still read and is saved
+  back as a mod block. In a floating block it never opens: a native view
+  can't float over GPUI's drawing.
 - Each frame the page's view takes its block's bounds; a block that isn't
   painted (another tab, a zoomed pane, a hidden column) hides its page.
 - GPUI can't draw over a page, so a page hides while any overlay overlaps
