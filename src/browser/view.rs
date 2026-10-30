@@ -297,6 +297,9 @@ pub fn set_bindings(bindings: Vec<(String, String)>) {
 }
 
 /// Once: an event monitor in front of AppKit's dispatch.
+/// - Key down an agent sent a page (`engine::agent_event`): dropped. WebKit
+///   sends one the page didn't handle back to the app, and it must not reach
+///   a terminal, a keys.json action or a menu.
 /// - Key down: while a page has the keyboard, a key bound globally in
 ///   keys.json (or the escape hatch) runs its action in Herdr and never
 ///   reaches the page.
@@ -313,6 +316,10 @@ pub fn install_monitor() {
         if ev.r#type() != NSEventType::KeyDown {
             pressed(ev);
             return event.as_ptr();
+        }
+        if engine::agent_event(ev) {
+            tracing::debug!("browser: an agent's key the page didn't take stays in the page");
+            return std::ptr::null_mut();
         }
         match route(ev) {
             Some(action) => {

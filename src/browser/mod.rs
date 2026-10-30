@@ -16,7 +16,7 @@
 //! What the shared code calls on `engine` (both engines have each):
 //! `set_events`, `start`, `open`, `close`, `navigate`, `history`, `reload`,
 //! `devtools`, `zoom`, `set_zoom`, `set_viewport`, `page_view`, `fit`,
-//! `set_focus`, `pressed`, `clicked_herdr`, `covers_changed`, `wake`,
+//! `set_focus`, `pressed`, `agent_event`, `clicked_herdr`, `covers_changed`, `wake`,
 //! `send_devtools` (an allowed CDP message from proxy.rs) and `agent_gone`.
 //! Page events and answers go back through `proxy::from_page`.
 

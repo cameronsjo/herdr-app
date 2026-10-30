@@ -263,6 +263,13 @@ pub fn fit(id: &str, size: objc2_foundation::NSSize, resized: bool) {
 /// that follows on its own (`on_got_focus`), so nothing to do here.
 pub fn pressed(_id: &str) {}
 
+/// Whether an event is an agent's key on its way out of the page (webkit.rs).
+/// Never on CEF: Chromium marks DevTools key events skip-if-unhandled, so an
+/// unhandled one never comes back to the window.
+pub fn agent_event(_event: &objc2_app_kit::NSEvent) -> bool {
+    false
+}
+
 /// Browser `id`'s pane changed size: a viewport on it is shrunk to fit
 /// again, if the fit changed.
 fn refit(id: &str) {

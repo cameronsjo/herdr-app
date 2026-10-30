@@ -32,7 +32,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use block2::RcBlock;
-use objc2::rc::Retained;
+use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{DefinedClass as _, MainThreadMarker, MainThreadOnly, Message as _, define_class, msg_send, sel};
 use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSEvent, NSEventModifierFlags, NSEventType, NSImage, NSView};
@@ -125,6 +125,11 @@ struct State {
 thread_local! {
     static STATE: RefCell<State> = RefCell::new(State::default());
     static EVENTS: RefCell<Option<async_channel::Sender<Event>>> = const { RefCell::new(None) };
+    /// Agents' key-downs that still exist (`agent_event`). Weak: an entry
+    /// lives exactly as long as someone (WebKit, until it is done with the
+    /// key) holds the event, and a dead one never matches a new event at
+    /// the same address.
+    static AGENT_KEYS: RefCell<Vec<Weak<NSEvent>>> = const { RefCell::new(Vec::new()) };
 }
 
 /// `wake` → the foreground task that runs the proxy's queued work.
@@ -764,7 +769,21 @@ fn mouse(web: &WKWebView, m: &Mouse) -> Result<(), String> {
     Ok(())
 }
 
-/// An agent's key event, as an `NSEvent` sent straight to the view.
+/// Whether `event` is an agent's key-down (`key`) on its way out of the page.
+/// WebKit sends a key-down the page didn't handle (no editable focus, no
+/// `preventDefault`) back through `[NSApp sendEvent:]`
+/// (`WebViewImpl::doneWithKeyEvent`), to the key window's first responder:
+/// Herdr's terminal, a keys.json action, the menus. view.rs's monitor drops
+/// it there. CEF has no such path.
+pub fn agent_event(event: &NSEvent) -> bool {
+    AGENT_KEYS.with_borrow_mut(|keys| {
+        keys.retain(|k| k.load().is_some());
+        keys.iter().any(|k| k.load().is_some_and(|e| std::ptr::eq(&*e, event)))
+    })
+}
+
+/// An agent's key event, as an `NSEvent` sent straight to the view. A
+/// key-down is noted first (`agent_event`), so it can't leave the page.
 fn key(web: &WKWebView, k: &Key) -> Result<(), String> {
     let window = web.window().ok_or("the page isn't in a window")?;
     let ev = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
@@ -780,7 +799,15 @@ fn key(web: &WKWebView, k: &Key) -> Result<(), String> {
         k.code,
     )
     .ok_or("AppKit made no key event")?;
-    if k.up { web.keyUp(&ev) } else { web.keyDown(&ev) }
+    if k.up {
+        web.keyUp(&ev);
+    } else {
+        AGENT_KEYS.with_borrow_mut(|keys| {
+            keys.retain(|k| k.load().is_some());
+            keys.push(Weak::from_retained(&ev));
+        });
+        web.keyDown(&ev);
+    }
     Ok(())
 }
 
