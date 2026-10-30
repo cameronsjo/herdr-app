@@ -5,6 +5,9 @@ Embedded Framework) in windowed mode, one native view per page over the
 window. It's behind the Cargo feature `browser`, off by default; other
 builds show a placeholder where a browser block is.
 
+What the prototype is for, what it asks of the core, its measured size and
+signing, known gaps and a demo script: [browser-prototype.md](browser-prototype.md).
+
 ## Build and run
 
 ```sh
