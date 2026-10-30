@@ -61,6 +61,14 @@ const AGENTS_MD: &str = include_str!("../defaults/AGENTS.md");
 /// mods. Shipped mods are replaced whole; edits are first moved to a clone.
 pub fn write_workspace() -> std::io::Result<()> {
     let dir = app_dir();
+    // The app home holds the control socket and the browser profiles: only
+    // this user may open it (created 0700, an existing one tightened).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir)?;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+    }
     std::fs::create_dir_all(mods_dir())?;
     write_if_changed(&dir.join("AGENTS.md"), AGENTS_MD)?;
     // Agents read AGENTS.md now; the pointer file we used to write goes (only ours).
