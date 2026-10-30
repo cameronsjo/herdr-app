@@ -64,10 +64,16 @@ a new-window link.
   or a focus change. A dialog or popup (the palette, a menu, a rename
   prompt) takes the keyboard while it's open. So does a control you click
   (the Changes panel's commit box, a floating terminal), until it loses
-  focus, the focused pane changes, or you click a page. A page that focuses itself
-  (CEF does when it creates one) doesn't keep it.
-  While a page has the keyboard, keys bound in keys.json's `global` section
-  (and the shown layout's), plus `ctrl-alt-shift-escape`, still go to Herdr.
+  focus, the focused pane changes, or you click a page. A page that asks for
+  focus on its own (CEF does when it creates one, and on loads) is refused
+  unless it's the page that should have the keyboard. Closing the page that
+  has the keyboard gives it back to Herdr.
+  While a page has the keyboard, `ctrl-alt-shift-escape` and the keys bound in
+  keys.json's `global` section (and the shown layout's) still go to Herdr,
+  from the last keys.json that loaded. `send:` keys stay with the page;
+  `app.hide` and friends hide the app as usual.
+- Browser ids (`b1`, `b2`, ...) are never reused while the app runs, so an id
+  you hold never names another page.
 - A popup or a `target="_blank"` link opens in the same pane.
 - No remote-debugging port is opened. `browser.devtools` opens CEF's own
   DevTools window.

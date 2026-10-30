@@ -49,12 +49,93 @@ pub fn keyboard_page<'a>(dialog: bool, control: bool, layout_page: Option<&'a st
     if dialog || control { None } else { layout_page.or(pane_page) }
 }
 
+#[cfg(any(test, all(target_os = "macos", feature = "browser")))]
+/// What has AppKit's first responder in Herdr's window.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Responder {
+    /// GPUI's view: Herdr's own keys, terminals and inputs get typing.
+    Herdr,
+    Page(String),
+    /// Anything else, usually the window itself: AppKit makes the window
+    /// first responder when the view that had it leaves (a closed page),
+    /// and then plain typing reaches nobody.
+    Other,
+}
+
+#[cfg(any(test, all(target_os = "macos", feature = "browser")))]
+impl std::fmt::Display for Responder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Responder::Herdr => f.write_str("Herdr"),
+            Responder::Page(id) => f.write_str(id),
+            Responder::Other => f.write_str("the window (nobody)"),
+        }
+    }
+}
+
+#[cfg(any(test, all(target_os = "macos", feature = "browser")))]
+/// What to do so the page `wanted` (None: Herdr) has the keyboard, given
+/// who really has it.
+#[derive(Debug, PartialEq)]
+pub enum Hand<'a> {
+    Keep,
+    Give(&'a str),
+    TakeBack,
+}
+
+#[cfg(any(test, all(target_os = "macos", feature = "browser")))]
+pub fn hand<'a>(wanted: Option<&'a str>, actual: &Responder) -> Hand<'a> {
+    match (wanted, actual) {
+        (Some(w), Responder::Page(a)) if a == w => Hand::Keep,
+        (Some(w), _) => Hand::Give(w),
+        (None, Responder::Herdr) => Hand::Keep,
+        (None, _) => Hand::TakeBack,
+    }
+}
+
+#[cfg(any(test, all(target_os = "macos", feature = "browser")))]
+/// Whether a page may take focus when CEF asks (on creation, on a load, on
+/// a click): only the page the window gave the keyboard (`wanted`; None
+/// before the window first decided), or one the person just pressed.
+pub fn may_focus(page: &str, wanted: Option<Option<&str>>, pressed: bool) -> bool {
+    pressed || wanted.is_none_or(|w| w == Some(page))
+}
+
 /// Whether browser panes work in this build.
 pub const AVAILABLE: bool = cfg!(all(target_os = "macos", feature = "browser"));
 
 #[cfg(test)]
 mod tests {
-    use super::keyboard_page;
+    use super::{Hand, Responder, hand, keyboard_page, may_focus};
+
+    #[test]
+    fn closing_the_page_with_the_keyboard_hands_it_back_to_herdr() {
+        // The page's view left the window, AppKit made the window first
+        // responder: Herdr must take the keyboard back, or typing goes nowhere.
+        assert_eq!(hand(None, &Responder::Other), Hand::TakeBack);
+        assert_eq!(hand(None, &Responder::Page("b1".into())), Hand::TakeBack);
+        assert_eq!(hand(None, &Responder::Herdr), Hand::Keep);
+    }
+
+    #[test]
+    fn a_page_gets_the_keyboard_from_anyone_else() {
+        assert_eq!(hand(Some("b2"), &Responder::Page("b2".into())), Hand::Keep);
+        assert_eq!(hand(Some("b2"), &Responder::Page("b1".into())), Hand::Give("b2"));
+        assert_eq!(hand(Some("b2"), &Responder::Herdr), Hand::Give("b2"));
+        assert_eq!(hand(Some("b2"), &Responder::Other), Hand::Give("b2"));
+    }
+
+    #[test]
+    fn only_the_wanted_or_pressed_page_takes_focus() {
+        // CEF's creation focus on a page that shouldn't have the keyboard.
+        assert!(!may_focus("b1", Some(Some("b2")), false));
+        assert!(!may_focus("b1", Some(None), false));
+        // The window gave it the keyboard, or the person clicked it.
+        assert!(may_focus("b2", Some(Some("b2")), false));
+        assert!(may_focus("b1", Some(None), true));
+        // Before the window decided anything.
+        assert!(may_focus("b1", None, false));
+    }
 
     #[test]
     fn a_dialog_takes_the_keyboard_from_every_page() {

@@ -20,12 +20,53 @@ pub struct Press {
     pub shifted: Option<String>,
 }
 
-/// The action bound to `press`, if any. `bindings`: (keys, action) from the
-/// sections that apply everywhere (`global`, the shown `layout:<name>`, the
-/// escape hatch). Sequences (`cmd-k cmd-s`) are skipped: a page keeps keys
-/// one at a time.
+/// The action bound to `press`, if any. The escape hatch comes first,
+/// whatever else is bound to the same keys (as GPUI ranks it). `bindings`:
+/// `page_bindings`. Sequences (`cmd-k cmd-s`) are skipped: a page keeps
+/// keys one at a time.
 pub fn find<'a>(bindings: &'a [(String, String)], press: &Press) -> Option<&'a str> {
+    if matches(crate::keys::ESCAPE_HATCH, press) {
+        return Some(HATCH_ACTION);
+    }
     bindings.iter().find(|(keys, _)| matches(keys, press)).map(|(_, action)| action.as_str())
+}
+
+const HATCH_ACTION: &str = "app.reset";
+
+/// The keys Herdr keeps while a page has the keyboard, as (keys, action),
+/// from `crate::keys::listing()` of a keys.json that loaded: the shown
+/// layout's section first (GPUI ranks it above `global`), then `global`.
+/// Left to the page: `terminal` (the program gets the key) and `send:`
+/// (it types into a terminal, and a page isn't one). The escape hatch is
+/// `find`'s own.
+pub fn page_bindings(listing: &[(String, String, String)], layout: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for section in [format!("layout:{layout}"), "global".to_owned()] {
+        for (_, keys, action) in listing.iter().filter(|(s, _, _)| *s == section) {
+            if keys != crate::keys::ESCAPE_HATCH && action != "terminal" && !action.starts_with("send:") {
+                out.push((keys.clone(), action.clone()));
+            }
+        }
+    }
+    out
+}
+
+/// An action macOS does itself (Herdr's command for it does nothing): the
+/// key monitor calls AppKit for these instead of running the command.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Native {
+    Hide,
+    HideOthers,
+    ShowAll,
+}
+
+pub fn native(action: &str) -> Option<Native> {
+    match action {
+        "app.hide" => Some(Native::Hide),
+        "app.hide_others" => Some(Native::HideOthers),
+        "app.show_all" => Some(Native::ShowAll),
+        _ => None,
+    }
 }
 
 fn matches(keys: &str, press: &Press) -> bool {
@@ -140,6 +181,49 @@ mod tests {
         assert_eq!(find(&b, &press("cs", "escape", None)), None);
         // Sequences are never matched from a page.
         assert_eq!(find(&b, &press("m", "k", Some("k"))), None);
+    }
+
+    #[test]
+    fn the_escape_hatch_wins_over_any_binding_on_the_same_keys() {
+        // keys.json can't bind the hatch's exact text, but a reordered one
+        // parses and lands earlier in the list.
+        let b: Vec<(String, String)> = [("shift-ctrl-alt-escape", "tab.new"), ("alt-ctrl-shift-escape", "tab.close")]
+            .into_iter()
+            .map(|(k, a)| (k.to_owned(), a.to_owned()))
+            .collect();
+        assert_eq!(find(&b, &press("cas", "escape", None)), Some("app.reset"));
+        assert_eq!(find(&[], &press("cas", "escape", None)), Some("app.reset"));
+    }
+
+    #[test]
+    fn a_page_keeps_terminal_and_send_keys_and_the_layout_ranks_first() {
+        let listing: Vec<(String, String, String)> = [
+            ("global", "cmd-t", "tab.new"),
+            ("global", "cmd-left", "send:\u{1}"),
+            ("global", "cmd-c", "terminal"),
+            ("layout:main", "cmd-t", "app.palette"),
+            ("layout:other", "cmd-j", "tab.next"),
+            ("terminal", "cmd-v", "terminal.paste"),
+            ("global", "ctrl-alt-shift-escape", "app.reset"),
+        ]
+        .into_iter()
+        .map(|(s, k, a)| (s.to_owned(), k.to_owned(), a.to_owned()))
+        .collect();
+        let b = page_bindings(&listing, "main");
+        assert_eq!(b, vec![("cmd-t".to_owned(), "app.palette".to_owned()), ("cmd-t".to_owned(), "tab.new".to_owned())]);
+        assert_eq!(find(&b, &press("m", "t", Some("t"))), Some("app.palette"));
+        // The page gets cmd-left (send:) and cmd-c (terminal).
+        assert_eq!(find(&b, &press("m", "left", None)), None);
+        assert_eq!(find(&b, &press("m", "c", Some("c"))), None);
+    }
+
+    #[test]
+    fn hiding_the_app_is_macoss_own() {
+        assert_eq!(native("app.hide"), Some(Native::Hide));
+        assert_eq!(native("app.hide_others"), Some(Native::HideOthers));
+        assert_eq!(native("app.show_all"), Some(Native::ShowAll));
+        assert_eq!(native("app.quit"), None);
+        assert_eq!(native("tab.new"), None);
     }
 
     #[test]

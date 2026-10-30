@@ -377,6 +377,10 @@ pub struct AppWindow {
     /// mod's input, a floating terminal): while it keeps that focus, it keeps
     /// the keyboard from the focused pane's page.
     control_focus: Option<FocusHandle>,
+    /// keys.json's bindings as `(section, keys, action)`, from the last file
+    /// that loaded: the key monitor's source while a page has the keyboard.
+    #[cfg(all(target_os = "macos", feature = "browser"))]
+    page_keys: Vec<(String, String, String)>,
     /// Terminal views by block id (panes and chrome terminal blocks).
     terms: HashMap<String, Term>,
     /// Mod copies by slot (block id, `<stack>#header`, or `overlay:<id>`).
@@ -476,6 +480,8 @@ impl AppWindow {
             browsers: crate::browser::Browsers::new(),
             layout_page: None,
             control_focus: None,
+            #[cfg(all(target_os = "macos", feature = "browser"))]
+            page_keys: Vec::new(),
             terms: HashMap::new(),
             copies: HashMap::new(),
             overlays: Vec::new(),
@@ -863,6 +869,10 @@ impl AppWindow {
                 Ok(bindings) => {
                     crate::keys::install(bindings, cx);
                     let _ = std::fs::remove_file(file("keys.error"));
+                    #[cfg(all(target_os = "macos", feature = "browser"))]
+                    {
+                        self.page_keys = crate::keys::listing();
+                    }
                     self.browser_keys();
                 }
                 Err(e) => {
@@ -938,17 +948,11 @@ impl AppWindow {
         self.browser_keys();
     }
 
-    /// The keys Herdr keeps while a page has the keyboard: the global ones and
-    /// the shown layout's (those first, as GPUI ranks them), with the escape hatch.
+    /// The keys Herdr keeps while a page has the keyboard (`browser::keys::page_bindings`),
+    /// from the keys.json GPUI last loaded: a file with a problem keeps the old ones, as GPUI does.
     fn browser_keys(&mut self) {
-        if !crate::browser::AVAILABLE {
-            return;
-        }
-        let layout = format!("layout:{}", self.layout_name);
-        let mut keys: Vec<(String, String, String)> =
-            crate::keys::listing().into_iter().filter(|(s, _, a)| (s == "global" || *s == layout) && a != "terminal").collect();
-        keys.sort_by_key(|(s, _, _)| *s == "global");
-        self.browsers.set_bindings(keys.into_iter().map(|(_, k, a)| (k, a)).collect());
+        #[cfg(all(target_os = "macos", feature = "browser"))]
+        self.browsers.set_bindings(crate::browser::keys::page_bindings(&self.page_keys, &self.layout_name));
     }
 
     fn report_layout(&self, message: &str) {

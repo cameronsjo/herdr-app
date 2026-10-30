@@ -5,7 +5,7 @@ use gpui::{AnyElement, App, Hsla, IntoElement, ParentElement, Styled, Window, ca
 use serde_json::{Value, json};
 
 use super::registry::{self, Page, Registry};
-use super::{Update, runtime, view};
+use super::{Hand, Responder, Update, runtime, view};
 use crate::layout::Node;
 use crate::model::Model;
 
@@ -22,10 +22,10 @@ pub enum Event {
 pub struct Browsers {
     registry: Registry,
     events: Option<async_channel::Receiver<Event>>,
-    /// For the log: who the window last decided has the keyboard, and who
-    /// last had it (None: Herdr).
+    /// For the log: who the window last decided has the keyboard (inner
+    /// None: Herdr), and who last really had it.
     wanted: Option<Option<String>>,
-    holder: Option<Option<String>>,
+    holder: Option<Responder>,
     /// Why CEF can't run, shown in every browser block.
     error: Option<String>,
 }
@@ -57,7 +57,11 @@ impl Browsers {
                 Update { browser, focused: true, ..Update::default() }
             }
             Event::Focused(browser) => {
-                tracing::debug!("browser: {browser} took focus on its own (not a click)");
+                if self.wanted.as_ref().is_some_and(|w| w.as_deref() == Some(browser.as_str())) {
+                    tracing::debug!("browser: {browser} got focus (Herdr gave it the keyboard)");
+                } else {
+                    tracing::debug!("browser: {browser} took focus on its own (not a click)");
+                }
                 Update { browser, ..Update::default() }
             }
             Event::CloseAsked(browser) => Update { browser, close: true, ..Update::default() },
@@ -66,11 +70,10 @@ impl Browsers {
     }
 
     /// A new browser's id and its normalized url.
-    pub fn prepare_open(&self, url: &str, model: &Model, chrome: &Node) -> Result<(String, String), String> {
+    pub fn prepare_open(&mut self, url: &str, model: &Model, chrome: &Node) -> Result<(String, String), String> {
         let url = registry::normalize_url(url)?;
         let blocks = registry::blocks(model, chrome);
-        let taken = blocks.iter().map(|b| b.browser.as_str()).chain(self.registry.list().iter().map(|e| e.browser.as_str()));
-        Ok((registry::next_id(taken), url))
+        Ok((self.registry.issue(blocks.iter().map(|b| b.browser.as_str())), url))
     }
 
     /// Opens browsers for new blocks (and blocks restored from a saved
@@ -137,28 +140,35 @@ impl Browsers {
             tracing::debug!("browser: the keyboard belongs to {}", page.unwrap_or("Herdr"));
             self.wanted = Some(page.map(str::to_owned));
         }
-        let actual = view::keyed_page(window);
-        let holder = if actual.as_deref() == page {
-            actual
-        } else {
-            match page {
-                // Not yet created: the next sync tries again.
-                Some(id) if !view::give_keys(id, window) => actual,
-                Some(id) => {
-                    runtime::set_focus(id);
-                    Some(id.to_owned())
-                }
-                None => {
-                    if let Some(from) = &actual {
-                        tracing::debug!("browser: taking the keyboard back from {from}");
-                    }
+        // Before giving it: the page's own focus request is then allowed.
+        view::set_wanted(page);
+        let actual = view::responder(window);
+        let hand = super::hand(page, &actual);
+        // A page or the bare window has it, and shouldn't.
+        if hand != Hand::Keep && actual != Responder::Herdr {
+            tracing::debug!("browser: taking the keyboard back from {actual}");
+        }
+        let holder = match hand {
+            Hand::Keep => actual,
+            // Not yet created: Herdr holds it meanwhile (not a hidden page),
+            // and the next sync tries again.
+            Hand::Give(id) if !view::give_keys(id, window) => {
+                if actual != Responder::Herdr {
                     view::take_keys(window);
-                    None
                 }
+                Responder::Herdr
+            }
+            Hand::Give(id) => {
+                runtime::set_focus(id);
+                Responder::Page(id.to_owned())
+            }
+            Hand::TakeBack => {
+                view::take_keys(window);
+                Responder::Herdr
             }
         };
         if self.holder.as_ref() != Some(&holder) {
-            tracing::debug!("browser: {} has the keyboard", holder.as_deref().unwrap_or("Herdr"));
+            tracing::debug!("browser: {holder} has the keyboard");
             self.holder = Some(holder);
         }
     }

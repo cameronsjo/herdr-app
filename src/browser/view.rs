@@ -22,8 +22,8 @@ use objc2_app_kit::{NSEvent, NSEventMask, NSEventModifierFlags, NSEventType, NSV
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
-use super::keys::{self, Press};
-use super::runtime;
+use super::keys::{self, Native, Press};
+use super::{Responder, runtime};
 
 struct Container {
     view: Retained<NSView>,
@@ -37,6 +37,9 @@ thread_local! {
     static MONITOR: RefCell<Option<Retained<AnyObject>>> = const { RefCell::new(None) };
     /// The page the last mouse press landed in, and when.
     static PRESSED: RefCell<Option<(String, Instant)>> = const { RefCell::new(None) };
+    /// The page the window last gave the keyboard (inner None: Herdr);
+    /// None until it first decided. CEF's focus requests are checked against it.
+    static WANTED: RefCell<Option<Option<String>>> = const { RefCell::new(None) };
 }
 
 /// How long after a press in a page CEF's "got focus" still counts as that click.
@@ -89,10 +92,18 @@ pub fn place(id: &str, bounds: Bounds<Pixels>, window: &Window) {
         if old.origin != frame.origin || old.size != frame.size {
             tracing::debug!("browser: {id} placed at {x},{y} {w}x{h} (window points, top left)");
             c.view.setFrame(frame);
-            // The page fills its container (CEF sizes it once, at creation).
-            if let Some(page) = runtime::page_view(id) {
-                // SAFETY: CEF's live browser view, main thread.
-                unsafe { page.as_ref() }.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), frame.size));
+        }
+        // The page fills its container. CEF sizes it once, at creation, maybe
+        // before the block first placed the container; checked every frame,
+        // not only when the container moves, so a page created late still fills it.
+        if let Some(page) = runtime::page_view(id) {
+            // SAFETY: CEF's live browser view, main thread.
+            let page = unsafe { page.as_ref() };
+            let fill = NSRect::new(NSPoint::new(0.0, 0.0), frame.size);
+            let had = page.frame();
+            if had.origin != fill.origin || had.size != fill.size {
+                tracing::debug!("browser: {id}'s page fills its block: {}x{} -> {w}x{h}", had.size.width, had.size.height);
+                page.setFrame(fill);
             }
         }
         if c.view.isHidden() {
@@ -139,12 +150,28 @@ pub fn give_keys(id: &str, window: &Window) -> bool {
     taken
 }
 
-/// The page whose view (or a view inside it) is the window's first responder.
-pub fn keyed_page(window: &Window) -> Option<String> {
-    let ns_window = gpui_view(window).ok()?.window()?;
-    let responder = ns_window.firstResponder()?;
+/// Who has AppKit's first responder in the window: GPUI's view, a page
+/// (its view or one inside it), or something else (the window itself).
+pub fn responder(window: &Window) -> Responder {
+    let Ok(gpui) = gpui_view(window) else { return Responder::Other };
+    let Some(responder) = gpui.window().and_then(|w| w.firstResponder()) else { return Responder::Other };
     let responder: &AnyObject = &responder;
-    page_of(responder.downcast_ref::<NSView>()?)
+    let Some(view) = responder.downcast_ref::<NSView>() else { return Responder::Other };
+    if std::ptr::eq(view, gpui) {
+        return Responder::Herdr;
+    }
+    page_of(view).map_or(Responder::Other, Responder::Page)
+}
+
+/// The window decided who has the keyboard (None: Herdr).
+pub fn set_wanted(page: Option<&str>) {
+    WANTED.with_borrow_mut(|w| *w = Some(page.map(str::to_owned)));
+}
+
+/// CEF asks whether page `id` may take focus (`super::may_focus`).
+pub fn may_take_focus(id: &str) -> bool {
+    let pressed = PRESSED.with_borrow(|p| p.as_ref().is_some_and(|(page, at)| page == id && at.elapsed() < CLICK_FOCUS));
+    WANTED.with_borrow(|w| super::may_focus(id, w.as_ref().map(Option::as_deref), pressed))
 }
 
 fn page_of(view: &NSView) -> Option<String> {
@@ -174,6 +201,7 @@ pub fn take_keys(window: &Window) {
 }
 
 pub fn set_bindings(bindings: Vec<(String, String)>) {
+    tracing::debug!("browser: {} key binding(s) stay with Herdr while a page has the keyboard (and the escape hatch)", bindings.len());
     BINDINGS.with_borrow_mut(|b| *b = bindings);
 }
 
@@ -197,8 +225,16 @@ pub fn install_monitor() {
         }
         match route(ev) {
             Some(action) => {
-                tracing::info!("browser: a page had the keyboard; {action} goes to Herdr");
-                crate::mods::request(crate::mods::Request::Run { name: action, args: serde_json::Value::Null });
+                match keys::native(&action) {
+                    Some(native) => {
+                        tracing::info!("browser: a page had the keyboard; {action} goes to macOS");
+                        run_native(native);
+                    }
+                    None => {
+                        tracing::info!("browser: a page had the keyboard; {action} goes to Herdr");
+                        crate::mods::request(crate::mods::Request::Run { name: action, args: serde_json::Value::Null });
+                    }
+                }
                 std::ptr::null_mut()
             }
             None => event.as_ptr(),
@@ -208,6 +244,18 @@ pub fn install_monitor() {
     let mask = NSEventMask::KeyDown | NSEventMask::LeftMouseDown | NSEventMask::RightMouseDown | NSEventMask::OtherMouseDown;
     let monitor = unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(mask, &handler) };
     MONITOR.with_borrow_mut(|m| *m = monitor);
+}
+
+/// Hiding apps: what GPUI's `cx.hide()` and friends do (src/macos.rs binds
+/// them natively; the command does nothing).
+fn run_native(native: Native) {
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    let app = objc2_app_kit::NSApp(mtm);
+    match native {
+        Native::Hide => app.hide(None),
+        Native::HideOthers => app.hideOtherApplications(None),
+        Native::ShowAll => app.unhideAllApplications(None),
+    }
 }
 
 /// A mouse press: in which shown page, if any.

@@ -71,6 +71,9 @@ pub struct Changes {
 pub struct Registry {
     /// In the order they opened.
     entries: Vec<Entry>,
+    /// The highest `bN` issued or seen in a block this run: new ids go above
+    /// it, so a closed browser's id never names another page (agents hold ids).
+    highest: u64,
 }
 
 /// The page a browser with no saved url opens on.
@@ -85,6 +88,7 @@ impl Registry {
         let mut changes = Changes::default();
         let mut seen: Vec<&str> = Vec::new();
         for b in blocks {
+            self.highest = self.highest.max(id_number(&b.browser).unwrap_or(0));
             // The first block with an id owns the browser.
             if seen.contains(&b.browser.as_str()) {
                 continue;
@@ -119,6 +123,16 @@ impl Registry {
             keep
         });
         changes
+    }
+
+    /// A new browser id, `b1`, `b2`, ...: short, so people and agents can
+    /// type it, and never one this run has given out or seen in a block, so
+    /// an id someone still holds can't name another page. `taken`: ids in
+    /// blocks the registry hasn't seen yet.
+    pub fn issue<'a>(&mut self, taken: impl IntoIterator<Item = &'a str>) -> String {
+        let highest = taken.into_iter().filter_map(id_number).fold(self.highest, u64::max);
+        self.highest = highest + 1;
+        format!("b{}", self.highest)
     }
 
     pub fn get(&self, browser: &str) -> Option<&Entry> {
@@ -179,10 +193,9 @@ pub fn blocks(model: &Model, chrome: &Node) -> Vec<Block> {
     out
 }
 
-/// The next free browser id, `b1`, `b2`, ...: short, so people and agents can type it.
-pub fn next_id<'a>(taken: impl IntoIterator<Item = &'a str>) -> String {
-    let taken: Vec<&str> = taken.into_iter().collect();
-    (1..).map(|n| format!("b{n}")).find(|id| !taken.contains(&id.as_str())).unwrap()
+/// The number in an id Herdr gives out (`b12` → 12).
+fn id_number(id: &str) -> Option<u64> {
+    id.strip_prefix('b').filter(|n| !n.starts_with('0')).and_then(|n| n.parse().ok())
 }
 
 /// What `browser.open`/`browser.navigate` accept: a url with a scheme, an
@@ -300,10 +313,24 @@ mod tests {
     }
 
     #[test]
-    fn ids_are_short_and_never_reused_while_taken() {
-        assert_eq!(next_id([]), "b1");
-        assert_eq!(next_id(["b1", "b3", "x"]), "b2");
-        assert_eq!(next_id(["b1", "b2"]), "b3");
+    fn ids_are_short_and_never_reused_in_a_run() {
+        let mut r = Registry::default();
+        assert_eq!(r.issue([]), "b1");
+        // b1 closed before anything else opened: the next browser is still b2,
+        // so an agent holding "b1" can never reach another page.
+        r.reconcile(&[]);
+        assert_eq!(r.issue([]), "b2");
+        // A taken id is skipped, and nothing at or below the highest is reissued.
+        assert_eq!(r.issue(["b3", "x"]), "b4");
+        assert_eq!(r.issue([]), "b5");
+    }
+
+    #[test]
+    fn ids_continue_after_the_highest_restored_block() {
+        let mut r = Registry::default();
+        // A restored layout names b7 (and a layout file's own `side`).
+        r.reconcile(&[block("b7", "https://a/", "p1", Some("sp1")), block("side", "https://b/", "s", None)]);
+        assert_eq!(r.issue(["b7", "side"]), "b8");
     }
 
     #[test]

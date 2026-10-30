@@ -30,7 +30,7 @@ impl Browsers {
         match event {}
     }
 
-    pub fn prepare_open(&self, _url: &str, _model: &Model, _chrome: &Node) -> Result<(String, String), String> {
+    pub fn prepare_open(&mut self,_url: &str, _model: &Model, _chrome: &Node) -> Result<(String, String), String> {
         Err(UNAVAILABLE.into())
     }
 
@@ -49,8 +49,6 @@ impl Browsers {
     }
 
     pub fn keys(&mut self, _page: Option<&str>, _window: &mut Window) {}
-
-    pub fn set_bindings(&mut self, _bindings: Vec<(String, String)>) {}
 
     pub fn element(&self, _node: &str, browser: &str, url: &str, dim: Hsla) -> AnyElement {
         div()
