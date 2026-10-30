@@ -12,7 +12,9 @@ signing, and its main gaps: [browser-prototype.md](browser-prototype.md).
 
 ```sh
 just browser-build   # target/browser-dev/Herdr Dev.app: the app, CEF's framework, 5 helper apps
-just browser-dev     # the same, then runs it on a scratch home and its own core
+just browser-dev     # the same, then runs it on its own home and core (/tmp/hbd.dev)
+just browser-relaunch  # quit the running one, rebuild, run it again in the background
+just browser-stop    # quit it and stop its core
 ```
 
 Both need `cmake` and `ninja` (`brew install cmake ninja`). CEF on macOS only
@@ -32,15 +34,16 @@ CEF_PATH=~/.cache/herdr-app/cef CEF_DOWNLOAD_URL=https://cef-builds.spotifycdn.c
 
 ## Try it
 
-`just browser-dev` prints its scratch folder (`/tmp/hbd.*`) and writes
-`<scratch>/herdr-app`, which talks to that window only. The scratch home
-starts with no space; make one, then open a page beside it. Pages open
-over http, https or `about:blank` only (no `file:`), so serve the test
-pages first with `just browser-fixture` (in another terminal; it serves
-`scripts/` on `http://127.0.0.1:8765`):
+`just browser-dev` runs the app on its own home, `/tmp/hbd.dev`, kept
+between runs: spaces, pages and the browser profile survive a rebuild
+(`FRESH=1 just browser-dev` uses a new scratch home instead). A new home
+skips the welcome and opens a space with a terminal and the test page. While
+the app runs, `scripts/` is served on `http://127.0.0.1:8765` (pages open
+over http, https or `about:blank` only, no `file:`). `/tmp/hbd.dev/herdr-app`
+talks to that window only; run the commands below through it, not your
+installed `herdr-app`:
 
 ```sh
-herdr-app do space.new
 herdr-app do browser.open --url http://127.0.0.1:8765/browser-test-page.html
 herdr-app do browser.open --url example.com --place tab
 herdr-app ls
@@ -48,9 +51,6 @@ herdr-app do browser.navigate --browser b1 --url https://example.com/
 herdr-app do browser.devtools --browser b1
 herdr-app do browser.close --browser b2
 ```
-
-Run those through `<scratch>/herdr-app`, not your installed `herdr-app`,
-which drives your real window.
 
 `scripts/browser-test-page.html` has what to try by hand: typing with dead
 keys and an IME, a `<select>`, a long list to scroll, a right-click menu and
@@ -110,8 +110,7 @@ An agent in a Herdr terminal can drive a browser pane with
 [`agent-browser`](https://github.com/vercel-labs/agent-browser), once the
 person allows it for that pane:
 
-1. `just browser-fixture` (another terminal), then
-   `herdr-app do browser.open --profile agent --url http://127.0.0.1:8765/browser-fixture.html`.
+1. `herdr-app do browser.open --profile agent --url http://127.0.0.1:8765/browser-fixture.html`.
    `profile: "agent"` is a separate Chromium profile
    (`<app home>/browser/agent-profile`); only such a browser can be driven.
    Its header says "Test profile: don't sign into real accounts." Downloads
@@ -188,7 +187,7 @@ nothing the agent set (headers, overrides) stays. The reopen keeps the
 profile's storage (cookies, local storage).
 Every on, off and attach is a line in the app's log (closing or quitting
 logs the off even if no agent attached), never the token or port. The log
-is the app's stderr: `just browser-dev` keeps it in `<scratch>/app.log`, a
+is the app's stderr: `just browser-dev` keeps it in `/tmp/hbd.dev/app.log`, a
 file any process running as you can edit, and an app opened from Finder
 keeps none.
 

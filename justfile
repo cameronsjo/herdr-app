@@ -58,30 +58,24 @@ docs-check: build
 browser-build *args:
     bash scripts/browser-dev-bundle {{args}}
 
-# Runs the dev bundle on a scratch home and its own core, never your real
-# ones. `$root/herdr-app` talks to it, e.g. `$root/herdr-app do space.new`,
-# then `$root/herdr-app do browser.open --url <url>` (test pages: run
-# `just browser-fixture`, then http://127.0.0.1:8765/browser-fixture.html).
-# Quit it (cmd-q) to end; the scratch folder
-# stays for its logs.
-# Herdr with Chromium browser panes, on a scratch home (macOS)
+# Runs the dev bundle on its own home and core (/tmp/hbd.dev, kept between
+# runs; FRESH=1 for a new one), never your real ones, and serves the test
+# pages on 127.0.0.1:8765. `/tmp/hbd.dev/herdr-app do …` drives it. A new
+# home opens a terminal and the test page. Details: scripts/browser-dev-run.
+# Herdr with Chromium browser panes, on its own home (macOS)
 [macos]
 browser-dev *args:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    bash scripts/browser-dev-bundle {{args}}
-    # Short: hc's socket path inside it has a 103-byte limit.
-    root=$(mktemp -d /tmp/hbd.XXXXXX)
-    export HERDR_APP_HOME=$root/home XDG_STATE_HOME=$root/state HC_SESSION=hbd-${root##*.}
-    export HERDR_APP_ID=herdr-browser-dev HERDR_APP_NO_SOUND=1 HERDR_TELEMETRY=0
-    app="$PWD/target/browser-dev/Herdr Dev.app/Contents/MacOS/Herdr"
-    printf '#!/bin/bash\nHERDR_APP_HOME=%q exec %q "$@"\n' "$HERDR_APP_HOME" "$app" > "$root/herdr-app"
-    chmod +x "$root/herdr-app"
-    echo "scratch: $root (log: $root/app.log)"
-    echo "drive it: just browser-fixture (another terminal); $root/herdr-app do space.new; $root/herdr-app do browser.open --profile agent --url http://127.0.0.1:8765/browser-fixture.html"
-    # Stops only this run's core (HC_SESSION, XDG_STATE_HOME above).
-    trap 'hc server stop >/dev/null 2>&1 || true' EXIT
-    "$app" 2>&1 | tee "$root/app.log"
+    bash scripts/browser-dev-run {{args}}
+
+# Quits the running dev app, rebuilds, and starts it again in the background
+[macos]
+browser-relaunch *args:
+    bash scripts/browser-dev-run --relaunch {{args}}
+
+# Quits the dev app and stops its core
+[macos]
+browser-stop:
+    bash scripts/browser-dev-run --stop
 
 # Serves scripts/ on http://127.0.0.1:8765 for browser panes (they open
 # http, https and about:blank only): open
