@@ -119,8 +119,19 @@ Two directions keep Chromium out of Herdr entirely:
 - **The system web view:** WKWebView on macOS, WebView2 on Windows,
   WebKitGTK on Linux. The OS vendor owns and patches the engine, and it
   adds nothing to the app. WebView2 speaks CDP; on macOS and Linux agent
-  control needs a small translator from agent-browser's commands to the web
-  view's own calls (being prototyped now).
+  control needs a small translator from the CDP calls agent-browser makes
+  to the web view's own calls. A spike tested that on macOS: agent-browser
+  0.39.1 drove a WKWebView through a translator of about 475 lines (Swift,
+  plus JavaScript in an isolated content world) behind the same provider
+  path Herdr uses. On the test form, `open`, `snapshot -i`, `fill`,
+  `select`, `check`, `click`, `get`, `eval` and `screenshot` worked, 57 of
+  59 commands in one run, with trusted (`isTrusted`) input even with the
+  window hidden. Not yet shown: real sites (the accessibility tree is built
+  in JavaScript and covers a subset of roles), running inside Herdr's
+  window rather than a standalone app, network capture (WebKit has no
+  per-request API for it) and phone/tablet emulation beyond the viewport
+  size. People debug pages with Safari's Web Inspector instead of Chrome's
+  DevTools.
 - **A separate browser app** whose page Herdr shows in a block. It runs in
   its own process, under its own signature and updates; Herdr never loads
   Chromium. Herdr would need an "external surface" block (the app's frames
@@ -128,7 +139,9 @@ Two directions keep Chromium out of Herdr entirely:
 
 Either way the core asks shrink to the two engine-neutral hooks above: a
 block that shows a view, and the overlay cover. The question for Can is
-which engine stance he'd accept, not whether Herdr ships Chromium.
+which engine stance he'd accept, not whether Herdr ships Chromium. Of the
+options, only the system web view leaves Herdr no engine to own and adds
+nothing to the download, and the spike shows agents can drive it.
 
 ## The browser bar and the commands
 
