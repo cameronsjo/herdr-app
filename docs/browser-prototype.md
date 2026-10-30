@@ -94,7 +94,10 @@ the consent reason above: the native dialog, the per-page token proxy
 (`src/browser/proxy.rs`, `src/browser/agent.rs`, about 2,100 lines) and the
 provider that `agent-browser` calls. The rest stands without it.
 
-Later, and mod-shaped where possible: a URL bar, browser tabs, docked
+The pane header's browser bar (back, forward, reload, the address,
+DevTools) is a mod, `defaults/mods/pane/browser.js`: zero core lines.
+
+Later, and mod-shaped where possible: browser tabs, docked
 DevTools (today `browser.devtools` opens CEF's own window), design mode
 (pick an element and send it to the agent), a clear-data command, Linux and
 Windows.
