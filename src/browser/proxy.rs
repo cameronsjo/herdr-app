@@ -27,6 +27,42 @@ const MAX_QUEUED: usize = 1024;
 const MAX_QUEUED_BYTES: usize = 32 << 20;
 /// A write the agent doesn't take within this ends its connection.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Connections not yet past the token check, each a thread for up to 2 s
+/// (`peek_head`). Any local process can connect to loopback, so past this
+/// many a new one is closed at once: a flood can't use up the app's threads
+/// or files. Past the check there is at most one per live token (409).
+const MAX_UNCHECKED: usize = 16;
+static UNCHECKED: Slots = Slots::new(MAX_UNCHECKED);
+
+/// A fixed number of slots, each held by a guard until it drops.
+struct Slots {
+    used: AtomicUsize,
+    max: usize,
+}
+
+struct Slot<'a>(&'a Slots);
+
+impl Slots {
+    const fn new(max: usize) -> Self {
+        Slots { used: AtomicUsize::new(0), max }
+    }
+
+    fn take(&self) -> Option<Slot<'_>> {
+        self.used.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| (n < self.max).then_some(n + 1)).ok().map(|_| Slot(self))
+    }
+}
+
+impl Drop for Slot<'_> {
+    fn drop(&mut self) {
+        self.0.used.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// How long the accept loop waits after its `n`th error in a row (out of
+/// files, say): 10 ms, doubling, at most 1 s, so it never spins.
+fn backoff(n: u32) -> Duration {
+    Duration::from_millis(10u64.saturating_mul(1 << n.saturating_sub(1).min(7))).min(Duration::from_secs(1))
+}
 
 struct Conn {
     id: u64,
@@ -72,6 +108,9 @@ struct Hub {
     jobs: VecDeque<Job>,
     /// Connections whose thread still runs.
     serving: HashSet<u64>,
+    /// Browsers with agent access on (the registry's switch, mirrored so a
+    /// close or quit logs the off of a browser no agent attached to).
+    access_on: HashSet<String>,
 }
 
 static HUB: OnceLock<Mutex<Hub>> = OnceLock::new();
@@ -92,6 +131,20 @@ impl Hub {
     fn end_agent(&mut self, browser: &str) -> bool {
         let token = self.tokens.revoke(browser);
         self.end_conn(browser) || token
+    }
+
+    /// Quit: every token, connection and access switch ends. Returns each
+    /// browser that had one, so each gets its "agent access off" line.
+    fn quit(&mut self) -> Vec<String> {
+        let mut all = self.tokens.browsers();
+        all.extend(self.conns.keys().cloned());
+        all.extend(self.access_on.drain());
+        all.sort();
+        all.dedup();
+        for b in &all {
+            self.end_agent(b);
+        }
+        all
     }
 }
 
@@ -126,14 +179,29 @@ pub fn revoke(browser: &str) -> bool {
     live
 }
 
-/// Quit: every token and connection ends. Returns the browsers that had one.
+/// Quit: every token and connection ends. Returns the browsers that had
+/// one or had access on.
 pub fn revoke_all() -> Vec<String> {
-    let mut live = hub().tokens.browsers();
-    live.extend(hub().conns.keys().cloned());
-    live.sort();
-    live.dedup();
-    live.retain(|b| revoke(b));
-    live
+    let all = hub().quit();
+    runtime::wake();
+    all
+}
+
+/// The person turned agent access on or off for `browser`.
+pub fn set_access(browser: &str, on: bool) {
+    let mut h = hub();
+    if on {
+        h.access_on.insert(browser.to_owned());
+    } else {
+        h.access_on.remove(browser);
+    }
+}
+
+/// `browser` closed: its token and connection end. True when access was
+/// on or something was live (the caller logs the off).
+pub fn close(browser: &str) -> bool {
+    let was_on = hub().access_on.remove(browser);
+    revoke(browser) || was_on
 }
 
 /// The page's committed main-frame url changed (runtime.rs, `on_address_change`).
@@ -190,8 +258,26 @@ fn listen() -> Result<u16, String> {
     std::thread::Builder::new()
         .name("herdr-agent-proxy".into())
         .spawn(move || {
-            for stream in listener.incoming().flatten() {
-                let _ = std::thread::Builder::new().name("herdr-agent-conn".into()).spawn(move || serve(stream, port));
+            let mut errors = 0u32;
+            for stream in listener.incoming() {
+                match stream {
+                    Ok(stream) => {
+                        errors = 0;
+                        // Past the cap the connection closes here, unread.
+                        let Some(slot) = UNCHECKED.take() else {
+                            tracing::debug!("browser: refused an agent connection (too many waiting)");
+                            continue;
+                        };
+                        let _ = std::thread::Builder::new().name("herdr-agent-conn".into()).spawn(move || serve(stream, port, slot));
+                    }
+                    Err(e) => {
+                        errors = errors.saturating_add(1);
+                        if errors == 1 {
+                            tracing::warn!("browser: the agent socket can't accept a connection: {e}");
+                        }
+                        std::thread::sleep(backoff(errors));
+                    }
+                }
             }
         })
         .map_err(|e| format!("cannot start the agent socket: {e}"))?;
@@ -257,7 +343,43 @@ fn refuse(mut stream: TcpStream, code: u16) {
     tracing::debug!("browser: refused an agent connection ({code})");
 }
 
-fn serve(stream: TcpStream, port: u16) {
+/// A connection's end, however its thread ends (a panic too): before the
+/// handshake finished only the connection goes; after it, the agent's own
+/// end also ends its token and resets the page, unless a revoke, replace or
+/// full queue ended it first (they did both on their side).
+struct Ending {
+    browser: String,
+    id: u64,
+    open: bool,
+}
+
+impl Drop for Ending {
+    fn drop(&mut self) {
+        let own = {
+            let mut h = hub();
+            h.serving.remove(&self.id);
+            match h.conns.get(&self.browser) {
+                Some(c) if c.id == self.id && self.open => h.end_agent(&self.browser),
+                Some(c) if c.id == self.id => {
+                    h.conns.remove(&self.browser);
+                    false
+                }
+                _ => false,
+            }
+        };
+        if own {
+            runtime::wake();
+        }
+        if std::thread::panicking() {
+            tracing::error!("browser: the agent connection to {} stopped on an error in Herdr", self.browser);
+        }
+        if self.open {
+            tracing::info!("browser: the agent connection to {} ended", self.browser);
+        }
+    }
+}
+
+fn serve(stream: TcpStream, port: u16, slot: Slot<'static>) {
     let _ = stream.set_read_timeout(Some(Duration::from_millis(50)));
     let _ = stream.set_write_timeout(Some(WRITE_TIMEOUT));
     let Some(head) = peek_head(&stream) else { return };
@@ -280,19 +402,13 @@ fn serve(stream: TcpStream, port: u16) {
         h.serving.insert(id);
         (browser, id, rx, queued)
     };
+    // Past the token check: the slot is free for the next connection.
+    drop(slot);
+    let mut ending = Ending { browser: browser.clone(), id, open: false };
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
     let config = WebSocketConfig::default().max_message_size(Some(agent::MAX_FRAME)).max_frame_size(Some(agent::MAX_FRAME));
-    let mut ws = match tungstenite::accept_with_config(stream, Some(config)) {
-        Ok(ws) => ws,
-        Err(_) => {
-            let mut h = hub();
-            if h.conns.get(&browser).is_some_and(|c| c.id == id) {
-                h.conns.remove(&browser);
-            }
-            h.serving.remove(&id);
-            return;
-        }
-    };
+    let Ok(mut ws) = tungstenite::accept_with_config(stream, Some(config)) else { return };
+    ending.open = true;
     let _ = ws.get_mut().set_read_timeout(Some(Duration::from_millis(15)));
     tracing::info!("browser: an agent connected to {browser}");
     'conn: loop {
@@ -327,22 +443,19 @@ fn serve(stream: TcpStream, port: u16) {
             break;
         }
     }
-    // The agent's own end (it closed, or stopped reading): its token ends
-    // too and the page resets. Any other end (revoke, replace, a full
-    // queue) did both already, on the side that ended it.
-    let own = {
-        let mut h = hub();
-        h.serving.remove(&id);
-        h.conns.get(&browser).is_some_and(|c| c.id == id) && h.end_agent(&browser)
-    };
-    if own {
-        runtime::wake();
-    }
-    tracing::info!("browser: the agent connection to {browser} ended");
+    // `ending` drops here: the agent's own end (it closed, or stopped
+    // reading) ends its token too and the page resets.
 }
+
+/// Test only: an agent message that panics the connection's thread, to
+/// prove `Ending` still ends the token and resets the page.
+#[cfg(test)]
+const TEST_PANIC: &str = "herdr-test: panic here";
 
 /// One agent message: queued for the page, or an answer straight back.
 fn from_agent(browser: &str, conn: u64, text: &str) -> Option<String> {
+    #[cfg(test)]
+    assert!(text != TEST_PANIC, "test: a panic on the agent connection's thread");
     let method = tracing::enabled!(tracing::Level::DEBUG)
         .then(|| serde_json::from_str::<Value>(text).ok()?.get("method")?.as_str().map(str::to_owned))
         .flatten();
@@ -458,6 +571,76 @@ mod tests {
         assert!(wait(Duration::from_secs(1), || !hub().serving.contains(&id)), "the connection's thread is still stuck writing");
         assert_eq!(resets("t-revoke"), 1, "one reset per connection");
         assert_eq!(connect(&url).err(), Some(403));
+    }
+
+    /// The next text message from the page side of `ws`, skipping nothing.
+    fn answer(ws: &mut WebSocket<TcpStream>) -> Value {
+        ws.get_mut().set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        match ws.read().unwrap() {
+            Message::Text(t) => serde_json::from_str(&t).unwrap(),
+            other => panic!("not text: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn malformed_params_get_an_error_and_the_connection_stays() {
+        let url = attach("t-params").unwrap();
+        set_url("t-params", "http://127.0.0.1:8765/browser-fixture.html");
+        let mut ws = connect(&url).unwrap();
+        ws.send(Message::text(r#"{"id":3,"method":"Target.setAutoAttach","params":[]}"#)).unwrap();
+        assert_eq!(answer(&mut ws), serde_json::json!({ "id": 3, "error": { "code": -32602, "message": "herdr: params must be an object" } }));
+        assert!(connected("t-params"), "the connection ended on a malformed message");
+        assert_eq!(resets("t-params"), 0);
+        drop(ws);
+        assert!(wait(Duration::from_secs(3), || !connected("t-params")));
+        assert_eq!(resets("t-params"), 1);
+    }
+
+    #[test]
+    fn a_panic_on_the_connections_thread_still_ends_its_token_and_resets_the_page() {
+        let url = attach("t-panic").unwrap();
+        let mut ws = connect(&url).unwrap();
+        ws.send(Message::text(TEST_PANIC)).unwrap();
+        assert!(wait(Duration::from_secs(3), || !connected("t-panic")), "the connection outlived its thread");
+        assert_eq!(resets("t-panic"), 1);
+        assert_eq!(connect(&url).err(), Some(403), "the token outlived its connection's thread");
+    }
+
+    #[test]
+    fn waiting_connections_past_the_cap_get_no_slot_until_one_frees() {
+        let slots = Slots::new(2);
+        let (a, b) = (slots.take(), slots.take());
+        assert!(a.is_some() && b.is_some());
+        assert!(slots.take().is_none());
+        drop(a);
+        assert!(slots.take().is_some());
+        drop(b);
+        assert_eq!(slots.used.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn accept_errors_back_off_up_to_a_second() {
+        assert_eq!(backoff(1), Duration::from_millis(10));
+        assert_eq!(backoff(2), Duration::from_millis(20));
+        assert_eq!(backoff(7), Duration::from_millis(640));
+        assert_eq!(backoff(8), Duration::from_secs(1));
+        assert_eq!(backoff(u32::MAX), Duration::from_secs(1));
+        assert!(backoff(0) > Duration::ZERO);
+    }
+
+    #[test]
+    fn close_and_quit_report_access_that_never_had_a_token() {
+        set_access("t-close", true);
+        assert!(close("t-close"), "access was on, with no agent");
+        assert!(!close("t-close"));
+        set_access("t-close2", true);
+        set_access("t-close2", false);
+        assert!(!close("t-close2"));
+        let mut h = Hub::default();
+        h.access_on.insert("q1".into());
+        h.tokens.issue("q2", [7; 32]);
+        assert_eq!(h.quit(), vec!["q1".to_owned(), "q2".to_owned()]);
+        assert!(h.access_on.is_empty() && h.tokens.browsers().is_empty());
     }
 
     #[test]

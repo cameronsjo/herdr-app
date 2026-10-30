@@ -23,7 +23,7 @@ use objc2_foundation::{NSPoint, NSRect, NSSize};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use super::keys::{self, Native, Press};
-use super::{Rect, Responder, runtime};
+use super::{AllowGuard, Rect, Responder, runtime};
 
 struct Container {
     view: Retained<NSView>,
@@ -52,6 +52,8 @@ thread_local! {
     /// The page the window last gave the keyboard (inner None: Herdr);
     /// None until it first decided. CEF's focus requests are checked against it.
     static WANTED: RefCell<Option<Option<String>>> = const { RefCell::new(None) };
+    /// The agent access buttons' input protection (`super::AllowGuard`).
+    static ALLOW: RefCell<AllowGuard> = RefCell::new(AllowGuard::default());
 }
 
 /// How long after a press in a page CEF's "got focus" still counts as that click.
@@ -101,6 +103,18 @@ fn rect(bounds: Bounds<Pixels>) -> Rect {
 /// left): a page it overlaps hides at the frame's end (`end_frame`).
 pub fn cover(label: &str, bounds: Bounds<Pixels>) {
     COVERS.with_borrow_mut(|c| c.push((label.to_owned(), rect(bounds))));
+}
+
+/// An agent access button painted this frame over these bounds, in block
+/// `node`; `sets`: what a click on it sets. `end_frame` checks it against
+/// the overlays painted after it.
+pub fn access_button(node: &str, sets: bool, bounds: Bounds<Pixels>) {
+    ALLOW.with_borrow_mut(|g| g.painted(node, sets, rect(bounds)));
+}
+
+/// Whether a click on `node`'s access button counts (`AllowGuard::may_click`).
+pub fn may_click(node: &str, sets: bool, click_count: usize) -> bool {
+    ALLOW.with_borrow(|g| g.may_click(node, sets, click_count, Instant::now()))
 }
 
 /// The pages hidden under an overlay now: they can't have the keyboard.
@@ -153,6 +167,7 @@ pub fn place(id: &str, bounds: Bounds<Pixels>, window: &Window) {
 /// covered pages changes, the window decides again who has the keyboard.
 pub fn end_frame(window: &Window) {
     let covers = COVERS.with_borrow_mut(std::mem::take);
+    ALLOW.with_borrow_mut(|g| g.end_frame(&covers, window.is_window_active(), Instant::now()));
     let holder = match responder(window) {
         Responder::Page(id) => Some(id),
         _ => None,

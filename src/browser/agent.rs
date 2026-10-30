@@ -15,7 +15,7 @@
 
 use serde_json::{Map, Value, json};
 
-pub use super::{Source, not_in_herdr};
+pub use super::{Source, not_in_herdr, without_query};
 use std::collections::HashMap;
 
 pub const PROTOCOL: &str = "agent-browser.plugin.v1";
@@ -59,12 +59,6 @@ pub fn loggable(url: &str) -> String {
         None => url,
     };
     if url.len() <= 80 { url } else { format!("{}…", &url[..url.floor_char_boundary(77)]) }
-}
-
-/// The url without its query and fragment (`herdr-app ls` for browsers
-/// agents can't drive: OAuth codes and magic links stay out of reach).
-pub fn without_query(url: &str) -> String {
-    url.split(['?', '#']).next().unwrap_or_default().to_owned()
 }
 
 /// Whether a popup (`window.open`, a target link) may navigate the pane: its
@@ -390,6 +384,15 @@ impl Link {
             let scheme = page_url.split(':').next().unwrap_or_default();
             return refuse(&format!("herdr: the page is at {scheme}:, not an http, https or about:blank page: navigate it first"));
         }
+        // Every check below reads (and setAutoAttach writes) params as an
+        // object: anything else is an error answer, never a panic.
+        match msg.get("params") {
+            None | Some(Value::Null) => {
+                msg.insert("params".into(), json!({}));
+            }
+            Some(Value::Object(_)) => {}
+            Some(_) => return FromAgent::Reply(error(&id, session.as_deref(), -32602, "herdr: params must be an object")),
+        }
         let params = msg.entry("params").or_insert_with(|| json!({}));
         if let Err(m) = self.check_params(&method, params) {
             return refuse(&m);
@@ -486,14 +489,16 @@ impl Link {
 }
 
 /// Network events carry `Cookie`/`Set-Cookie` values, HttpOnly ones
-/// included: they never reach the agent.
+/// included, and `Authorization`/`Proxy-Authorization` the network stack
+/// adds from its HTTP-auth cache (page script can't read those): none of
+/// them reach the agent.
 fn strip_cookies(p: &mut Map<String, Value>) {
     for key in ["associatedCookies", "blockedCookies", "exemptedCookies", "headersText"] {
         p.remove(key);
     }
     let clean = |h: Option<&mut Value>| {
         if let Some(Value::Object(h)) = h {
-            h.retain(|k, _| !k.eq_ignore_ascii_case("cookie") && !k.eq_ignore_ascii_case("set-cookie"));
+            h.retain(|k, _| !["cookie", "set-cookie", "authorization", "proxy-authorization"].iter().any(|s| k.eq_ignore_ascii_case(s)));
         }
     };
     clean(p.get_mut("headers"));
@@ -517,6 +522,15 @@ fn error(id: &Value, session: Option<&str>, code: i64, message: &str) -> String 
 
 // ---- the provider (agent-browser's plugin) ------------------------------------------
 
+/// agent-browser's daemon idle exit for Herdr's terminals, in ms (its own
+/// default is 60 minutes). While the daemon lives, it runs its own stream
+/// server: a loopback websocket with no token that relays input to the page
+/// it drives (upstream code; there is no switch to turn it off). A daemon
+/// whose agent stopped sending commands exits after this, which ends its
+/// connection to Herdr and so its token; the next command starts a new one.
+/// Input sent through that stream server also keeps the daemon alive.
+pub const IDLE_TIMEOUT_MS: &str = "300000";
+
 /// The environment `run()` gives local terminals: agent-browser uses Herdr
 /// as its browser provider. Herdr's plugin entry comes first and once,
 /// before any list the app inherited; the socket is pinned in its args, so
@@ -529,6 +543,7 @@ pub fn plugin_env(exe: &str, socket: &str, inherited: Option<&str>, session: &st
         ("AGENT_BROWSER_PROVIDER".into(), PLUGIN.into()),
         ("AGENT_BROWSER_PLUGINS".into(), Value::Array(plugins).to_string()),
         ("AGENT_BROWSER_SESSION".into(), session.into()),
+        ("AGENT_BROWSER_IDLE_TIMEOUT_MS".into(), IDLE_TIMEOUT_MS.into()),
     ]
 }
 
@@ -1004,6 +1019,25 @@ mod tests {
         assert_eq!(out["params"]["response"]["requestHeaders"], json!({}));
     }
 
+    /// The network stack adds `Authorization` from its HTTP-auth cache;
+    /// page script can't read it, so the agent doesn't get it either.
+    #[test]
+    fn credential_headers_are_stripped_from_network_events() {
+        let mut link = Link::default();
+        let ev = json!({ "method": "Network.requestWillBeSentExtraInfo", "params": {
+            "requestId": "1", "headers": { "Authorization": "Basic YTpi", "proxy-authorization": "Basic Yzpk", "accept": "*/*" } } });
+        let out: Value = serde_json::from_str(&link.from_page(ev.to_string().as_bytes()).unwrap()).unwrap();
+        assert_eq!(out["params"]["headers"], json!({ "accept": "*/*" }));
+        let ev = json!({ "method": "Network.responseReceived", "params": { "response": {
+            "headers": { "www-authenticate": "Basic" }, "requestHeaders": { "AUTHORIZATION": "Bearer t", "x": "y" } } } });
+        let out: Value = serde_json::from_str(&link.from_page(ev.to_string().as_bytes()).unwrap()).unwrap();
+        assert_eq!(out["params"]["response"]["requestHeaders"], json!({ "x": "y" }));
+        assert_eq!(out["params"]["response"]["headers"], json!({ "www-authenticate": "Basic" }));
+        let ev = json!({ "method": "Network.requestWillBeSent", "params": { "request": { "url": "https://a/", "headers": { "Proxy-Authorization": "Basic e" } } } });
+        let out: Value = serde_json::from_str(&link.from_page(ev.to_string().as_bytes()).unwrap()).unwrap();
+        assert_eq!(out["params"]["request"]["headers"], json!({}));
+    }
+
     #[test]
     fn malformed_messages_get_an_error_not_a_forward() {
         let mut link = Link::default();
@@ -1011,6 +1045,31 @@ mod tests {
         assert!(refused(&link.from_agent("not json", &mut next, PAGE)).is_some());
         assert!(refused(&link.from_agent("{\"id\":1}", &mut next, PAGE)).is_some());
         assert!(refused(&link.from_agent("{\"method\":\"Page.enable\"}", &mut next, PAGE)).is_some());
+    }
+
+    /// `params` that isn't an object (or null) is an error answer, never a
+    /// panic: a panic on the connection's thread skipped its cleanup, so the
+    /// token stayed live and the page didn't reset (round 3).
+    #[test]
+    fn params_that_are_not_an_object_get_an_error_not_a_panic() {
+        for method in ["Target.setAutoAttach", "Page.navigate", "Input.dispatchKeyEvent", "Page.printToPDF", "Runtime.evaluate"] {
+            for params in [json!([]), json!("x"), json!(1), json!(true), json!([{ "flatten": false }])] {
+                let mut link = Link::default();
+                let mut next = 0;
+                let msg = json!({ "id": 7, "method": method, "params": params });
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| link.from_agent(&msg.to_string(), &mut next, PAGE)));
+                let Ok(FromAgent::Reply(text)) = r else { panic!("{method} with params {params} panicked or was forwarded") };
+                let out: Value = serde_json::from_str(&text).unwrap();
+                assert_eq!(out, json!({ "id": 7, "error": { "code": -32602, "message": "herdr: params must be an object" } }));
+                assert!(link.pending.is_empty(), "nothing is in flight");
+            }
+        }
+        // null means none: forwarded, and setAutoAttach still gets flatten.
+        let mut link = Link::default();
+        let mut next = 0;
+        let r = send(&mut link, &mut next, json!({ "id": 1, "method": "Target.setAutoAttach", "params": null }));
+        let FromAgent::Forward { message, .. } = r else { panic!("null params refused: {:?}", refused(&r)) };
+        assert_eq!(serde_json::from_str::<Value>(&message).unwrap()["params"], json!({ "flatten": true }));
     }
 
     // ---- the provider (agent-browser's plugin side)
@@ -1090,5 +1149,14 @@ mod tests {
         // Nothing inherited, or garbage.
         let env = plugin_env("/Apps/Herdr", "/s", Some("not json"), "s");
         assert_eq!(serde_json::from_str::<Value>(&env[1].1).unwrap().as_array().unwrap().len(), 1);
+    }
+
+    /// agent-browser's daemon runs an unauthenticated stream server on
+    /// loopback for as long as it lives (upstream; no opt-out). Its own
+    /// default idle exit is 60 minutes; Herdr's terminals ask for 5.
+    #[test]
+    fn terminals_ask_agent_browser_to_exit_after_five_idle_minutes() {
+        let env = plugin_env("/Apps/Herdr", "/s", None, "s");
+        assert_eq!(env.iter().find(|(k, _)| k == "AGENT_BROWSER_IDLE_TIMEOUT_MS").map(|(_, v)| v.as_str()), Some("300000"));
     }
 }

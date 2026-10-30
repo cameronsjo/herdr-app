@@ -1585,7 +1585,7 @@ impl AppWindow {
             (true, None) => "Agent access ON".to_owned(),
             (true, Some(t)) => format!("Agent access ON · last: terminal {t} (claimed)"),
         };
-        let b = browser.to_owned();
+        let (b, node_id) = (browser.to_owned(), node.to_owned());
         let (label, sets) = crate::browser::access_button(on);
         div()
             .flex_none()
@@ -1612,10 +1612,21 @@ impl AppWindow {
                     .bg(c("accent"))
                     .text_color(c("accent_foreground"))
                     .cursor_pointer()
+                    .relative()
                     .child(label)
+                    // Reports where it painted, for the input protection below.
+                    .children(self.browsers.access_button(node, sets))
                     // A person's click: the one path that turns agent access on.
                     // It does what the label said, not a toggle of the live state.
-                    .on_click(cx.listener(move |this, _, window, cx| {
+                    // "Allow agent" counts only once it has shown unchanged and
+                    // uncovered for half a second, and never as a double click's
+                    // second click (`browser::AllowGuard`); "Stop agent" at once.
+                    .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
+                        if !this.browsers.may_click(&node_id, sets, ev.click_count()) {
+                            tracing::info!("browser: ignored an Allow agent click on {b} (it changed or was covered under 500 ms ago, or a double click)");
+                            cx.notify();
+                            return;
+                        }
                         let r = this.set_agent_access(&b, sets, crate::browser::Source::PaneControl);
                         if let Err(e) = r {
                             let spec = json!({"kind":"toast", "notification":{"title":"agent access","body":e,"level":"error"}});
@@ -1873,6 +1884,10 @@ impl AppWindow {
                     }
                     // A browser pane: its page, no terminal.
                     if let Some(Content::Browser { browser, url, .. }) = p.content() {
+                        // A browser that isn't open: its saved url, without
+                        // query or fragment (codes and magic links stay in the
+                        // tab document only; an open one's comes from `info`).
+                        let url = &crate::browser::without_query(url);
                         let info = self.browsers.info(browser, focused);
                         let field = |k: &str| info.as_ref().and_then(|i| i.get(k)).and_then(Value::as_str).filter(|v| !v.is_empty()).map(str::to_owned);
                         let title = field("title").or_else(|| field("url")).unwrap_or_else(|| url.clone());
@@ -3872,10 +3887,7 @@ impl AppWindow {
                         let terms: Vec<Value> = c.root.terminals().iter().filter_map(|n| Some(terminal(&n.id, n.terminal()?))).collect();
                         let mut tab = json!({ "id": c.id, "name": Model::tab_name(p, c), "active": Some(&c.id) == active.as_ref(), "settled": c.settled.is_some(), "terminals": terms });
                         let browsers: Vec<Value> = c.root.walk().into_iter().filter_map(|n| match n.content() {
-                            Some(Content::Browser { browser, url, .. }) => Some(self.browsers.info(browser, false).map_or_else(
-                                || json!({ "browser": browser, "pane": n.id, "url": url }),
-                                |i| json!({ "browser": browser, "pane": n.id, "url": i["url"], "title": i["title"] }),
-                            )),
+                            Some(Content::Browser { browser, url, .. }) => Some(browser_status(self.browsers.info(browser, false), browser, &n.id, url)),
                             _ => None,
                         }).collect();
                         if !browsers.is_empty() {
@@ -4576,6 +4588,17 @@ impl AppWindow {
     }
 }
 
+/// A browser block in `herdr-app status`: the open browser's url and title
+/// (`info`, which keeps the query only while agent access is on), or, when
+/// it isn't open, the tab document's url without query or fragment (codes
+/// and magic links stay in the tab document; restore needs them).
+fn browser_status(info: Option<Value>, browser: &str, pane: &str, saved_url: &str) -> Value {
+    match info {
+        Some(i) => json!({ "browser": browser, "pane": pane, "url": i["url"], "title": i["title"] }),
+        None => json!({ "browser": browser, "pane": pane, "url": crate::browser::without_query(saved_url) }),
+    }
+}
+
 /// A view drawn again only when it changed: a terminal's output then
 /// redraws that terminal, not every mod and pane in the window.
 pub(crate) fn cached<V: Render>(view: &Entity<V>) -> AnyElement {
@@ -4990,6 +5013,14 @@ impl Render for AppWindow {
 mod tests {
     use gpui::{div, point, px, size, Context, IntoElement, Render, TestAppContext, Window};
     use gpui::prelude::*;
+
+    #[test]
+    fn a_browser_block_that_isnt_open_shows_its_url_without_query() {
+        let saved = "https://example.test/cb?step=2&id=42#top";
+        assert_eq!(super::browser_status(None, "b1", "p1", saved), serde_json::json!({ "browser": "b1", "pane": "p1", "url": "https://example.test/cb" }));
+        let open = serde_json::json!({ "url": "https://example.test/cb?step=2", "title": "T" });
+        assert_eq!(super::browser_status(Some(open), "b1", "p1", saved)["url"], "https://example.test/cb?step=2");
+    }
 
     #[test]
     fn agent_commands_keep_arguments_out_of_shell_source() {

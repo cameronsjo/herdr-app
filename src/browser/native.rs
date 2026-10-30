@@ -86,7 +86,8 @@ impl Browsers {
     pub fn reconcile(&mut self, model: &Model, chrome: &Node, window: &mut Window, cx: &mut App) {
         let changes = self.registry.reconcile(&registry::blocks(model, chrome));
         for id in &changes.close {
-            if proxy::revoke(id) {
+            // Access on with no agent yet is logged off too.
+            if proxy::close(id) {
                 tracing::info!("browser: agent access off browser={id} by={}", Source::Close.label());
             }
             runtime::close(id);
@@ -203,6 +204,7 @@ impl Browsers {
             agent::needs_agent_profile(e.agent_profile).map_err(str::to_owned)?;
         }
         self.registry.set_access(browser, on);
+        proxy::set_access(browser, on);
         if !on {
             proxy::revoke(browser);
         }
@@ -248,6 +250,20 @@ impl Browsers {
     /// while painting, so a page under it hides (`label` names it in the log).
     pub fn cover(&self, label: String) -> Option<AnyElement> {
         Some(canvas(|_, _, _| {}, move |bounds, _, _, _| view::cover(&label, bounds)).absolute().size_full().into_any_element())
+    }
+
+    /// Goes inside an agent access button (absolute, its full size): reports
+    /// its bounds while painting, for its input protection.
+    pub fn access_button(&self, node: &str, sets: bool) -> Option<AnyElement> {
+        let node = node.to_owned();
+        Some(canvas(|_, _, _| {}, move |bounds, _, _, _| view::access_button(&node, sets, bounds)).absolute().size_full().into_any_element())
+    }
+
+    /// Whether a click on `node`'s access button counts: "Allow agent" only
+    /// after it showed unchanged and uncovered for `super::ALLOW_AFTER`, and
+    /// never a double click's second click; "Stop agent" always.
+    pub fn may_click(&self, node: &str, sets: bool, click_count: usize) -> bool {
+        view::may_click(node, sets, click_count)
     }
 
     pub fn set_bindings(&mut self, bindings: Vec<(String, String)>) {
