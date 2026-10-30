@@ -112,7 +112,11 @@ person allows it for that pane:
    (`<app home>/browser/agent-profile`); only such a browser can be driven.
    Its header says "Test profile: don't sign into real accounts." Downloads
    are refused in it.
-2. Click **Allow agent** in that header. Nothing else turns agent access on:
+2. Click **Allow agent** in that header. It takes a click only after it
+   has shown for half a second with that label, nothing over it and the
+   window active, and never the second click of a double click, so a
+   double click on **Stop agent** can't turn access back on.
+   Nothing else turns agent access on:
    `herdr-app do browser.agent_access --on true` and a mod's `run()` are
    refused, because an agent can reach both. Turning it off works from
    anywhere (the header's **Stop agent**, or
@@ -135,10 +139,14 @@ browser in its tab, else the one in its space the person focused last) and
 gets `ws://127.0.0.1:<port>/<token>`: a 256-bit token for that one page.
 Herdr's proxy passes CDP messages from that socket to the page's in-process
 DevTools session through an allowlist (`src/browser/agent.rs`): no
-`Target.attachToBrowserTarget`, no cookie reads, no file inputs, no
-downloads; cookie headers are stripped from network events. It refuses any
-upgrade with an `Origin` header or a `Host` other than `127.0.0.1:<port>`,
-and answers anything but an upgrade with a bare 404. Turning access off, a
+`Target.attachToBrowserTarget`, no CDP cookie methods, no file inputs, no
+downloads; `Cookie`, `Set-Cookie`, `Authorization` and
+`Proxy-Authorization` headers are stripped from network events. Script in
+the page is allowed, so it still reads the page's non-HttpOnly cookies
+(`document.cookie`), and `Page.navigate` takes the pane to any http or
+https site. The proxy refuses any upgrade with an `Origin` header or a
+`Host` other than `127.0.0.1:<port>` or `localhost:<port>`, and answers
+anything but an upgrade with a bare 404. Turning access off, a
 new attach for the same page, closing the browser and quitting end the
 token and the connection: Herdr shuts the socket itself, so an agent that
 stopped reading can't hold it open. A connection's own end (the agent
@@ -147,7 +155,30 @@ closed it, a write it didn't take in 5 s, or more than 1024 messages or
 for a new one. Whenever a connection ends, the page reopens at its url so
 nothing the agent set (headers, overrides) stays. The reopen keeps the
 profile's storage (cookies, local storage).
-Every on, off and attach is in the log, never the token or port.
+Every on, off and attach is a line in the app's log (closing or quitting
+logs the off even if no agent attached), never the token or port. The log
+is the app's stderr: `just browser-dev` keeps it in `<scratch>/app.log`, a
+file any process running as you can edit, and an app opened from Finder
+keeps none.
+
+agent-browser's own stream server: while an agent-browser session is
+attached to a pane, its daemon also runs a websocket server on
+`127.0.0.1` with no token. agent-browser 0.39.1 starts it for every
+session, with no setting to keep it from starting, and writes its port to
+`~/.agent-browser/<session>.stream` (`agent-browser stream disable`, run
+in that session, shuts it down until the daemon exits; the next daemon
+starts it again). It accepts connections with no
+`Origin` header, from `file://` pages, and from any `localhost`,
+`127.0.0.1` or `::1` origin, and it relays mouse, keyboard and touch input
+and screencast frames through the daemon's connection to Herdr. So while a
+session is attached, any process on this machine, under any user, and
+any page served from `localhost` or opened from a file, in any browser,
+can watch the pane and click and type in it. Herdr can't change that code.
+Herdr's terminals set `AGENT_BROWSER_IDLE_TIMEOUT_MS=300000`, so a daemon
+whose agent stopped sending commands exits after 5 minutes (agent-browser's
+default is 60), which ends its connection and its token; input sent
+through the stream server also counts as activity and keeps the daemon
+alive. Turning access off ends the connection at once.
 
 agent-browser hides a provider's error text (`Plugin 'herdr' returned
 success=false`); `agent-browser plugin run herdr herdr.check` says why
@@ -165,14 +196,21 @@ shown):
 > Agent access is a consent switch for a cooperating agent, not a security
 > boundary against software running as you. While it is on, any process
 > running as your user can get the page's CDP token through Herdr's control
-> socket and act as you on whatever site that pane shows: run script in the
-> page, click, type, and read what the page shows. Any process running as
-> you can also read this profile's cookies from disk, because the prototype
-> encrypts them with Chromium's public test key (`--use-mock-keychain`).
-> Other users on the machine and web pages cannot reach the agent
-> connection: it needs a 256-bit token, accepts only loopback connections
-> without an `Origin` header, and ends when you turn access off, close the
-> browser, or quit. Use this browser only with test accounts, never your own.
+> socket and act as you on any http or https site it points that pane at:
+> run script in the page (which reads its non-HttpOnly cookies), click,
+> type, and read what the page shows. Any process running as you can also
+> read this profile's cookies from disk, because the prototype encrypts
+> them with Chromium's public test key (`--use-mock-keychain`). It can also
+> cover or recolor the access marker (a mod overlay, a theme edit), and if
+> your terminal app has macOS Accessibility permission, click **Allow
+> agent** itself. Herdr's own agent connection needs a 256-bit token and
+> accepts only loopback connections without an `Origin` header. But while
+> an agent-browser session is attached, agent-browser's own stream server
+> (a loopback websocket with no token, in agent-browser's code, not
+> Herdr's) lets any user on this machine, and any page served from
+> `localhost` or opened from a file in any browser, watch the pane and
+> click and type in it. Turning access off, closing the browser, or quitting
+> ends both. Use this browser only with test accounts, never your own.
 
 Signing: the dev bundle is ad hoc signed without the hardened runtime, so
 library validation is off (`DYLD_INSERT_LIBRARIES` works on the browser
