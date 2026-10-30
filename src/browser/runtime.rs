@@ -744,6 +744,24 @@ pub fn shutdown() {
     });
 }
 
+/// Comma-list switches Herdr adds one item to, keeping what is already there.
+const LIST_SWITCHES: [(&str, &str); 2] = [
+    // Chromium clones the whole app bundle on every launch for its updater;
+    // Herdr has its own updater.
+    ("disable-features", "MacAppCodeSignClone"),
+    // No WebAuthn (passkeys, security keys). CEF in a native parent view has
+    // no dialog host, so a passkey request would run with no UI until the
+    // site's timeout, and macOS passkeys need an Apple entitlement Herdr
+    // doesn't have. Without `PublicKeyCredential`, sites offer passwords
+    // instead. It is process-wide, so agent-profile pages never get it either.
+    ("disable-blink-features", "WebAuth"),
+];
+
+/// `existing` with `item` appended as a comma-list entry.
+fn with_item(existing: &str, item: &str) -> String {
+    if existing.is_empty() { item.to_string() } else { format!("{existing},{item}") }
+}
+
 fn registry_blank() -> &'static str {
     super::registry::BLANK
 }
@@ -771,16 +789,11 @@ wrap_app! {
             // touches the person's login keychain. Don't sign into real
             // accounts in this profile.
             command_line.append_switch(Some(&CefString::from("use-mock-keychain")));
-            // Chromium clones the whole app bundle on every launch for its
-            // updater (MacAppCodeSignClone); Herdr has its own updater.
-            let name = CefString::from("disable-features");
-            let existing = CefString::from(&command_line.switch_value(Some(&name))).to_string();
-            let features = if existing.is_empty() {
-                "MacAppCodeSignClone".to_string()
-            } else {
-                format!("{existing},MacAppCodeSignClone")
-            };
-            command_line.append_switch_with_value(Some(&name), Some(&CefString::from(features.as_str())));
+            for (switch, item) in LIST_SWITCHES {
+                let name = CefString::from(switch);
+                let existing = CefString::from(&command_line.switch_value(Some(&name))).to_string();
+                command_line.append_switch_with_value(Some(&name), Some(&CefString::from(with_item(&existing, item).as_str())));
+            }
         }
 
         fn browser_process_handler(&self) -> Option<BrowserProcessHandler> {
@@ -1126,5 +1139,19 @@ wrap_dev_tools_message_observer! {
                 tracing::info!("browser: agent access token for {} revoked: CEF's DevTools agent went away", super::log_safe(&self.id));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cef_starts_with_webauthn_off_and_keeps_other_switch_values() {
+        // Passkeys stay off until Herdr can show the system sheet itself.
+        assert!(LIST_SWITCHES.contains(&("disable-blink-features", "WebAuth")));
+        assert!(LIST_SWITCHES.contains(&("disable-features", "MacAppCodeSignClone")));
+        assert_eq!(with_item("", "WebAuth"), "WebAuth");
+        assert_eq!(with_item("Foo,Bar", "WebAuth"), "Foo,Bar,WebAuth");
     }
 }
