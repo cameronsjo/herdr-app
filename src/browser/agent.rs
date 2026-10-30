@@ -676,6 +676,21 @@ mod tests {
         }
     }
 
+    /// Fix round 2: the header's button acts on the state it was painted
+    /// with. A "Stop agent" left on screen after the socket turned access
+    /// off must still turn it off, never toggle the live state back on.
+    #[test]
+    fn the_access_button_does_what_its_label_says() {
+        use crate::browser::access_button;
+        assert_eq!(access_button(true), ("Stop agent", false));
+        assert_eq!(access_button(false), ("Allow agent", true));
+        // Whatever it shows, "Stop agent" only ever turns access off.
+        for shown in [true, false] {
+            let (label, sets) = access_button(shown);
+            assert_eq!(label == "Stop agent", !sets, "{label} sets {sets}");
+        }
+    }
+
     #[test]
     fn agent_access_needs_the_agent_profile() {
         assert_eq!(needs_agent_profile(false).unwrap_err(), "agent access needs a browser opened with profile \"agent\"");

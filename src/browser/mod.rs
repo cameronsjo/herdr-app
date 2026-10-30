@@ -193,6 +193,15 @@ impl Source {
     }
 }
 
+/// The access button in an agent browser's header: its label and what a
+/// click sets, both from the state it was painted with. The click acts on
+/// what the person saw: a "Stop agent" still on screen after a change it
+/// never showed (the socket turned access off) means off. Toggling the live
+/// state instead would turn access back on.
+pub fn access_button(shown_on: bool) -> (&'static str, bool) {
+    if shown_on { ("Stop agent", false) } else { ("Allow agent", true) }
+}
+
 #[cfg(all(debug_assertions, feature = "dev-agent-access"))]
 static DEV_SWITCH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 

@@ -1586,6 +1586,7 @@ impl AppWindow {
             (true, Some(t)) => format!("Agent access ON · last: terminal {t} (claimed)"),
         };
         let b = browser.to_owned();
+        let (label, sets) = crate::browser::access_button(on);
         div()
             .flex_none()
             .flex()
@@ -1611,11 +1612,11 @@ impl AppWindow {
                     .bg(c("accent"))
                     .text_color(c("accent_foreground"))
                     .cursor_pointer()
-                    .child(if on { "Stop agent" } else { "Allow agent" })
+                    .child(label)
                     // A person's click: the one path that turns agent access on.
+                    // It does what the label said, not a toggle of the live state.
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        let on = this.browsers.agent_state(&b).is_some_and(|(on, _)| on);
-                        let r = this.set_agent_access(&b, !on, crate::browser::Source::PaneControl);
+                        let r = this.set_agent_access(&b, sets, crate::browser::Source::PaneControl);
                         if let Err(e) = r {
                             let spec = json!({"kind":"toast", "notification":{"title":"agent access","body":e,"level":"error"}});
                             this.open_overlay(mods::new_overlay_id(), spec, window, cx);
@@ -3251,6 +3252,10 @@ impl AppWindow {
                     crate::browser::Source::Socket
                 };
                 let r = self.set_agent_access(&b, on, from);
+                // Not through sync (nothing else changed), but the header, the
+                // strip and the mods' data must show the new state at once.
+                self.publish(cx);
+                cx.notify();
                 return self.answer(r);
             }
             "browser.close" => {
@@ -3795,7 +3800,12 @@ impl AppWindow {
         // the socket answers this; it is no command, so no mod or key can.
         if let Some(attach) = cmd.get("attach") {
             return match self.attach_agent(attach) {
-                Ok(v) => v,
+                // The marker's "last: terminal tN" follows at once.
+                Ok(v) => {
+                    self.publish(cx);
+                    cx.notify();
+                    v
+                }
                 Err(e) => json!({ "error": e }),
             };
         }
