@@ -6,6 +6,9 @@
 #   browser-dev-run --relaunch [...]    rebuild, then quit the running one and run detached
 #   browser-dev-run --stop              quit the app and stop its core
 #
+# Bundle args go to browser-dev-bundle; --webkit runs the WKWebView engine's
+# bundle (target/browser-dev-webkit) instead of CEF's.
+#
 # The home (/tmp/hbd.dev) is kept between runs, so the welcome, spaces, pages
 # and the browser profile survive rebuilds. A new home starts with the welcome
 # and the update toast marked seen, and a space holding a terminal and the
@@ -26,7 +29,9 @@ esac
 if [ "${FRESH:-}" = 1 ]; then root=$(mktemp -d /tmp/hbd.XXXXXX); else root=/tmp/hbd.dev; fi
 export HERDR_APP_HOME=$root/home XDG_STATE_HOME=$root/state HC_SESSION=hbd-${root##*.}
 export HERDR_APP_ID=herdr-browser-dev HERDR_APP_NO_SOUND=1 HERDR_TELEMETRY=0
-app="$PWD/target/browser-dev/Herdr Dev.app/Contents/MacOS/Herdr"
+bundle=browser-dev
+for arg in "$@"; do [ "$arg" = --webkit ] && bundle=browser-dev-webkit; done
+app="$PWD/target/$bundle/Herdr Dev.app/Contents/MacOS/Herdr"
 cli=$root/herdr-app
 
 running() { [ -x "$cli" ] && "$cli" status >/dev/null 2>&1; }
