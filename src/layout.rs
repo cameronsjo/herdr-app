@@ -23,14 +23,16 @@ pub enum Content {
     /// screen) opens there again. `profile: "agent"`: a separate profile for
     /// test accounts; only such a browser can be driven by an agent.
     /// Saved as a mod block named [`BROWSER_MOD`], so a herdr-app without
-    /// browsers shows that one pane as a mod that didn't load and keeps it.
+    /// this prototype shows that one pane as a mod that didn't load and keeps it.
     Browser { browser: String, url: String, profile: Option<String> },
 }
 
-/// The mod name a browser block is saved under: `{ "mod": "browser",
+/// The mod name a browser block is saved under: `{ "mod": "browser-prototype",
 /// "props": { "browser": "b1", "url": "…", "profile"?: "agent" } }`. A mod
 /// block by this name whose props name a browser is a browser, not a mod.
-pub const BROWSER_MOD: &str = "browser";
+/// Not `browser`: Herdr's own browser mod will likely take that name, and
+/// neither should read the other's blocks.
+pub const BROWSER_MOD: &str = "browser-prototype";
 
 /// How a block is written in a layout file or a tab document. Every herdr-app
 /// that shares a core reads the whole document with this, and a block that
@@ -58,10 +60,6 @@ enum Saved {
     Agent {
         agent: String,
     },
-    /// The prototype's first browser block, `{ "browser": "b1", … }`: read,
-    /// never written.
-    // debt: reads layouts saved by earlier prototype builds only; drop it before any upstream PR (cameronsjo/herdr-app#4).
-    BrowserBlock(BrowserProps),
 }
 
 /// A browser block's fields, as a mod block's props.
@@ -84,7 +82,6 @@ impl From<Saved> for Content {
             },
             Saved::Context { tab, pane } => Content::Context { tab, pane },
             Saved::Agent { agent } => Content::Agent { agent },
-            Saved::BrowserBlock(BrowserProps { browser, url, profile }) => Content::Browser { browser, url, profile },
         }
     }
 }
@@ -105,7 +102,7 @@ impl From<Content> for Saved {
     }
 }
 
-/// A `browser` mod block's props, when they name a browser.
+/// A [`BROWSER_MOD`] block's props, when they name a browser.
 fn browser_props(name: &str, props: &Value) -> Option<BrowserProps> {
     if name != BROWSER_MOD {
         return None;
@@ -844,7 +841,7 @@ mod tests {
 
     #[test]
     fn browser_blocks_round_trip_as_panes() {
-        let json = r#"{ "id": "p1", "type": "block", "content": { "browser": "b1", "url": "https://example.com/" } }"#;
+        let json = r#"{ "id": "p1", "type": "block", "content": { "mod": "browser-prototype", "props": { "browser": "b1", "url": "https://example.com/" } } }"#;
         let n: Node = serde_json::from_str(json).unwrap();
         assert_eq!(n.content(), Some(&Content::Browser { browser: "b1".into(), url: "https://example.com/".into(), profile: None }));
         assert!(n.is_pane());
@@ -852,7 +849,7 @@ mod tests {
         let back: Node = serde_json::from_str(&serde_json::to_string(&n).unwrap()).unwrap();
         assert_eq!(back, n);
         // A block saved without a url still parses (it opens on a blank page).
-        let bare: Node = serde_json::from_str(r#"{ "id": "p2", "type": "block", "content": { "browser": "b2" } }"#).unwrap();
+        let bare: Node = serde_json::from_str(r#"{ "id": "p2", "type": "block", "content": { "mod": "browser-prototype", "props": { "browser": "b2" } } }"#).unwrap();
         assert_eq!(bare.content(), Some(&Content::Browser { browser: "b2".into(), url: String::new(), profile: None }));
         // The other kinds still parse as themselves.
         let t: Node = serde_json::from_str(r#"{ "id": "t", "type": "block", "content": { "terminal": "x" } }"#).unwrap();
@@ -860,29 +857,30 @@ mod tests {
     }
 
     #[test]
-    fn browser_blocks_are_saved_as_mod_blocks() {
+    fn browser_blocks_are_saved_under_a_name_herdr_s_own_browser_mod_wont_use() {
         let n = Node::block("p1", Content::Browser { browser: "b1".into(), url: "https://example.com/".into(), profile: Some("agent".into()) });
         let saved = serde_json::to_value(&n).unwrap();
-        // The shape a herdr-app without browsers reads as one mod pane.
+        // The shape a herdr-app without this prototype reads as one mod pane.
         assert_eq!(
             saved["content"],
-            serde_json::json!({ "mod": "browser", "props": { "browser": "b1", "url": "https://example.com/", "profile": "agent" } })
+            serde_json::json!({ "mod": "browser-prototype", "props": { "browser": "b1", "url": "https://example.com/", "profile": "agent" } })
         );
         assert_eq!(serde_json::from_value::<Node>(saved).unwrap(), n);
-        // The prototype's first shape still reads as a browser.
-        let old: Node = serde_json::from_str(r#"{ "id": "p1", "type": "block", "content": { "browser": "b1", "url": "https://example.com/", "profile": "agent" } }"#).unwrap();
-        assert_eq!(old, n);
-        // A `browser` mod block that names no browser is a mod, as before.
-        for props in [serde_json::json!(null), serde_json::json!({ "browser": "" }), serde_json::json!({ "url": "https://example.com/" })] {
+        // A `browser` mod block, however its props look, is a mod: a
+        // future official browser mod's blocks are never taken over.
+        for props in [serde_json::json!(null), serde_json::json!({ "browser": "b1", "url": "https://example.com/" })] {
             let c: Content = serde_json::from_value(serde_json::json!({ "mod": "browser", "props": props })).unwrap();
             assert_eq!(c, Content::Mod { name: "browser".into(), props: props.clone() }, "{props}");
         }
+        // A prototype block that names no browser is a mod by that name.
+        let c: Content = serde_json::from_value(serde_json::json!({ "mod": "browser-prototype", "props": { "browser": "" } })).unwrap();
+        assert!(matches!(c, Content::Mod { .. }));
     }
 
     #[test]
     fn a_browser_in_a_floating_block_never_fails_the_layout() {
         let json = r#"{ "id": "root", "type": "block", "content": {"agent": "focused"},
-          "floating": [ { "id": "f", "content": { "mod": "browser", "props": { "browser": "b1" } } },
+          "floating": [ { "id": "f", "content": { "mod": "browser-prototype", "props": { "browser": "b1" } } },
                         { "id": "g", "content": { "mod": "team" } } ] }"#;
         let n: Node = serde_json::from_str(json).unwrap();
         assert_eq!(n.floating.len(), 2);

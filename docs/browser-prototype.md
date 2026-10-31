@@ -76,7 +76,7 @@ engine; the first is CEF's alone and goes away with another engine:
    two report and set a flag, and `sendEvent:` sets it around the call.
    The protocol itself is added at run time, after CEF's framework loads.
 2. **A block that hosts a native view.** Today a mod block,
-   `{ "mod": "browser", "props": { "browser": "b1", "url": "…", "profile"?: "agent" } }`,
+   `{ "mod": "browser-prototype", "props": { "browser": "b1", "url": "…", "profile"?: "agent" } }`,
    that the app draws itself, with bounds and visibility reported each
    frame, and key and focus routing. It is a mod block because the core
    keeps a machine's whole layout as one document and `Content` in

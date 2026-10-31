@@ -219,7 +219,7 @@ A layout is a tree of nodes. Four types:
   `{ "terminal": "t7" }`, `{ "tab": "active" }` (the shown tab's
   terminals as it arranges them), or `{ "agent": "focused" }` (one agent's
   terminal, full size: the one chosen with `agent.focus` / `agent.next`, else
-  the focused pane's agent, else the first agent), or `{ "mod": "browser",
+  the focused pane's agent, else the first agent), or `{ "mod": "browser-prototype",
   "props": { "browser": "b1", "url": "...", "profile"?: "agent" } }` (a web
   page the app draws, not a mod folder; it never opens in `floating`).
 - `row` / `column`: children side by side / stacked.

@@ -1,4 +1,4 @@
-//! Browser panes: a web page in a block (`{ "browser": "b1", "url": … }`),
+//! Browser panes: a web page in a block (`{ "mod": "browser-prototype", "props": { "browser": "b1", "url": … } }`),
 //! as a pane in a tab or a block in the shown layout.
 //!
 //! macOS builds with an engine feature show each page as a native child view
