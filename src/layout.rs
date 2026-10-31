@@ -60,7 +60,7 @@ enum Saved {
     },
     /// The prototype's first browser block, `{ "browser": "b1", … }`: read,
     /// never written.
-    // debt: reads layouts saved by earlier prototype builds only; drop it before any upstream PR.
+    // debt: reads layouts saved by earlier prototype builds only; drop it before any upstream PR (cameronsjo/herdr-app#4).
     BrowserBlock(BrowserProps),
 }
 
