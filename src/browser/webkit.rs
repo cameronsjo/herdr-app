@@ -1179,7 +1179,12 @@ impl Delegate {
             return;
         }
         let text = error.localizedDescription().to_string();
-        tracing::warn!("browser: {} load error {}", super::log_safe(id), super::log_safe(&text));
+        // NSURLErrorCancelled: a newer navigation replaced this load, which is normal.
+        if error.code() == -999 && error.domain().to_string() == "NSURLErrorDomain" {
+            tracing::debug!("browser: {} load cancelled by a newer one", super::log_safe(id));
+        } else {
+            tracing::warn!("browser: {} load error {}", super::log_safe(id), super::log_safe(&text));
+        }
         emit(id, &json!({ "method": "Page.frameStoppedLoading", "params": { "frameId": translate::FRAME } }));
         answer_navigations(id, *generation, None, Some(&text));
     }
