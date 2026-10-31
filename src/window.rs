@@ -1753,6 +1753,8 @@ impl AppWindow {
         if terminal.contains('/') {
             return Err(crate::browser::remote(terminal));
         }
+        // Terminal ids are per core: `t3` on another core is another terminal.
+        crate::browser::same_core(terminal, req.get("core").and_then(Value::as_str), crate::browser::core_id(&self.core.hello).as_deref())?;
         let pane = self.model.tabs().flat_map(|t| t.root.walk()).find(|n| n.terminal() == Some(terminal)).map(|n| n.id.clone());
         let Some(pane) = pane else {
             return Err(if self.live.contains_key(terminal) { crate::browser::parked(terminal) } else { format!("no terminal {terminal} in Herdr") });
@@ -3331,6 +3333,7 @@ impl AppWindow {
                 };
                 return self.answer(r);
             }
+            "browser.agent_browser_setup" => return self.answer(crate::browser::agent_browser_setup()),
             "browser.navigate" | "browser.back" | "browser.forward" | "browser.reload" | "browser.devtools" | "browser.zoom" | "browser.viewport" | "browser.open_external" => {
                 // Zoom and viewport default to the focused browser (keys.json's `browser` keys name none).
                 let b = Self::owned(a, "browser").or_else(|| self.focused_browser()).unwrap_or_default();

@@ -53,6 +53,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("browser.forward", &[req("browser")], "Go forward a page in a browser."),
     cmd("browser.reload", &[req("browser")], "Reload a browser's page."),
     cmd("browser.close", &[req("browser")], "Close a browser and its pane."),
+    cmd("browser.agent_browser_setup", &[], "Add Herdr's provider to agent-browser's user config (~/.agent-browser/config.json), so a terminal that started before this Herdr can drive a browser pane with: agent-browser -p herdr --session herdr-$HC_TERMINAL_ID. Other plugins and settings in the file are kept."),
     cmd("browser.open_external", &[opt("browser")], "Open a browser's page (default: the focused browser) in the default web browser: the page's own address, http or https only. For sign-ins Herdr's browser can't do, such as passkeys."),
     cmd("browser.devtools", &[req("browser"), opt("open")], "Open or close a browser's web inspector (no open: toggle): Chromium's DevTools window on the CEF engine; on the WebKit engine the page becomes inspectable from Safari's Develop menu."),
     cmd("browser.zoom", &[opt("step"), opt("browser"), opt("level")],

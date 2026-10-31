@@ -276,6 +276,23 @@ person allows it for that pane:
    `agent-browser click @e5`, `agent-browser fill @e2 "Ada"`. The header
    names the terminal that last attached, as it claimed itself.
 
+Terminals that started before this Herdr (from another Herdr build, before
+you switched to this one) have none of these variables, and a running
+program's environment can't be changed from outside. Run
+`herdr-app do browser.agent_browser_setup` once: it adds Herdr's provider to
+`~/.agent-browser/config.json`, keeping the file's other plugins and
+settings, and sets no default provider, so agent-browser outside Herdr is
+unchanged. An agent in such a terminal then names the provider and a
+session of its terminal's own:
+`agent-browser -p herdr --session herdr-$HC_TERMINAL_ID snapshot -i`. Any
+other session name is refused there, because agent-browser runs the
+provider in the environment of whichever terminal started that session's
+daemon. Such a terminal doesn't get `AGENT_BROWSER_IDLE_TIMEOUT_MS`, so its
+daemon idles for agent-browser's own default (60 minutes) before exiting.
+Terminal ids are per core, so the provider also reads the caller's core id
+(`hc` from the caller's environment), and the window attaches only a
+terminal of its own core.
+
 How it works: Herdr gives its local terminals `AGENT_BROWSER_PROVIDER=herdr`,
 `AGENT_BROWSER_PLUGINS` (Herdr's own provider, `herdr-app
 __agent-browser-provider`, first) and an `AGENT_BROWSER_SESSION` of their

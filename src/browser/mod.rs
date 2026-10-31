@@ -511,6 +511,60 @@ fn hidden(ch: char) -> bool {
 
 // Errors an agent sees (pinned in agent.rs's tests).
 
+pub fn other_core(terminal: &str) -> String {
+    format!("terminal {terminal} is on another Herdr core than this Herdr's: run agent-browser from a terminal in this Herdr")
+}
+pub fn unknown_core(terminal: &str) -> String {
+    format!("Herdr could not tell which core terminal {terminal} is on (hc did not answer), so it isn't attached")
+}
+/// `browser.agent_browser_setup`: adds Herdr's provider to agent-browser's
+/// user config (`~/.agent-browser/config.json`), so a terminal that started
+/// before this Herdr (with none of Herdr's `AGENT_BROWSER_*`) can drive a
+/// pane with `-p herdr`. It only declares the plugin: agent-browser outside
+/// Herdr keeps its own default provider.
+pub fn agent_browser_setup() -> Result<serde_json::Value, String> {
+    #[cfg(all(target_os = "macos", feature = "browser-pane"))]
+    {
+        let home = std::env::var_os("HOME").ok_or("HOME is unset")?;
+        let path = std::path::Path::new(&home).join(".agent-browser").join("config.json");
+        let exe = std::env::current_exe().map_err(|e| format!("cannot find Herdr's own binary: {e}"))?;
+        let socket = crate::mods::app_dir().join("herdr-app.sock");
+        let existing = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
+        };
+        let text = agent::with_herdr_plugin(&existing, &exe.to_string_lossy(), &socket.to_string_lossy())
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+        }
+        std::fs::write(&path, text).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+        tracing::info!("browser: added Herdr's agent-browser plugin to {}", path.display());
+        Ok(serde_json::json!({ "config": path.to_string_lossy(), "use": "agent-browser -p herdr --session herdr-$HC_TERMINAL_ID <command>" }))
+    }
+    #[cfg(not(all(target_os = "macos", feature = "browser-pane")))]
+    {
+        Err("this Herdr build has no browser panes".into())
+    }
+}
+
+/// Whether a caller's core (from the provider) is this app's core. A caller
+/// whose core couldn't be read isn't attached: its terminal id could name a
+/// terminal of this core that isn't it.
+pub fn same_core(terminal: &str, caller: Option<&str>, own: Option<&str>) -> Result<(), String> {
+    match (caller, own) {
+        (Some(c), Some(o)) if c == o => Ok(()),
+        (Some(_), Some(_)) => Err(other_core(terminal)),
+        _ => Err(unknown_core(terminal)),
+    }
+}
+
+/// `result.core.id` of a core's hello.
+pub fn core_id(hello: &serde_json::Value) -> Option<String> {
+    hello.pointer("/result/core/id").or_else(|| hello.pointer("/core/id")).and_then(serde_json::Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned)
+}
+
 pub fn not_in_herdr() -> String {
     "this terminal is not in Herdr (HC_TERMINAL_ID is unset): agent-browser can only drive a Herdr browser pane from a Herdr terminal".into()
 }

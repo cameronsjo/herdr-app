@@ -182,6 +182,16 @@ pub fn needs_agent_profile(agent_profile: bool) -> Result<(), &'static str> {
 pub fn no_app(socket: &str) -> String {
     format!("Herdr is not running (no socket at {socket})")
 }
+/// The agent-browser session a terminal without Herdr's environment uses.
+pub fn own_session(terminal: &str) -> String {
+    format!("herdr-{terminal}")
+}
+pub fn needs_own_session(terminal: &str) -> String {
+    format!(
+        "terminal {terminal} started before Herdr set up agent-browser for it: run agent-browser -p herdr --session {} <command>",
+        own_session(terminal)
+    )
+}
 pub fn no_browser() -> String {
     "no browser in this space: open one with: herdr-app do browser.open --profile agent --url <url>".into()
 }
@@ -670,6 +680,27 @@ pub fn plugin_env(exe: &str, socket: &str, inherited: Option<&str>, session: &st
     ]
 }
 
+/// agent-browser's user config with Herdr's plugin entry in it: any earlier
+/// `herdr` entry replaced, every other key and plugin kept. Refuses a file
+/// that isn't a JSON object, rather than overwrite it.
+pub fn with_herdr_plugin(existing: &str, exe: &str, socket: &str) -> Result<String, String> {
+    let mut config: Value = if existing.trim().is_empty() {
+        json!({})
+    } else {
+        serde_json::from_str(existing).map_err(|e| format!("not valid JSON ({e}); fix or move it, then run this again"))?
+    };
+    let Some(object) = config.as_object_mut() else { return Err("not a JSON object; fix or move it, then run this again".into()) };
+    let mut plugins = match object.remove("plugins") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(list)) => list,
+        Some(_) => return Err("\"plugins\" is not a list; fix or move it, then run this again".into()),
+    };
+    plugins.retain(|p| p.get("name").and_then(Value::as_str) != Some(PLUGIN));
+    plugins.push(json!({ "name": PLUGIN, "command": exe, "args": [VERB, "--socket", socket], "capabilities": ["browser.provider", CHECK] }));
+    object.insert("plugins".into(), Value::Array(plugins));
+    serde_json::to_string_pretty(&config).map(|s| s + "\n").map_err(|e| e.to_string())
+}
+
 /// The provider's answer to one agent-browser request. `attach` asks the
 /// window (`{ attach: { terminal, session, browser } }`); it is never
 /// called outside a Herdr terminal. Panes are never created here.
@@ -695,6 +726,13 @@ pub fn respond(request: &Value, env: &dyn Fn(&str) -> Option<String>, attach: im
         Some("browser.launch") => {
             let Some(terminal) = env("HC_TERMINAL_ID").filter(|t| !t.is_empty()) else { return fail(not_in_herdr()) };
             let session = request.pointer("/request/session").cloned().unwrap_or(Value::Null);
+            // A terminal Herdr didn't give a session of its own (one that
+            // started before this Herdr) uses one named for itself, so its
+            // agent-browser daemon, whose environment this provider runs
+            // in, is never one another terminal started.
+            if env("AGENT_BROWSER_SESSION").is_none_or(|s| s.is_empty()) && session.as_str() != Some(own_session(&terminal).as_str()) {
+                return fail(needs_own_session(&terminal));
+            }
             let browser = env("HERDR_BROWSER").filter(|b| !b.is_empty());
             match attach(json!({ "terminal": terminal, "session": session, "browser": browser })) {
                 Ok(r) => json!({ "protocol": PROTOCOL, "success": true, "browser": {
@@ -706,6 +744,34 @@ pub fn respond(request: &Value, env: &dyn Fn(&str) -> Option<String>, attach: im
         Some(other) => fail(format!("unsupported plugin request type {other:?}")),
         None => fail("plugin request has no type".into()),
     }
+}
+
+/// The id of the core this process's environment points at (`hc` picks it
+/// from `XDG_STATE_HOME` and `HC_SESSION`, as the terminal's own `hc` does).
+/// None when `hc` doesn't answer within 3 s.
+#[cfg(unix)]
+fn caller_core() -> Option<String> {
+    use std::io::{BufRead, BufReader, Write};
+    let mut child = crate::spawn::command(crate::core_bin::path())
+        .arg("connect")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut stdin = child.stdin.take()?;
+    let stdout = child.stdout.take()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = stdin.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"hello\",\"params\":{}}\n");
+        let mut line = String::new();
+        let _ = BufReader::new(stdout).read_line(&mut line);
+        let _ = tx.send(line);
+    });
+    let line = rx.recv_timeout(std::time::Duration::from_secs(3)).ok();
+    let _ = child.kill();
+    let _ = child.wait();
+    super::core_id(&serde_json::from_str(&line?).ok()?)
 }
 
 /// `herdr-app __agent-browser-provider --socket <path>`: one request on
@@ -725,7 +791,9 @@ pub fn provider_main(args: &[String]) -> i32 {
         Err(e) => Err(format!("cannot read the plugin request: {e}")),
     };
     let answer = match request {
-        Ok(request) => respond(&request, &|k| std::env::var(k).ok(), |attach| {
+        Ok(request) => respond(&request, &|k| std::env::var(k).ok(), |mut attach| {
+            // Terminal ids are per core; the app compares this with its own.
+            attach["core"] = caller_core().map_or(Value::Null, Value::String);
             let mut stream = std::os::unix::net::UnixStream::connect(&socket).map_err(|_| no_app(&socket))?;
             let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
             stream.write_all(format!("{}\n", json!({ "attach": attach })).as_bytes()).map_err(|_| no_app(&socket))?;
@@ -1346,6 +1414,7 @@ mod tests {
     fn the_provider_answers_launch_with_a_direct_page_url() {
         let env = |k: &str| match k {
             "HC_TERMINAL_ID" => Some("t3".to_owned()),
+            "AGENT_BROWSER_SESSION" => Some("herdr-abc".to_owned()),
             _ => None,
         };
         let mut asked = Value::Null;
@@ -1363,10 +1432,62 @@ mod tests {
     fn the_provider_never_asks_herdr_outside_a_herdr_terminal() {
         let out = respond(&launch(), &|_| None, |_| panic!("asked the socket"));
         assert_eq!(out, json!({ "protocol": PROTOCOL, "success": false, "error": not_in_herdr() }));
-        let env = |k: &str| (k == "HC_TERMINAL_ID").then(|| "t3".to_owned());
+        let env = |k: &str| match k {
+            "HC_TERMINAL_ID" => Some("t3".to_owned()),
+            "AGENT_BROWSER_SESSION" => Some("herdr-abc".to_owned()),
+            _ => None,
+        };
         let out = respond(&launch(), &env, |_| Err(access_off("b1")));
         assert_eq!(out["error"], access_off("b1"));
         assert_eq!(out["success"], false);
+    }
+
+    #[test]
+    fn a_terminal_older_than_herdr_uses_a_session_named_for_itself() {
+        // Only HC_TERMINAL_ID: a terminal started before this Herdr.
+        let env = |k: &str| (k == "HC_TERMINAL_ID").then(|| "t3".to_owned());
+        let with = |session: &str| json!({ "protocol": PROTOCOL, "type": "browser.launch", "capability": "browser.provider",
+            "request": { "provider": "herdr", "session": session, "launchOptions": {} } });
+        // agent-browser's shared default session, or another terminal's: refused before Herdr is asked.
+        for session in ["default", "herdr-abc", "herdr-t4"] {
+            let out = respond(&with(session), &env, |_| panic!("asked the socket for {session}"));
+            assert_eq!(out["error"], needs_own_session("t3"), "{session}");
+        }
+        assert!(needs_own_session("t3").contains("agent-browser -p herdr --session herdr-t3"));
+        let mut asked = Value::Null;
+        let out = respond(&with("herdr-t3"), &env, |req| {
+            asked = req;
+            Ok(json!({ "cdpUrl": "ws://127.0.0.1:4000/tok", "browser": "b1", "pane": "p2", "space": "sp1", "selection": "tab" }))
+        });
+        assert_eq!(out["success"], true);
+        assert_eq!(asked["session"], "herdr-t3");
+    }
+
+    #[test]
+    fn herdr_s_plugin_is_added_to_agent_browser_s_config_and_nothing_else_changes() {
+        let plugin = json!({ "name": "herdr", "command": "/Apps/Herdr", "args": [VERB, "--socket", "/h/herdr-app.sock"], "capabilities": ["browser.provider", CHECK] });
+        let fresh: Value = serde_json::from_str(&with_herdr_plugin("", "/Apps/Herdr", "/h/herdr-app.sock").unwrap()).unwrap();
+        assert_eq!(fresh, json!({ "plugins": [plugin.clone()] }));
+        // No default provider: agent-browser outside Herdr is unchanged.
+        assert!(fresh.get("provider").is_none());
+        let existing = r#"{ "headed": true, "plugins": [ { "name": "vault", "command": "vault" }, { "name": "herdr", "command": "/old/Herdr" } ] }"#;
+        let merged: Value = serde_json::from_str(&with_herdr_plugin(existing, "/Apps/Herdr", "/h/herdr-app.sock").unwrap()).unwrap();
+        assert_eq!(merged, json!({ "headed": true, "plugins": [ { "name": "vault", "command": "vault" }, plugin ] }));
+        for bad in ["not json", "[1, 2]", r#"{ "plugins": "x" }"#] {
+            assert!(with_herdr_plugin(bad, "/Apps/Herdr", "/s").is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_terminal_on_another_core_is_never_attached() {
+        use crate::browser::{core_id, other_core, same_core, unknown_core};
+        assert_eq!(core_id(&json!({ "result": { "core": { "id": "c1", "name": "m" } } })), Some("c1".into()));
+        assert_eq!(core_id(&json!({ "core": { "id": "c1" } })), Some("c1".into()));
+        assert_eq!(core_id(&json!({ "core": { "id": "" } })), None);
+        assert_eq!(same_core("t3", Some("c1"), Some("c1")), Ok(()));
+        assert_eq!(same_core("t3", Some("c2"), Some("c1")), Err(other_core("t3")));
+        assert_eq!(same_core("t3", None, Some("c1")), Err(unknown_core("t3")));
+        assert_eq!(same_core("t3", Some("c1"), None), Err(unknown_core("t3")));
     }
 
     #[test]

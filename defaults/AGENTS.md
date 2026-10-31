@@ -544,6 +544,8 @@ The main ones:
   says `{browser, pane}`), `browser.navigate {browser, url}`, `browser.back {browser}`,
   `browser.forward {browser}`, `browser.reload {browser}`, `browser.close {browser}`,
   `browser.open_external {browser?}` (the page in the default web browser; http and https only),
+  `browser.agent_browser_setup` (adds Herdr's provider to `~/.agent-browser/config.json`; a terminal
+  older than this Herdr then runs `agent-browser -p herdr --session herdr-$HC_TERMINAL_ID …`),
   `browser.devtools {browser, open?}`, `browser.zoom {step?: "in"|"out"|"reset", level?: 25-500,
   browser?}` (percent, Chromium's steps; kept per host on CEF, per pane on WebKit), `browser.viewport {preset?: "phone"|"tablet"|"fit",
   width?, height?, mobile?, browser?}` (responsive size; zoom and viewport default to the focused

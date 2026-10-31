@@ -215,6 +215,12 @@ Close a browser and its pane.
 |---|---|
 | `browser` | yes |
 
+## `browser.agent_browser_setup`
+
+Add Herdr's provider to agent-browser's user config (~/.agent-browser/config.json), so a terminal that started before this Herdr can drive a browser pane with: agent-browser -p herdr --session herdr-$HC_TERMINAL_ID. Other plugins and settings in the file are kept.
+
+No arguments.
+
 ## `browser.open_external`
 
 Open a browser's page (default: the focused browser) in the default web browser: the page's own address, http or https only. For sign-ins Herdr's browser can't do, such as passkeys.
