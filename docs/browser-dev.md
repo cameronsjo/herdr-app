@@ -96,6 +96,18 @@ reaches a terminal, a keys.json action or a menu. Gaps against CEF:
 - **Console relay.** Console calls and uncaught errors reach agents through
   a small script in the page's own world, which a page can see and post to.
 
+### As your everyday Herdr
+
+`bash scripts/browser-daily on` copies the built bundle to
+`~/Applications/Herdr Browser.app`, quits Herdr (your terminals keep
+running in the core, as across an update), opens the copy on your real home
+and core, and runs `browser.agent_browser_setup`. `off` quits it and opens
+`/Applications/Herdr.app`; `status` says which runs. `on --cef` takes the
+CEF bundle. This is the one path here that runs a prototype on your real
+home: never run it and stock Herdr at once, and while it's off, stock
+Herdr shows browser panes as a mod that didn't load. `DRY_RUN=1` prints
+the steps.
+
 ## Try it
 
 `just browser-dev` runs the app on its own home, `/tmp/hbd.dev`, kept

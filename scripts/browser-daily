@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# Use a browser build as your everyday Herdr, on your real app home and core,
+# and switch back. Your terminals live in the core, so they keep running
+# across the switch, as they do across an update.
+#
+#   bash scripts/browser-daily on [--cef]   quit Herdr, open the browser build
+#   bash scripts/browser-daily off          quit it, open /Applications/Herdr.app
+#   bash scripts/browser-daily status       which one runs
+#
+# `on` copies the bundle `just browser-build [--webkit]` made to
+# ~/Applications/Herdr Browser.app first, so later dev rebuilds never remove
+# the binary your everyday app runs from. Re-run `on` to take a newer build.
+# It then adds Herdr's provider to ~/.agent-browser/config.json
+# (browser.agent_browser_setup), so terminals from before the switch can use
+# `agent-browser -p herdr --session herdr-$HC_TERMINAL_ID`.
+# DRY_RUN=1 prints what it would do.
+set -euo pipefail
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+daily="$HOME/Applications/Herdr Browser.app"
+stock="/Applications/Herdr.app"
+# The real home and core: none of the dev runner's overrides.
+unset HERDR_APP_HOME XDG_STATE_HOME HC_SESSION HERDR_APP_ID
+
+run() {
+  if [ "${DRY_RUN:-}" = 1 ]; then printf 'would run:'; printf ' %q' "$@"; echo; else "$@"; fi
+}
+running() { pgrep -f -- "$1/Contents/MacOS/" >/dev/null 2>&1; }
+which_runs() {
+  if running "$daily"; then echo "browser build ($daily)"
+  elif running "$stock"; then echo "Herdr ($stock)"
+  else echo "no Herdr"; fi
+}
+
+# Quits the app on the real home through its own app.quit and waits for it.
+quit_herdr() {
+  local app=$1
+  running "$app" || return 0
+  echo "quitting $(basename "$app") (your terminals keep running in the core)"
+  if [ "${DRY_RUN:-}" = 1 ]; then run "$app/Contents/MacOS/Herdr" "do" app.quit; else "$app/Contents/MacOS/Herdr" "do" app.quit >/dev/null || true; fi
+  [ "${DRY_RUN:-}" = 1 ] && return 0
+  for _ in $(seq 1 40); do running "$app" || return 0; sleep 0.5; done
+  echo "browser-daily: $(basename "$app") is still running after 20 s; quit it yourself (Cmd+Q), then run this again." >&2
+  exit 1
+}
+
+wait_for_window() {
+  [ "${DRY_RUN:-}" = 1 ] && return 0
+  for _ in $(seq 1 40); do "$1/Contents/MacOS/Herdr" ls >/dev/null 2>&1 && return 0; sleep 0.5; done
+  echo "browser-daily: $(basename "$1") opened but its window didn't answer within 20 s; check it, then run: \"$1/Contents/MacOS/Herdr\" do browser.agent_browser_setup" >&2
+  exit 1
+}
+
+case "${1:-}" in
+  on)
+    bundle=browser-dev-webkit
+    [ "${2:-}" = --cef ] && bundle=browser-dev
+    src="$root/target/$bundle/Herdr Dev.app"
+    if [ ! -x "$src/Contents/MacOS/Herdr" ]; then
+      echo "browser-daily: no build at $src; build it first: just browser-build$([ "$bundle" = browser-dev-webkit ] && echo ' --webkit')" >&2
+      exit 1
+    fi
+    [ -x "$stock/Contents/MacOS/Herdr" ] || { echo "browser-daily: no $stock to switch back to; install Herdr first." >&2; exit 1; }
+    quit_herdr "$daily"
+    quit_herdr "$stock"
+    echo "copying $src to $daily"
+    run mkdir -p "$(dirname "$daily")"
+    run rm -rf "$daily"
+    run ditto "$src" "$daily"
+    echo "opening the browser build on your real home"
+    run open -n "$daily"
+    wait_for_window "$daily"
+    run "$daily/Contents/MacOS/Herdr" "do" browser.agent_browser_setup
+    echo "on: $(which_runs). Switch back with: bash scripts/browser-daily off"
+    ;;
+  off)
+    [ -x "$stock/Contents/MacOS/Herdr" ] || { echo "browser-daily: no $stock to switch back to." >&2; exit 1; }
+    quit_herdr "$daily"
+    if ! running "$stock"; then
+      echo "opening $stock"
+      run open "$stock"
+    fi
+    echo "off: $(which_runs). Browser panes show as a mod that didn't load until you switch on again."
+    ;;
+  status)
+    which_runs
+    ;;
+  *)
+    echo "usage: bash scripts/browser-daily on [--cef] | off | status" >&2
+    exit 2
+    ;;
+esac
