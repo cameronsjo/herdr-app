@@ -502,7 +502,7 @@ Reset a shipped layout and its clicks (the old file is kept aside).
 
 ## `mod.open`
 
-Open a mod as the overlay its mod.json describes.
+Toggle a mod as the overlay its mod.json describes; calling again closes it.
 
 | Argument | Required |
 |---|---|
@@ -545,7 +545,7 @@ Draft feedback for the person to review and send (from: person or agent).
 
 ## `app.palette`
 
-Open the command palette: every command by name, with its key.
+Toggle the command palette: every command by name, with its key; calling again closes it.
 
 No arguments.
 

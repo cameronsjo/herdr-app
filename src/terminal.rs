@@ -52,8 +52,8 @@ struct Grid {
     scale: f32,
     /// The cell in device pixels the local screen was sized with.
     vt_cell: (u32, u32),
-    /// The cell in device pixels the core was last told.
-    told_cell: Option<(u32, u32)>,
+    /// The colors and device-pixel cell size the core was last told.
+    told_display: Option<DisplayFacts>,
     /// Top-left of the cell grid in window coordinates, from the last paint.
     origin: Point<Pixels>,
     buttons_down: Vec<MouseButton>,
@@ -117,11 +117,35 @@ pub fn next_frame() {
 
 impl EventEmitter<TerminalEvent> for TerminalView {}
 
-/// `cell`: in device pixels, what the core reports to programs (CSI 14t, 16t).
-fn display_facts(cell: (u32, u32)) -> serde_json::Value {
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct DisplayFacts {
+    fg: Rgb,
+    bg: Rgb,
+    cursor: Rgb,
+    /// In device pixels, what the core reports to programs (CSI 14t, 16t).
+    cell: (u32, u32),
+}
+
+/// Only send changed facts; a theme switch need not change the cell size.
+fn display_update(told: &mut Option<DisplayFacts>, theme: &vt::Theme, cell: (u32, u32)) -> Option<serde_json::Value> {
+    let facts = DisplayFacts { fg: theme.fg, bg: theme.bg, cursor: theme.cursor, cell };
+    if *told == Some(facts) {
+        return None;
+    }
+    *told = Some(facts);
     let hex = |c: Rgb| format!("#{:02x}{:02x}{:02x}", c.0, c.1, c.2);
-    let t = vt::theme();
-    json!({"fg": hex(t.fg), "bg": hex(t.bg), "cursor": hex(t.cursor), "cell": [cell.0, cell.1]})
+    Some(json!({"fg": hex(facts.fg), "bg": hex(facts.bg), "cursor": hex(facts.cursor), "cell": [cell.0, cell.1]}))
+}
+
+impl Grid {
+    fn refresh_theme(&mut self, theme: &vt::Theme, cell: (u32, u32)) {
+        self.vt.set_theme(theme.clone());
+        if let Some(chan) = self.channel
+            && let Some(facts) = display_update(&mut self.told_display, theme, cell)
+        {
+            self.core.facts(chan, &facts);
+        }
+    }
 }
 
 /// A cell in device pixels.
@@ -168,7 +192,7 @@ impl TerminalView {
                 cell: size(px(9.0), px(18.0)),
                 scale: 1.0,
                 vt_cell: (9, 18),
-                told_cell: None,
+                told_display: None,
                 origin: Point::default(),
                 buttons_down: Vec::new(),
                 images: HashMap::new(),
@@ -210,7 +234,7 @@ impl TerminalView {
     /// take seconds, and the window must keep drawing meanwhile.
     /// `announce_end`: emit Ended if the terminal turns out to be gone.
     fn connect(&mut self, core: Arc<Core>, announce_end: bool, cx: &mut Context<Self>) {
-        let (cols, rows, cell) = {
+        let (cols, rows, facts) = {
             let mut g = self.grid.borrow_mut();
             let (cols, rows) = (g.vt.cols, g.vt.rows);
             // The core repaints the whole screen (and history) on attach.
@@ -218,12 +242,13 @@ impl TerminalView {
             g.vt = Vt::new(cols, rows);
             g.vt.resize(cols, rows, cell.0, cell.1);
             g.vt_cell = cell;
-            g.told_cell = Some(cell);
+            g.told_display = None;
+            let facts = display_update(&mut g.told_display, &vt::theme(), cell).unwrap();
             g.core = core.clone();
             g.channel = None;
-            (cols, rows, cell)
+            (cols, rows, facts)
         };
-        let (address, facts) = (self.address.clone(), display_facts(cell));
+        let address = self.address.clone();
         // Replacing the task drops an attach still in flight for an older connection.
         self._reader = Some(cx.spawn(async move |this, cx| {
             let attached = cx.background_executor().spawn(async move { core.attach(&address, cols, rows, facts) }).await;
@@ -256,6 +281,9 @@ impl TerminalView {
                 self.lost = false;
                 let mut g = self.grid.borrow_mut();
                 g.channel = Some(attached.channel);
+                // The theme or cell may have changed while the attach was in flight.
+                let cell = device_cell(g.cell, g.scale);
+                g.refresh_theme(&vt::theme(), cell);
                 // The pane may have been laid out while the attach was in flight.
                 let now = (g.vt.cols, g.vt.rows);
                 if now != attached_size {
@@ -287,6 +315,13 @@ impl TerminalView {
                 None
             }
         }
+    }
+
+    /// Attached tabs follow the window's theme even when they are not drawn.
+    pub fn refresh_theme(&self) {
+        let mut g = self.grid.borrow_mut();
+        let cell = device_cell(g.cell, g.scale);
+        g.refresh_theme(&vt::theme(), cell);
     }
 
     /// Its title as shown (see `shown_title`); news only when that changed.
@@ -593,12 +628,17 @@ impl TerminalView {
         let (x, y) = local(&g, pos);
         let (col, row) = (x / f32::from(g.cell.width), y / f32::from(g.cell.height));
         let mut target = None;
-        let hit = g.vt.link_at(col as u16, row as u16, |text, at| {
+        let hit = g.vt.link_at(col as u16, row as u16, |text, at, joined| {
+            // In lines joined back together only a file that exists proves the join right.
             if let Some(range) = links::find(text, at)
                 && let Some(link) = links::resolve(&text[range.clone()], self.cwd.as_deref())
+                && (!joined || matches!(link, links::Target::File(_)))
             {
                 target = Some(LinkTarget::External(link));
                 return Some(range);
+            }
+            if joined {
+                return None;
             }
             let range = links::word(text, at)?;
             let address = crate::mods::terminal_address(&text[range.clone()], &self.address)?;
@@ -844,8 +884,14 @@ fn key_bytes(vt: &mut vt::Vt, ev: &KeyDownEvent) -> Option<Vec<u8>> {
     }
     let k = &ev.keystroke;
     let m = k.modifiers;
-    if k.key == "enter" && vt.win32.on && (m.shift || m.control || m.alt) && vt.kitty_keyboard_flags() == 0 {
-        return Some(crate::win32_keys::enter(m.shift, m.control, m.alt));
+    if vt.win32.on && vt.kitty_keyboard_flags() == 0 {
+        if k.key == "enter" && (m.shift || m.control || m.alt) {
+            return Some(crate::win32_keys::enter(m.shift, m.control, m.alt));
+        }
+        // ConPTY combines a bare Escape with the next key as an Alt chord.
+        if k.key == "escape" {
+            return Some(crate::win32_keys::escape(m.shift, m.control, m.alt));
+        }
     }
     let Some((key, shifted, unshifted)) = map_key(&k.key) else {
         return k.key_char.as_ref().map(|text| text.as_bytes().to_vec());
@@ -859,6 +905,12 @@ fn key_bytes(vt: &mut vt::Vt, ev: &KeyDownEvent) -> Option<Vec<u8>> {
     }
     if m.alt {
         mods |= GHOSTTY_MODS_ALT as GhosttyMods;
+        #[cfg(target_os = "macos")]
+        if k.option_side == Some(gpui::OptionSide::Right)
+            || (k.option_side == Some(gpui::OptionSide::Both) && gpui_macos::option_as_alt() == gpui_macos::OptionAsAlt::Right)
+        {
+            mods |= GHOSTTY_MODS_ALT_SIDE as GhosttyMods;
+        }
     }
     if m.platform {
         mods |= GHOSTTY_MODS_SUPER as GhosttyMods;
@@ -873,7 +925,7 @@ fn key_bytes(vt: &mut vt::Vt, ev: &KeyDownEvent) -> Option<Vec<u8>> {
     let mut consumed = mods & GHOSTTY_MODS_SHIFT as GhosttyMods;
     let option_as_alt = {
         #[cfg(target_os = "macos")]
-        { gpui_macos::option_as_alt() }
+        { gpui_macos::option_as_alt().uses_alt(k.option_side) }
         #[cfg(not(target_os = "macos"))]
         { false }
     };
@@ -1381,17 +1433,11 @@ impl Render for TerminalView {
                 canvas(
                     move |bounds, window, _cx| {
                         let mut g = grid.borrow_mut();
-                        g.vt.set_theme(vt::theme());
                         g.cell = cell;
                         g.scale = window.scale_factor();
                         let dev = device_cell(cell, g.scale);
                         // Before the size, so a program woken by it asks for the new cell.
-                        if let Some(chan) = g.channel
-                            && g.told_cell != Some(dev)
-                        {
-                            g.core.facts(chan, &display_facts(dev));
-                            g.told_cell = Some(dev);
-                        }
+                        g.refresh_theme(&vt::theme(), dev);
                         let (px_, py_) = pad();
                         let cols = ((f32::from(bounds.size.width) - 2.0 * px_) / f32::from(cell.width)).floor().max(2.0) as u16;
                         let rows = ((f32::from(bounds.size.height) - 2.0 * py_) / f32::from(cell.height)).floor().max(1.0) as u16;
@@ -1665,6 +1711,8 @@ mod tests {
                 key_char: typed.map(str::to_owned),
                 #[cfg(target_os = "macos")]
                 unshifted_key: None,
+                #[cfg(target_os = "macos")]
+                option_side: None,
             },
             is_held: false,
             prefer_character_input: false,
@@ -1690,7 +1738,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     fn option_as_alt_encodes_legacy_and_kitty_shortcuts() {
         let _guard = OPTION_AS_ALT_TEST_LOCK.lock().unwrap();
-        gpui_macos::set_option_as_alt(Some(true));
+        gpui_macos::set_option_as_alt(Some(gpui_macos::OptionAsAlt::Both));
         let mut vt = Vt::new(20, 3);
         for (key, text, bytes) in [("alt-p", "p", b"\x1bp"), ("alt-e", "e", b"\x1be"), ("alt-b", "b", b"\x1bb")] {
             assert_eq!(key_bytes(&mut vt, &press(key, Some(text))).unwrap(), bytes);
@@ -1698,7 +1746,7 @@ mod tests {
         vt.write(b"\x1b[>1u");
         assert_eq!(key_bytes(&mut vt, &press("alt-e", Some("e"))).unwrap(), b"\x1b[101;3u");
         vt.write(b"\x1b[<u");
-        gpui_macos::set_option_as_alt(Some(false));
+        gpui_macos::set_option_as_alt(Some(gpui_macos::OptionAsAlt::None));
         assert_eq!(key_bytes(&mut vt, &press("alt-p", Some("π"))).unwrap(), "π".as_bytes());
         for setup in [b"".as_slice(), b"\x1b[>1u"] {
             let mut vt = Vt::new(20, 3);
@@ -1712,6 +1760,40 @@ mod tests {
             }
             assert_eq!(key_bytes(&mut vt, &press("alt-left", None)).unwrap(), b"\x1b[1;3D");
         }
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn option_sides_encode_shortcuts_and_native_text() {
+        use gpui::OptionSide;
+        use gpui_macos::OptionAsAlt;
+        let _guard = OPTION_AS_ALT_TEST_LOCK.lock().unwrap();
+        for setting in [OptionAsAlt::Left, OptionAsAlt::Right] {
+            gpui_macos::set_option_as_alt(Some(setting));
+            for side in [OptionSide::Left, OptionSide::Right, OptionSide::Both] {
+                let as_alt = side == OptionSide::Both || matches!((setting, side), (OptionAsAlt::Left, OptionSide::Left) | (OptionAsAlt::Right, OptionSide::Right));
+                for kitty in [false, true] {
+                    let mut vt = Vt::new(20, 3);
+                    if kitty { vt.write(b"\x1b[>1u"); }
+                    for native in ["π", "@"] {
+                        let mut event = press("alt-p", Some(if as_alt { "p" } else { native }));
+                        event.keystroke.option_side = Some(side);
+                        let expected = if as_alt {
+                            if kitty { b"\x1b[112;3u".as_slice() } else { b"\x1bp".as_slice() }
+                        } else { native.as_bytes() };
+                        assert_eq!(key_bytes(&mut vt, &event).unwrap(), expected);
+                        // Shortcut-prefix replay must retain the original Option side.
+                        let mut replay = event.clone();
+                        replay.prefer_character_input = true;
+                        assert_eq!(key_bytes(&mut vt, &replay).unwrap(), expected);
+                    }
+                    let mut arrow = press("alt-left", None);
+                    arrow.keystroke.option_side = Some(side);
+                    assert_eq!(key_bytes(&mut vt, &arrow).unwrap(), b"\x1b[1;3D");
+                }
+            }
+        }
+        gpui_macos::set_option_as_alt(Some(OptionAsAlt::None));
     }
 
     #[test]
@@ -1749,7 +1831,7 @@ mod tests {
         #[cfg(target_os = "macos")]
         let _guard = OPTION_AS_ALT_TEST_LOCK.lock().unwrap();
         #[cfg(target_os = "macos")]
-        gpui_macos::set_option_as_alt(Some(false));
+        gpui_macos::set_option_as_alt(Some(gpui_macos::OptionAsAlt::None));
         // Herdr keeps native Option text on macOS (libghostty's default
         // option-as-alt=false); other platforms prefix an unconsumed Alt.
         const ALT_B: &[u8] = if cfg!(target_os = "macos") { b"b" } else { b"\x1bb" };
@@ -1812,6 +1894,45 @@ mod tests {
     }
 
     #[test]
+    fn escape_keeps_the_next_key_separate_in_each_keyboard_mode() {
+        for flags in [0, 1, 9] {
+            for win32 in [false, true] {
+                let mut vt = Vt::new(20, 3);
+                if win32 { vt.write(b"\x1b[?9001h"); }
+                vt.write(format!("\x1b[>{flags}u").as_bytes());
+                let escape: &[u8] = if flags != 0 {
+                    b"\x1b[27u".as_slice()
+                } else if win32 {
+                    b"\x1b[27;1;27;1;0;1_\x1b[27;1;27;0;0;1_"
+                } else {
+                    b"\x1b"
+                };
+                for (next, text, expected) in [
+                    ("ctrl-c", None, if flags == 0 { b"\x03".as_slice() } else { b"\x1b[99;5u" }),
+                    ("ctrl-c", Some("c"), if flags == 0 { b"\x03".as_slice() } else { b"\x1b[99;5u" }),
+                    ("a", Some("a"), if flags & 8 == 0 { b"a".as_slice() } else { b"\x1b[97u" }),
+                    ("space", Some(" "), if flags & 8 == 0 { b" ".as_slice() } else { b"\x1b[32u" }),
+                    ("escape", None, escape),
+                ] {
+                    assert_eq!(key_bytes(&mut vt, &press("escape", None)).as_deref(), Some(escape), "flags={flags}, win32={win32}");
+                    assert_eq!(key_bytes(&mut vt, &press(next, text)).as_deref(), Some(expected), "flags={flags}, win32={win32}, {next}");
+                }
+                vt.write(b"\x1b[<u");
+                let restored = if win32 { b"\x1b[27;1;27;1;0;1_\x1b[27;1;27;0;0;1_".as_slice() } else { b"\x1b" };
+                assert_eq!(key_bytes(&mut vt, &press("escape", None)).as_deref(), Some(restored));
+                vt.write(b"\x1b[?9001l");
+                assert_eq!(key_bytes(&mut vt, &press("escape", None)).unwrap(), b"\x1b");
+            }
+        }
+        let mut vt = Vt::new(20, 3);
+        vt.write(b"\x1b[?9001h");
+        for (spec, held) in [("shift-escape", 16), ("ctrl-escape", 8), ("alt-escape", 2)] {
+            let expected = format!("\x1b[27;1;27;1;{held};1_\x1b[27;1;27;0;{held};1_");
+            assert_eq!(key_bytes(&mut vt, &press(spec, None)).unwrap(), expected.as_bytes());
+        }
+    }
+
+    #[test]
     fn kitty_input_takes_precedence_over_win32() {
         for flags in 1..=31 {
             for win32_first in [false, true] {
@@ -1820,6 +1941,7 @@ mod tests {
                 vt.write(format!("\x1b[>{flags}u").as_bytes());
                 if !win32_first { vt.write(b"\x1b[?9001h"); }
                 for (spec, expected) in [
+                    ("escape", b"\x1b[27u".as_slice()),
                     ("shift-enter", b"\x1b[13;2u".as_slice()),
                     ("ctrl-enter", b"\x1b[13;5u"),
                     ("alt-enter", b"\x1b[13;3u"),
@@ -1857,6 +1979,34 @@ mod tests {
         assert_eq!(super::device_cell(cell, 1.0), (8, 22));
         assert_eq!(super::device_cell(cell, 2.0), (17, 43));
         assert_eq!(super::device_cell(gpui::size(gpui::px(0.0), gpui::px(0.0)), 2.0), (1, 1));
-        assert_eq!(super::display_facts((17, 43))["cell"], serde_json::json!([17, 43]));
+        assert_eq!(super::display_update(&mut None, &crate::vt::theme(), (17, 43)).unwrap()["cell"], serde_json::json!([17, 43]));
+    }
+
+    #[test]
+    fn theme_changes_update_core_facts_without_resizing() {
+        use crate::vt::{theme, Rgb};
+        let mut theme = theme();
+        let cell = (9, 18);
+        let mut told = None;
+        let first = super::display_update(&mut told, &theme, cell).unwrap();
+        assert_eq!(first["cell"], serde_json::json!([9, 18]));
+        assert!(super::display_update(&mut told, &theme, cell).is_none());
+
+        for background in [Rgb(255, 255, 255), Rgb(23, 25, 29)] {
+            theme.bg = background;
+            let update = super::display_update(&mut told, &theme, cell)
+                .expect("a theme-only change must reach the core");
+            assert_eq!(update["bg"], format!("#{:02x}{:02x}{:02x}", background.0, background.1, background.2));
+            assert_eq!(update["cell"], first["cell"]);
+            assert!(super::display_update(&mut told, &theme, cell).is_none());
+        }
+
+        theme.fg = Rgb(1, 2, 3);
+        assert_eq!(super::display_update(&mut told, &theme, cell).unwrap()["fg"], "#010203");
+        theme.cursor = Rgb(4, 5, 6);
+        assert_eq!(super::display_update(&mut told, &theme, cell).unwrap()["cursor"], "#040506");
+        assert_eq!(super::display_update(&mut told, &theme, (17, 43)).unwrap()["cell"], serde_json::json!([17, 43]));
+        theme.selection_bg = Rgb(7, 8, 9);
+        assert!(super::display_update(&mut told, &theme, (17, 43)).is_none(), "local selection colors are not core display facts");
     }
 }
