@@ -25,7 +25,7 @@ Make `cameronsjo/herdr-app` Cameron's everyday Herdr build: upstream plus the br
 - [ ] 3. Merge upstream (260 commits; trial merge conflicts in 10 files) with `scripts/fork/sync-upstream` logic, record decisions in the ledger, pass the Linux and macOS gates, PR into `fork/master`. `fork/master` is 0 commits ahead of upstream, so this fast-forwards it with no rewrite.
 - [x] 4. (done: cameronsjo/herdr-app#8 to #15; drops in the ledger) Gap-check each TUI-fork feature (its `docs/fork/CHANGES.md`) against upstream app and `herdr-core`; file one `cameronsjo/herdr-app` issue per missing feature, marked mod or core.
 - [ ] 5. Port features in issue order, mod first.
-- [ ] 6. Grep the estate for consumers of the TUI `herdr` binary, deprecate `herdr.rb` in `cameronsjo/homebrew-tap`, archive `cameronsjo/herdr`.
+- [x] 6. Grep the estate for consumers of the TUI `herdr` binary, deprecate `herdr.rb` in `cameronsjo/homebrew-tap`, archive `cameronsjo/herdr`. (Archived 2026-11-15 with a README notice; open issues #156/#157 transferred to cameronsjo/herdr-app#16/#17, three TUI-only issues closed. Tap deprecation held: see Deviations.)
 - [ ] 7. Create the weekly sync routine on the alt account: runs `scripts/fork/sync-upstream`, resolves per `CLAUDE.md`, runs the Linux gate, opens a PR with the seams table. Never pushes `master`.
 
 ## Loop
@@ -47,6 +47,9 @@ Panel: none (T2 shape chosen by the operator in-session; the revival PR gets a f
 ## Deviations
 
 - Plan lives at `docs/fork/plans/`, not `docs/plans/`: upstream's `.gitignore` ignores `docs/plans`, and un-ignoring it would add a seam.
+- Tap formula not deprecated yet: the TUI is still a supported host in forgectl (`internal/herdr`, `HostHerdr`), cadence, herdr-orchestrator, and dotfiles (`Brewfile.darwin`, `bin/herdr-upgrade`). Archiving leaves releases installable, so nothing breaks; retiring the TUI host everywhere is the operator's call.
+- Task 7 (routine) waits for this PR to merge: the routine syncs `fork/master`, which has no browser until then.
+- The gate mirrors upstream CI (`cargo test --locked`, bun tests); `cargo fmt --check` failed on upstream files the fork never touched, so fmt and clippy are not gates.
 
 ## Learnings
 
