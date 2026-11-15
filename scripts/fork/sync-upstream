@@ -132,7 +132,8 @@ git commit --no-edit
 
 echo
 echo "Next:"
-echo "  1. (cd $WORKTREE_DIR && just test && cargo clippy --all-targets --features browser -- -D warnings)"
+echo "  1. (cd $WORKTREE_DIR && just test)   then on macOS: cargo test --locked --features browser-webkit"
+echo "     Compare compiler warnings with the pre-sync tip ($base_before); a rise is a finding."
 echo "  2. scripts/fork/seams   (paste into the PR body)"
 echo "  3. record conflict decisions in docs/fork/CHANGES.md, commit"
 echo "  4. git -C $WORKTREE_DIR push --no-follow-tags -u $FORK_REMOTE $BRANCH"

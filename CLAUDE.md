@@ -27,7 +27,7 @@ Fork lines inside upstream-owned files cause every sync conflict; new files neve
 
 ## Syncing upstream
 
-Run `scripts/fork/sync-upstream`; it is resumable, so re-run it after resolving conflicts. Gate on Linux: `just test` (the default build). Gate on macOS, required before merging a sync: `cargo clippy --all-targets --features browser-webkit -- -D warnings` and `cargo test --features browser-webkit`, because `browser-pane` compiles only on macOS. A clean merge is not a pass:
+Run `scripts/fork/sync-upstream`; it is resumable, so re-run it after resolving conflicts. The gate mirrors upstream CI, which runs `just test` and no fmt or clippy; a stricter gate fails on upstream's own code every sync. Linux: `just test`. macOS, required before merging a sync because `browser-pane` compiles only there: `cargo test --locked --features browser-webkit` too. Compiler warnings must not rise against the pre-sync tip; a widened signature shows up there first. A clean merge is not a pass:
 
 - Before resolving, run `git diff --find-renames=30% --name-status <base> origin/master` over the seam files. A rewritten file means re-implementing its seam, not merging it.
 - After taking `--theirs` on a seam file, re-apply its seams from `git grep -n 'FORK(' <base> -- <file>`.
