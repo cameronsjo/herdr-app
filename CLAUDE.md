@@ -31,11 +31,14 @@ Run `scripts/fork/sync-upstream`; it is resumable, so re-run it after resolving 
 
 - Before resolving, run `git diff --find-renames=30% --name-status <base> origin/master` over the seam files. A rewritten file means re-implementing its seam, not merging it.
 - After taking `--theirs` on a seam file, re-apply its seams from `git grep -n 'FORK(' <base> -- <file>`.
+- `src/layout/fork_browser.rs` `Saved` mirrors upstream's serde shape for `Content`. If the sync changes `Content`'s serde attributes in `src/layout.rs`, change `Saved` to match: a new variant fails to compile, a changed attribute does not.
 - Count `log_safe` and escape call sites in `src/browser/` and seam files before and after; a drop is a finding.
 - Record each conflict decision under the sync's dated heading in `docs/fork/CHANGES.md`.
 
 ## Building
 
 `vendor/ghostty` is a submodule (`git submodule update --init --depth 1 vendor/ghostty`) and needs Zig 0.16; set `ZIG` to its binary when the default `zig` is older. The TUI fork pinned 0.15.2, so its notes do not apply here.
+
+On macOS, upstream's `files::tests::a_watched_folder_reports_changes_and_misses_none_between_waits` waits forever, with no failure message, whenever the OS delivers no FSEvents (seen 2026-11-15, in and out of the sandbox). If a run stalls on it, pass `-- --skip files::tests::a_watched_folder_reports_changes_and_misses_none_between_waits` and say so in the PR; the fork does not touch `src/files.rs`.
 
 `scripts/browser-dev-run` builds and runs the browser build in an isolated home; `scripts/browser-daily` switches the everyday app to it and back. Never stop or restart the running app or `herdr-core` from a session.

@@ -25,6 +25,8 @@ compile_error!("pick one browser engine: the `browser` feature (CEF) or `browser
 #[cfg(all(target_os = "macos", feature = "browser-pane", not(any(feature = "browser", feature = "browser-webkit"))))]
 compile_error!("browser-pane (or dev-agent-access) needs an engine: add the `browser` feature (CEF) or `browser-webkit` (WKWebView)");
 
+/// The control socket is this user's only (every build: `control.rs`).
+pub mod socket;
 #[cfg(any(test, all(target_os = "macos", feature = "browser-pane")))]
 pub mod agent;
 #[cfg(any(test, all(target_os = "macos", feature = "browser-pane")))]
