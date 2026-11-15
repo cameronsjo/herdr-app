@@ -2,8 +2,8 @@
 # Keeps the everyday browser build (~/Applications/Herdr Browser.app, see
 # scripts/browser-daily) on the newest fork/master, built on this Mac.
 #
-#   daily-update check     fetch fork/master; when it moved and its CI passed
-#                          (`test` and `browser-webkit`), build the WebKit bundle
+#   daily-update check     fetch fork/master; when it moved, is a PR merge, and
+#                          its CI passed (ci.yml, fork-browser.yml), build the WebKit bundle
 #                          in its own worktree. Herdr Browser not running:
 #                          install it in place. Running: leave it built and
 #                          notify once; nothing is quit or restarted.
@@ -24,7 +24,7 @@
 set -Eeuo pipefail
 
 repo_url_fork="cameronsjo/herdr-app"
-required_checks=("test" "browser-webkit")
+required_workflows=(".github/workflows/ci.yml" ".github/workflows/fork-browser.yml")
 state_dir="$HOME/.local/share/herdr-fork"
 built_file="$state_dir/built"          # fork/master SHA of the last good build
 installed_file="$state_dir/installed"  # SHA now in ~/Applications/Herdr Browser.app
@@ -59,7 +59,7 @@ build="$(cd -P -- "$root/.." && pwd -P)/herdr-app-worktrees/daily"
 fork_remote() {
   local r
   for r in $(git -C "$root" remote); do
-    case "$(git -C "$root" remote get-url "$r")" in *"$repo_url_fork"|*"$repo_url_fork.git") echo "$r"; return 0 ;; esac
+    if [[ "$(git -C "$root" remote get-url "$r")" =~ github\.com[:/]${repo_url_fork}(\.git)?$ ]]; then echo "$r"; return 0; fi
   done
   echo "daily-update: no remote of $root points at $repo_url_fork" >&2; return 2
 }
@@ -75,12 +75,20 @@ lock() {
   trap 'rm -rf "$lock_dir"' EXIT
 }
 
-# Every check run named in required_checks passed on this commit (fail closed: no gh, no build).
+# Built only when both hold (fail closed: no gh, an API error, or a miss means no build):
+# - the commit is the merge commit of a PR merged into master (master moves
+#   only by PR merge: ruleset 27338965), not a direct push;
+# - each required workflow file ran on that push to master and succeeded, and
+#   none failed. Matched by workflow path and event, not by check-run name: a
+#   job or app can name a check "test", but not be .github/workflows/ci.yml.
 ci_passed() {
-  local sha=$1 runs name
-  runs=$(gh api "repos/$repo_url_fork/commits/$sha/check-runs?per_page=100" --jq '.check_runs[] | select(.conclusion == "success") | .name') || return 1
-  for name in "${required_checks[@]}"; do
-    command grep -qxF "$name" <<<"$runs" || return 1
+  local sha=$1 prs runs wf
+  prs=$(gh api "repos/$repo_url_fork/commits/$sha/pulls" --jq ".[] | select(.merged_at != null and .base.ref == \"master\" and .merge_commit_sha == \"$sha\") | .number") || return 1
+  [[ -n "$prs" ]] || { say "${sha:0:8}: not the merge commit of a PR merged into master"; return 1; }
+  runs=$(gh api "repos/$repo_url_fork/actions/runs?head_sha=$sha&event=push&branch=master&per_page=100" --jq '.workflow_runs[] | "\(.path) \(.conclusion)"') || return 1
+  for wf in "${required_workflows[@]}"; do
+    command grep -qxF "$wf success" <<<"$runs" || { say "${sha:0:8}: $wf has not succeeded on master"; return 1; }
+    if command grep -qE "^$wf (failure|cancelled|timed_out)$" <<<"$runs"; then say "${sha:0:8}: a run of $wf failed"; return 1; fi
   done
 }
 
@@ -102,8 +110,11 @@ refresh_self() {
   local newer="$build/scripts/fork/daily-update"
   [[ -f "$self" && -f "$newer" ]] || return 0
   cmp -s "$newer" "$self" && return 0
+  local old_sum new_sum
+  old_sum=$(shasum -a 256 "$self" | cut -c1-12); new_sum=$(shasum -a 256 "$newer" | cut -c1-12)
   install -m 0755 "$newer" "$self.new" && mv -f "$self.new" "$self"
-  say "updated the agent's script from the build worktree"
+  say "updated the agent's script from the build worktree at $(git -C "$build" rev-parse --short HEAD): $old_sum -> $new_sum"
+  notify "The daily-update agent's script changed ($old_sum -> $new_sum); see $log"
 }
 
 cmd_check() {
@@ -117,9 +128,10 @@ cmd_check() {
   git -C "$root" fetch --quiet --no-tags "$remote" master
   sha=$(git -C "$root" rev-parse "refs/remotes/$remote/master")
   if [[ "$(cat "$built_file" 2>/dev/null)" != "$sha" ]]; then
-    if ! ci_passed "$sha"; then say "${sha:0:8}: CI (${required_checks[*]}) not passed yet: not building"; return 0; fi
+    if ! ci_passed "$sha"; then say "${sha:0:8}: not building"; return 0; fi
     if [[ -d "$build" ]]; then
-      git -C "$build" checkout --quiet --detach "$sha"
+      git -C "$build" checkout --quiet --force --detach "$sha"
+      git -C "$build" clean -ffdxq -e target
     else
       git -C "$root" worktree prune
       git -C "$root" worktree add --quiet --detach "$build" "$sha"
