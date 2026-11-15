@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Prints the fork's footprint inside files upstream owns: the lines every
+# upstream sync can conflict on. New fork-only files are counted but not
+# listed; they never conflict.
+#
+# Usage: scripts/fork/seams [upstream-ref]   (default: origin/master)
+# Exit: 0 always when git succeeds; this is a meter, not a gate.
+set -euo pipefail
+
+UPSTREAM=${1:-origin/master}
+cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")/../.."
+
+git rev-parse --verify --quiet "${UPSTREAM}^{commit}" >/dev/null || {
+  echo "error: '$UPSTREAM' is not a commit; fetch origin first (git fetch origin)" >&2
+  exit 2
+}
+base=$(git merge-base HEAD "$UPSTREAM")
+
+stat=$(git diff --diff-filter=M --numstat "$base" HEAD)
+new_files=$(git diff --diff-filter=A --name-only "$base" HEAD | wc -l | tr -d ' ')
+# git grep exits 1 on zero matches; zero markers is a valid count, not an error.
+markers=$( { git grep -n 'FORK(' HEAD -- . ':!CLAUDE.md' ':!docs/fork' ':!scripts/fork' || [[ $? -eq 1 ]]; } | wc -l | tr -d ' ')
+
+printf '%6s %6s  %s\n' added removed "upstream-owned file (vs ${base:0:8})"
+sort -k1,1nr <<<"$stat" | awk 'NF { printf "%6s %6s  %s\n", $1, $2, $3 }'
+awk 'NF { a += $1; d += $2; n++ } END { printf "%6d %6d  total in %d files\n", a, d, n }' <<<"$stat"
+echo "fork-only new files: $new_files"
+echo "FORK( seam markers:  $markers"
