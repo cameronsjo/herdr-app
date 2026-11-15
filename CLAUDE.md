@@ -10,6 +10,7 @@ Upstream `herdrdev/herdr-app` plus the browser pane (`src/browser/`) and feature
 
 - Remotes: `origin` = `herdrdev/herdr-app` (fetch only), `fork` = `cameronsjo/herdr-app`.
 - **MUST NOT** push, open PRs, file issues, or comment on any `herdrdev/*` repo. Fork issues live on `cameronsjo/herdr-app`.
+- **MUST** pass `-R cameronsjo/herdr-app` to every `gh pr` and `gh issue` command: in a fork, `gh` defaults to the parent repo.
 - `fork/master` is the mainline. Merge upstream into it; never rebase it.
 
 ## Merge-friendly by construction
