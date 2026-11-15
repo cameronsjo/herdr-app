@@ -25,3 +25,19 @@ Built 2026-10-30 to 2026-11-01 on `browser-prototype`. Design and security model
 ## Ported from the TUI fork
 
 Features carried over from `cameronsjo/herdr` (archived). One entry per feature when it lands, naming the original ledger section and whether it shipped as a mod or Rust.
+
+Gap check 2026-11-15 against herdr-app `ce9a3cf` and herdr-core. To port: cameronsjo/herdr-app#8 to #15 (seven mods, one app-Rust). Not ported, because upstream already covers them:
+
+| TUI fork feature | Upstream equivalent |
+|---|---|
+| Pin an agent (cameronsjo/herdr#96) | `terminal.pin` (`src/commands.rs:48`), Pinned group in the agents mod |
+| Workers under their launcher (`--parent`, cameronsjo/herdr#98) | `hc run --parent` (herdr-core `docs/commands.md:498`), nested sub-agent rows |
+| Peek a pane (cameronsjo/herdr#95) | `terminal.peek` (`src/commands.rs:63`) |
+| `pane focus <id>` (cameronsjo/herdr#94) | `pane.focus {pane\|terminal}` (`src/commands.rs:60`) |
+| Drag a pane to swap | grip drag, `pane.swap {target}` (`src/commands.rs:62`) |
+| `send-text --paste` (cameronsjo/herdr#121) | `hc send` pastes, then presses Enter |
+| Prompt delivery report (cameronsjo/herdr#102) | `SendResult.started` and `status` (herdr-core `schema/hc.openrpc.json`) |
+| `agent start --exec` (cameronsjo/herdr#110) | status comes from the agent's own OSC 7501 report, not its process name |
+| Palette recents and keywords, confirm destructive actions, type-submit, skill directory | built in |
+
+TUI-only (server, renderer, or fork tooling): cold-restore labels, `rows_by_agent` warning, Codex hooks, sync and release scripts.

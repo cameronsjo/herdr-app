@@ -23,7 +23,7 @@ Make `cameronsjo/herdr-app` Cameron's everyday Herdr build: upstream plus the br
 - [x] 1. Seed the project: `CLAUDE.md`, `docs/fork/CHANGES.md`, `scripts/fork/seams`, `scripts/fork/sync-upstream`, this plan.
 - [ ] 2. Shrink the seams before merging: move browser code out of `src/window.rs` (589 lines), `src/layout.rs` (147) and `src/control.rs` (42) into `src/browser/`, leaving `FORK(browser)` call lines. Re-measure with `scripts/fork/seams`. Behavior unchanged; the macOS gate passes on the old base.
 - [ ] 3. Merge upstream (260 commits; trial merge conflicts in 10 files) with `scripts/fork/sync-upstream` logic, record decisions in the ledger, pass the Linux and macOS gates, PR into `fork/master`. `fork/master` is 0 commits ahead of upstream, so this fast-forwards it with no rewrite.
-- [ ] 4. Gap-check each TUI-fork feature (its `docs/fork/CHANGES.md`) against upstream app and `herdr-core`; file one `cameronsjo/herdr-app` issue per missing feature, marked mod or core.
+- [x] 4. (done: cameronsjo/herdr-app#8 to #15; drops in the ledger) Gap-check each TUI-fork feature (its `docs/fork/CHANGES.md`) against upstream app and `herdr-core`; file one `cameronsjo/herdr-app` issue per missing feature, marked mod or core.
 - [ ] 5. Port features in issue order, mod first.
 - [ ] 6. Grep the estate for consumers of the TUI `herdr` binary, deprecate `herdr.rb` in `cameronsjo/homebrew-tap`, archive `cameronsjo/herdr`.
 - [ ] 7. Create the weekly sync routine on the alt account: runs `scripts/fork/sync-upstream`, resolves per `CLAUDE.md`, runs the Linux gate, opens a PR with the seams table. Never pushes `master`.
