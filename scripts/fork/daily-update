@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+# Keeps the everyday browser build (~/Applications/Herdr Browser.app, see
+# scripts/browser-daily) on the newest fork/master, built on this Mac.
+#
+#   daily-update check     fetch fork/master; when it moved, build the WebKit
+#                          bundle in its own worktree. Herdr Browser not running:
+#                          install it in place. Running: leave it staged and
+#                          send a notification; nothing is quit or restarted.
+#   daily-update apply     put the staged build in use now: quits Herdr and
+#                          opens the new build (scripts/browser-daily on; your
+#                          terminals keep running in the core)
+#   daily-update status    what is built, installed, and waiting
+#   daily-update install   add the launchd agent (daily at 04:30, on AC power)
+#   daily-update uninstall remove it
+#
+# The agent runs a copy of this script (~/.local/share/herdr-fork/), so a
+# checkout in the build worktree never rewrites the script while it runs.
+# Exit: 0 done or nothing to do; 1 the build or install failed; 2 setup error.
+set -euo pipefail
+
+repo_url_fork="cameronsjo/herdr-app"
+state_dir="$HOME/.local/share/herdr-fork"
+built_file="$state_dir/built"          # fork/master SHA of the last good build
+installed_file="$state_dir/installed"  # SHA now in ~/Applications/Herdr Browser.app
+log="$HOME/Library/Logs/herdr-fork-daily.log"
+label=dev.herdr.fork.daily-update
+plist="$HOME/Library/LaunchAgents/$label.plist"
+daily="$HOME/Applications/Herdr Browser.app"
+
+# Any checkout of the repo finds the primary one; the build worktree sits beside the others.
+mkdir -p "$state_dir"
+src_dir=$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+if common=$(git -C "$src_dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
+  root=$(cd -P -- "$common/.." && pwd -P)
+  printf '%s\n' "$root" > "$state_dir/root" 2>/dev/null || true
+else
+  root=$(cat "$state_dir/root" 2>/dev/null) || { echo "daily-update: run 'install' from a checkout of $repo_url_fork first" >&2; exit 2; }
+fi
+build="$(cd -P -- "$root/.." && pwd -P)/herdr-app-worktrees/daily"
+
+export PATH="$HOME/.cargo/bin:$HOME/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export ZIG="${ZIG:-$HOME/.local/share/mise/installs/zig/0.16.0/bin/zig}"
+unset HERDR_APP_HOME XDG_STATE_HOME HC_SESSION HERDR_APP_ID CARGO_TARGET_DIR
+
+say() { printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*"; }
+notify() { osascript -e "display notification \"$1\" with title \"Herdr fork\"" >/dev/null 2>&1 || true; }
+running() { pgrep -f -- "$daily/Contents/MacOS/" >/dev/null 2>&1; }
+fork_remote() {
+  local r
+  for r in $(git -C "$root" remote); do
+    case "$(git -C "$root" remote get-url "$r")" in *"$repo_url_fork"|*"$repo_url_fork.git") echo "$r"; return 0 ;; esac
+  done
+  echo "daily-update: no remote of $root points at $repo_url_fork" >&2; exit 2
+}
+
+# Same steps as browser-daily on, minus quitting and opening: its own bundle id, signed ad hoc.
+install_bundle() {
+  local src="$build/target/browser-dev-webkit/Herdr Dev.app" sha=$1
+  mkdir -p "$(dirname "$daily")"
+  rm -rf "$daily.next"
+  ditto "$src" "$daily.next"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier dev.herdr.app.browser-daily" "$daily.next/Contents/Info.plist"
+  codesign --force --deep --sign - --preserve-metadata=entitlements "$daily.next"
+  rm -rf "$daily"
+  mv "$daily.next" "$daily"
+  printf '%s\n' "$sha" > "$installed_file"
+}
+
+cmd_check() {
+  mkdir -p "$state_dir"
+  if ! pmset -g ps | command grep -q "AC Power"; then say "on battery: skipped"; return 0; fi
+  local remote sha
+  remote=$(fork_remote)
+  git -C "$root" fetch --quiet --no-tags "$remote" master
+  sha=$(git -C "$root" rev-parse "refs/remotes/$remote/master")
+  if [[ "$(cat "$built_file" 2>/dev/null)" == "$sha" ]]; then
+    say "fork/master ${sha:0:8} already built"
+  else
+    if [[ -d "$build" ]]; then
+      git -C "$build" checkout --quiet --detach "$sha"
+    else
+      git -C "$root" worktree add --quiet --detach "$build" "$sha"
+    fi
+    git -C "$build" submodule update --init --depth 1 vendor/ghostty
+    say "building ${sha:0:8} (WebKit bundle)"
+    if ! (cd "$build" && bash scripts/browser-dev-bundle --webkit); then
+      say "build of ${sha:0:8} failed"
+      notify "The build of fork/master ${sha:0:8} failed; see $log"
+      return 1
+    fi
+    printf '%s\n' "$sha" > "$built_file"
+  fi
+  if [[ "$(cat "$installed_file" 2>/dev/null)" == "$sha" ]]; then return 0; fi
+  if running; then
+    say "${sha:0:8} built; Herdr Browser is running, so it waits"
+    notify "Build ${sha:0:8} is ready. To use it: bash $state_dir/daily-update apply (reopens Herdr; terminals keep running)"
+  else
+    install_bundle "$sha"
+    say "installed ${sha:0:8} in $daily"
+  fi
+}
+
+cmd_apply() {
+  local sha
+  sha=$(cat "$built_file" 2>/dev/null) || { echo "daily-update: nothing built yet; run: daily-update check" >&2; exit 1; }
+  (cd "$build" && bash scripts/browser-daily on)
+  printf '%s\n' "$sha" > "$installed_file"
+}
+
+cmd_status() {
+  echo "build worktree: $build"
+  echo "built:          $(cat "$built_file" 2>/dev/null || echo none)"
+  echo "installed:      $(cat "$installed_file" 2>/dev/null || echo none) ($daily)"
+  if running; then echo "Herdr Browser:  running"; else echo "Herdr Browser:  not running"; fi
+  if launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then echo "agent:          loaded ($plist)"; else echo "agent:          not loaded"; fi
+  echo "log:            $log"
+}
+
+cmd_install() {
+  mkdir -p "$state_dir" "$(dirname "$plist")" "$(dirname "$log")"
+  install -m 0755 "${BASH_SOURCE[0]}" "$state_dir/daily-update"
+  cat > "$plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$label</string>
+  <key>ProgramArguments</key>
+  <array><string>/bin/bash</string><string>$state_dir/daily-update</string><string>check</string></array>
+  <key>WorkingDirectory</key><string>$HOME</string>
+  <key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>4</integer><key>Minute</key><integer>30</integer></dict>
+  <key>StandardOutPath</key><string>$log</string>
+  <key>StandardErrorPath</key><string>$log</string>
+  <key>LowPriorityIO</key><true/>
+  <key>Nice</key><integer>10</integer>
+</dict>
+</plist>
+PLIST
+  plutil -lint "$plist" >/dev/null
+  launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
+  launchctl bootstrap "gui/$(id -u)" "$plist"
+  echo "installed: $plist (daily 04:30, on AC power); log $log"
+  echo "first build now: bash $state_dir/daily-update check"
+}
+
+cmd_uninstall() {
+  launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
+  rm -f "$plist"
+  echo "removed the agent; the build worktree $build and $daily stay"
+}
+
+case "${1:-}" in
+  check) cmd_check ;;
+  apply) cmd_apply ;;
+  status) cmd_status ;;
+  install) cmd_install ;;
+  uninstall) cmd_uninstall ;;
+  *) sed -n '2,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac

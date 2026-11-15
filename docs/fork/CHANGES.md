@@ -59,6 +59,16 @@ Built 2026-10-30 to 2026-11-01 on `browser-prototype`. Design and security model
 - Seams (upstream-owned files touched): see the footprint table. The window's browser code is in `src/window/fork_browser.rs`, the saved form of a browser block in `src/layout/fork_browser.rs`, and the control socket's owner-only checks in `src/browser/socket.rs`; `src/window.rs` (33 lines), `src/layout.rs` (6) and `src/control.rs` (2) keep only `FORK(browser)` call lines.
 - `Content::Browser` still widens upstream's `Content` enum, and `Content` (de)serializes through the fork's `Saved`, which must mirror upstream's serde attributes. cameronsjo/herdr-app#18 tracks removing the variant.
 
+## Updates and automation
+
+Added 2026-11-15; setup order and the routine's prompt: `docs/fork/weekly-sync.md`.
+
+- Weekly upstream sync PRs from a cloud routine, merged by auto-merge (merge commits) once CI passes.
+- `.github/workflows/fork-browser.yml` (fork-only): the WebKit browser build's tests on macOS, the check upstream's CI can't run.
+- `.github/dependabot.yml`: the fork's own crates only; upstream's Actions entry kept, its PRs off on the fork (one `FORK(browser)` line).
+- `src/update.rs` `checks_core`: the fork's browser builds offer `herdr-core` updates as release builds do (one `FORK(browser)` line).
+- `scripts/fork/daily-update`: a launchd agent on Cameron's Mac builds each new `fork/master` and installs it as the everyday browser build, never quitting a running one.
+
 ## Ported from the TUI fork
 
 Features carried over from `cameronsjo/herdr` (archived). One entry per feature when it lands, naming the original ledger section and whether it shipped as a mod or Rust.

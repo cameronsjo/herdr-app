@@ -5,6 +5,23 @@ updates:
     directory: /
     schedule:
       interval: monthly
+    open-pull-requests-limit: 0  # FORK(browser): upstream bumps these; each sync brings them
     groups:
       actions:
         patterns: ["*"]
+  # FORK(browser): version bumps for the fork's own dependencies only. Upstream
+  # owns every other one; a fork-side bump would conflict at every sync. Not
+  # here: cef (pinned to the CEF binary it downloads; bump both by hand) and
+  # raw-window-handle (upstream declares it too).
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    allow:
+      - dependency-name: objc2-web-kit
+      - dependency-name: tungstenite
+      - dependency-name: block2
+    commit-message:
+      prefix: chore(deps)
