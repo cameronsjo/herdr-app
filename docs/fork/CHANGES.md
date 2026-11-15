@@ -63,11 +63,11 @@ Built 2026-10-30 to 2026-11-01 on `browser-prototype`. Design and security model
 
 Added 2026-11-15; setup order and the routine's prompt: `docs/fork/weekly-sync.md`.
 
-- Weekly upstream sync PRs from a cloud routine, merged by auto-merge (merge commits) once CI passes.
+- Weekly upstream sync PRs from a cloud routine. A sync with no conflicts auto-merges (a merge commit) once CI passes; one where the routine resolved conflicts stays a draft for Cameron.
 - `.github/workflows/fork-browser.yml` (fork-only): the WebKit browser build's tests on macOS, the check upstream's CI can't run.
-- `.github/dependabot.yml`: the fork's own crates only; upstream's Actions entry kept, its PRs off on the fork (one `FORK(browser)` line).
-- `src/update.rs` `checks_core`: the fork's browser builds offer `herdr-core` updates as release builds do (one `FORK(browser)` line).
-- `scripts/fork/daily-update`: a launchd agent on Cameron's Mac builds each new `fork/master` and installs it as the everyday browser build, never quitting a running one.
+- `.github/dependabot.yml`: `tungstenite` only (the fork's one stand-alone crate); upstream's Actions entry kept, its version PRs off on the fork (one `FORK(browser)` line). Syncs copy `ci.yml`'s action pins into `fork-browser.yml`.
+- `src/update.rs` `checks_core`: the fork's browser builds offer `herdr-core` updates as release builds do, except in an isolated dev run with its own app home (one `FORK(browser)` line).
+- `scripts/fork/daily-update`: a launchd agent on Cameron's Mac builds each new `fork/master` whose CI passed and installs it as the everyday browser build, never quitting a running one.
 
 ## Ported from the TUI fork
 

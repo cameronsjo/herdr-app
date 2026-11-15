@@ -126,7 +126,7 @@ fn checks_app() -> Option<PathBuf> {
 /// A release build checks the core; a source build only when pointed at a test release server.
 fn checks_core() -> bool {
     option_env!("HERDR_APP_RELEASE").is_some() || std::env::var_os("HERDR_RELEASES_URL").is_some()
-        || cfg!(feature = "browser-pane") // FORK(browser): the fork's daily build has no release updater, so it offers core updates itself
+        || (cfg!(feature = "browser-pane") && std::env::var_os("HERDR_APP_HOME").is_none()) // FORK(browser): the fork's daily build offers core updates; an isolated dev run (own app home) doesn't
 }
 
 /// For the settings screen: both programs, what's waiting, when we last looked.
