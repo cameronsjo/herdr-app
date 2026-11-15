@@ -33,7 +33,7 @@ terminal inside a block, run any app command, run programs (`exec`) and
 fetch URLs, keep state per mod or shared between mods, animate natively.
 
 You can't: use HTML, CSS, a web view (a browser pane is a layout block,
-not a mod), Node APIs or `setTimeout`; draw
+not a mod <!-- FORK(browser) -->), Node APIs or `setTimeout`; draw
 outside your block except through overlays; change how a terminal itself
 draws text; read or change other mods' code at run time.
 
@@ -228,7 +228,7 @@ A layout is a tree of nodes. Four types:
   terminal, full size: the one chosen with `agent.focus` / `agent.next`, else
   the focused pane's agent, else the first agent), or `{ "mod": "browser-prototype",
   "props": { "browser": "b1", "url": "...", "profile"?: "agent" } }` (a web
-  page the app draws, not a mod folder; it never opens in `floating`).
+  page the app draws, not a mod folder; it never opens in `floating`). <!-- FORK(browser) -->
 - `row` / `column`: children side by side / stacked.
 - `stack`: shows one child (`"active": "<child id>"`), with an optional
   `"header"` (a mod that draws tabs, or `"tabs"` for a plain built-in strip).
@@ -397,7 +397,7 @@ The tab block says how each pane of the shown tab is wrapped:
   because the numbers changed. `position`: `top` or
   `bottom`; `reveal: "hover"` shows it only while the pointer is on the pane,
   drawn over the terminal so the terminal never resizes (over a browser pane it is
-  drawn beside the page, as with `always`). The shipped `pane`
+  drawn beside the page, as with `always`) <!-- FORK(browser) -->. The shipped `pane`
   mod keeps its divider on the terminal-facing edge and reads the frame
   position from `layout()`.
 - `lone: true` frames a tab's only pane too (default: only when split).
@@ -528,7 +528,7 @@ shortcuts must then be added by hand.
   `terminal` (a terminal has focus), `mod:<name>`, `browser` (a browser pane's page has
   the keyboard, macOS: `cmd-=`/`cmd--`/`cmd-0` zoom the page; `terminal` there gives
   the page the key). The more specific section wins: `layout:terminals` over `global`,
-  `terminal` and `browser` over both.
+  `terminal` and `browser` over both. <!-- FORK(browser) -->
 - An action is a command (`name`, or `name:value`: the value fills the
   command's first argument), `send:<text>` (types into the terminal),
   `<mod>.<command>` (delivered to that mod's `nextCommand()`), or `terminal`
@@ -669,6 +669,7 @@ The main ones:
   started, including its release outside the pane; other panes don't receive it.
   Terminals display Kitty graphics, including Unicode placeholder images used by
   programs such as yazi; partial images and scrolling follow the placeholder cells.
+<!-- FORK(browser): every browser command, in one block (cargo test checks each is named). -->
 - Browsers (macOS builds with the `browser` feature; elsewhere a placeholder):
   `browser.open {url, place?, pane?, profile?}` (place `"right"` default, `"down"`, `"tab"`;
   says `{browser, pane}`), `browser.navigate {browser, url}`, `browser.back {browser}`,
@@ -938,7 +939,7 @@ has 124 programs (agents, editors, runtimes, tools, databases, infra);
 - The defaults are mods too, read them as examples: `spaces`, `agents`,
   `tabs` (the tab bar), `menu`, `prompt`, `confirm`, `help`, `toast`,
   Terminals' `picker`, `peek`, and `pane` (an
-  example pane header, not used by the default layouts; a browser pane gets
+  example pane header, not used by the default layouts; <!-- FORK(browser) --> a browser pane gets
   back, forward, reload, an address field, zoom, a viewport picker and DevTools from its
   `browser.js`), and `worktree`
   (git worktrees as spaces: the space menu's and the + menu's New worktree,

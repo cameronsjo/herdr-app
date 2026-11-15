@@ -74,12 +74,12 @@ export function playSound(sound: string): null;
  *   terminal.clear_selection {terminal?}. No default keys or built-in copy mode.
  *   terminal.select_all {terminal?} (whole screen and scrollback, or only the alternate screen; Cmd+A on macOS).
  *   terminal.right_click {to: "program" | "menu", terminal?} (right-clicks to a program that takes the mouse; Shift: the menu).
- * Browsers (macOS builds with the browser feature): browser.open {url, place?, pane?, profile?},
+ *   terminal.scroll {lines | pages | to: "top" | "bottom", terminal?} (Herdr's view of the history: negative goes up; pages may be fractional).
+ * Browsers (FORK(browser); macOS builds with the browser feature): browser.open {url, place?, pane?, profile?},
  *   browser.navigate {browser, url}, browser.back|forward|reload|close {browser}, browser.devtools {browser, open?},
  *   browser.open_external {browser?} (the page in the default web browser; http and https only),
  *   browser.agent_browser_setup {} (adds Herdr's provider to ~/.agent-browser/config.json for terminals older than this Herdr),
  *   browser.agent_access {browser, on: false} (only the person's click in the pane turns it on).
- *   terminal.scroll {lines | pages | to: "top" | "bottom", terminal?} (Herdr's view of the history: negative goes up; pages may be fractional).
  * Agents: agent.next, agent.prev (the agents list's order), agent.focus {terminal} (sub-agents too).
  * Layout (the shown layout's nodes by id): layout.toggle|show|hide {id}, layout.resize {id, px | weight},
  *   layout.select {stack, child}, layout.set {layout} (personal trees; shipped layouts: click/look fields only), layout.switch {name?} (no name: the next one).
@@ -212,12 +212,12 @@ export interface PaneScroll {
 export interface PaneInfo {
   pane: string;
   /** null for a mod pane (`pane.split {mod}`): then `mod` names it, and only
-   *  pane, mod, tab, title, focused and zoomed are set. Also null for a browser
+   *  pane, mod, tab, title, focused and zoomed are set. Also null for a browser (FORK(browser))
    *  pane: then `browser` and `url` say which page (see browsers()). */
   terminal: string | null;
   mod?: string;
-  browser?: string;
-  url?: string;
+  browser?: string; // FORK(browser)
+  url?: string; // FORK(browser)
   tab: string;
   /** The terminal's title (what the program set), or the mod's name. */
   title: string;
@@ -240,6 +240,7 @@ export interface PaneInfo {
  *  `panes().find((p) => p.pane === props().pane)`. Live. */
 export function panes(): PaneInfo[];
 
+// FORK(browser): to browsers().
 export interface BrowserInfo {
   /** Its id (`b1`), for browser.navigate, browser.close, ... */
   browser: string;

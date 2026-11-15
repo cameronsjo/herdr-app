@@ -53,6 +53,7 @@ docs-check: build
     bun test scripts/docs.test.ts
     bun scripts/docs.ts check
 
+# FORK(browser): browser dev recipes, from here to browser-fixture.
 # Builds target/browser-dev/Herdr Dev.app (scripts/browser-dev-bundle): the
 # `browser` feature, CEF's framework and helpers. CEF_PATH (default
 # ~/.cache/herdr-app/cef) keeps CEF's ~600 MB download outside the repo; a

@@ -74,7 +74,7 @@ const AGENTS_MD: &str = include_str!("../defaults/AGENTS.md");
 /// mods. Shipped mods are replaced whole; edits are first moved to a clone.
 pub fn write_workspace() -> std::io::Result<()> {
     let dir = app_dir();
-    // The app home holds the control socket and the browser profiles: only
+    // FORK(browser): the app home holds the control socket and the browser profiles: only
     // this user may open it (created 0700, an existing one tightened).
     #[cfg(unix)]
     {
@@ -588,7 +588,7 @@ pub struct Snapshot {
     /// Every pane: { pane, terminal, tab, title, cwd, branch, status, app, focused, zoomed }.
     pub panes: Value,
     /// Every open browser: { browser, url, title, loading, can_go_back, can_go_forward, space, pane, agent_access, focused }.
-    pub browsers: Value,
+    pub browsers: Value, // FORK(browser)
     pub terminals: Value,
     pub focused: Value,
     /// Floating blocks by id: { edge, align, vertical }.
@@ -600,7 +600,7 @@ pub struct Snapshot {
 impl Default for Snapshot {
     /// Lists start empty, never null, so mods can map over them right away.
     fn default() -> Self {
-        Snapshot { layout: Value::Null, spaces: json!([]), machines: json!([]), agents: json!([]), panes: json!([]), browsers: json!([]), terminals: json!([]), focused: Value::Null, floats: json!({}), window: Value::Null }
+        Snapshot { layout: Value::Null, spaces: json!([]), machines: json!([]), agents: json!([]), panes: json!([]), browsers: json!([]), terminals: json!([]), focused: Value::Null, floats: json!({}), window: Value::Null } // FORK(browser): browsers
     }
 }
 

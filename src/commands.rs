@@ -47,6 +47,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("terminal.right_click", &[req("to"), opt("terminal")], "Where right-clicks in a terminal (default: the focused one) go when its program takes the mouse: \"program\" or \"menu\" (Herdr's, the default). Shift+right-click is always the menu."),
     cmd("terminal.pin", &[req("terminal"), req("pinned")], "Pin an agent to the top of the agent lists (pinned true) or unpin it (false). Pins are kept with the terminal, so every Herdr client shows them, and end with it."),
     cmd("terminal.kill", &[req("terminal")], "End a terminal and its sub-agents."),
+    // FORK(browser): browser commands, run by src/window/fork_browser.rs (to `browser.agent_access`).
     cmd("browser.open", &[req("url"), opt("place"), opt("pane"), opt("profile")],
         "Open a web page (http, https or about:blank) in a browser pane (macOS builds with the browser feature): \"right\" (default) or \"down\" of a pane (default: the focused one), or as a new \"tab\" in its space. profile \"agent\": a separate test profile, the only kind an agent can drive once the person allows it. Says its browser id and pane."),
     cmd("browser.navigate", &[req("browser"), req("url")], "Show another page in a browser (an id from `herdr-app ls`)."),

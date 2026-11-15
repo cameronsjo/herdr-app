@@ -1681,6 +1681,7 @@ impl AppWindow {
         // A mod block holding the keyboard gets it back (a popup over it closed).
         if dialog.is_none() && self.focused_block.as_ref().is_some_and(|b| self.mod_block_shown(b)) {
             self.focus.focus(window, cx);
+            self.sync_browser_keys(window); // FORK(browser): the mod block keeps the keyboard from pages
             return self.hand_keyboard();
         }
         let shown = if terminal_block(&self.chrome, self.focused_pane.as_deref()).is_some() {

@@ -33,7 +33,7 @@ fn embed(base: &Path, folder: &str, name: &str, file: &str) {
     std::fs::write(Path::new(&std::env::var("OUT_DIR").unwrap()).join(file), code).unwrap();
 }
 
-/// The `browser` feature: cef-dll-sys downloads CEF's ~600 MB distribution
+/// FORK(browser): the `browser` feature's cef-dll-sys downloads CEF's ~600 MB distribution
 /// into `target/` when CEF_PATH is unset, inside the repo. Refuse that early
 /// (this script runs before cef-dll-sys's, which waits on its own build
 /// dependencies) with what to do instead.
@@ -56,7 +56,7 @@ fn check_cef_path(base: &Path) {
 
 fn main() {
     let base = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
-    check_cef_path(&base);
+    check_cef_path(&base); // FORK(browser)
     embed(&base, "defaults/mods", "DEFAULT_MODS", "default_mods.rs");
     embed(&base, "defaults/icons", "DEFAULT_ICONS", "default_icons.rs");
     embed(&base, "defaults/frame", "FRAME_MODS", "frame_mods.rs");

@@ -144,6 +144,10 @@ impl AppWindow {
         }
         let pane_page = self.pane_page();
         let covered = self.fork.browsers.covered();
+        // A mod block holding the keyboard (`pane.go` onto a focusable mod,
+        // upstream's `focus_block`) is a Herdr control too: the focused pane
+        // stays the browser's, but typing goes to the mod.
+        let control = control || self.focused_block.is_some();
         let page = crate::browser::keyboard_page(dialog, control, self.fork.layout_page.as_deref(), pane_page.as_deref(), &covered).map(str::to_owned);
         self.fork.browsers.keys(page.as_deref(), window);
     }

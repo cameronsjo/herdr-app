@@ -185,6 +185,7 @@ floats included, even when the window is covered or minimized. No screen
 capture or permissions. It needs a running window that has drawn a frame;
 `HERDR_APP_HOME` selects the window, as for `status`.
 
+<!-- FORK(browser) -->
 ## Browser panes and agent-browser
 
 Browser panes (macOS builds with the browser feature) show in `herdr-app ls`

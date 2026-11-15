@@ -10,6 +10,22 @@ Output of `scripts/fork/seams` at each sync, so growth is visible.
 |---|---|---:|---:|---:|---:|
 | 2026-11-15 | `b6546ce1` (before revival) | 1506 | 23 | 37 | 0 |
 | 2026-11-15 | `b6546ce1` (seams extracted, `06f37e1`) | 769 | 23 | 45 | 46 |
+| 2026-11-15 | `8e1208d` (synced, `bf9b67c`) | 761 | 23 | 45 | 51 |
+
+## Unmarked seams
+
+Upstream files the fork changes that can't carry a `FORK(` comment. A sync resolver re-applies these from the fork's diff.
+
+- `defaults/keys.macos.json` (JSON): the `browser` key section (`cmd-=`, `cmd-+`, `cmd--`, `cmd-0`).
+- `Cargo.lock`, `THIRD-PARTY-NOTICES`: regenerated (`cargo metadata`, `bun scripts/notices.ts`).
+- `docs/commands.md`: generated from `src/commands.rs` (`bun scripts/docs.ts`).
+
+## Widened upstream types
+
+Exceptions to `CLAUDE.md` rule 4, each with its reason.
+
+- `Content::Browser` (`src/layout.rs`): the browser block. cameronsjo/herdr-app#18 tracks saving it as a mod block instead.
+- `Snapshot.browsers` (`src/mods.rs`): the mods' `browsers()` list. `Snapshot` is the one store every mod read goes through, and a parallel fork store would duplicate its revision tracking.
 
 ## Upstream syncs
 

@@ -18,11 +18,23 @@ base=$(git merge-base HEAD "$UPSTREAM")
 
 stat=$(git diff --diff-filter=M --numstat "$base" HEAD)
 new_files=$(git diff --diff-filter=A --name-only "$base" HEAD | wc -l | tr -d ' ')
+# Markers count only in upstream-owned files: fork-only files need none.
 # git grep exits 1 on zero matches; zero markers is a valid count, not an error.
-markers=$( { git grep -n 'FORK(' HEAD -- . ':!CLAUDE.md' ':!docs/fork' ':!scripts/fork' || [[ $? -eq 1 ]]; } | wc -l | tr -d ' ')
+owned=()
+while IFS= read -r f; do [[ -n "$f" ]] && owned+=("$f"); done < <(git diff --diff-filter=M --name-only "$base" HEAD)
+markers=0
+unmarked=()
+for f in "${owned[@]+"${owned[@]}"}"; do
+  n=$( { git grep -c 'FORK(' HEAD -- "$f" || [[ $? -eq 1 ]]; } | awk -F: '{ s += $NF } END { print s + 0 }')
+  markers=$((markers + n))
+  [[ "$n" -eq 0 ]] && unmarked+=("$f")
+done
 
 printf '%6s %6s  %s\n' added removed "upstream-owned file (vs ${base:0:8})"
 sort -k1,1nr <<<"$stat" | awk 'NF { printf "%6s %6s  %s\n", $1, $2, $3 }'
 awk 'NF { a += $1; d += $2; n++ } END { printf "%6d %6d  total in %d files\n", a, d, n }' <<<"$stat"
 echo "fork-only new files: $new_files"
 echo "FORK( seam markers:  $markers"
+if [[ ${#unmarked[@]} -gt 0 ]]; then
+  echo "upstream files with fork lines and no FORK( marker (mark them, or list them in docs/fork/CHANGES.md): ${unmarked[*]}"
+fi

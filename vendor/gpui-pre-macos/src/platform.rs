@@ -84,7 +84,7 @@ unsafe fn build_classes() {
         APP_CLASS = {
             let mut decl = ClassDecl::new("GPUIApplication", class!(NSApplication)).unwrap();
             decl.add_ivar::<*mut c_void>(MAC_PLATFORM_IVAR);
-            // HERDR: Chromium (CEF, herdr-app's `browser` feature) needs NSApp to say whether
+            // HERDR: FORK(browser): Chromium (CEF, herdr-app's `browser` feature) needs NSApp to say whether
             // sendEvent: is on the stack (CefAppProtocol in cef_application_mac.h). Without CEF
             // nothing reads the flag; the app declares the protocol once CEF's framework loads.
             decl.add_method(
@@ -1381,7 +1381,7 @@ unsafe fn path_from_objc(path: id) -> PathBuf {
     PathBuf::from(path)
 }
 
-// HERDR: CefAppProtocol for Chromium (see build_classes). NSApp is a singleton on the
+// HERDR: FORK(browser): CefAppProtocol for Chromium (see build_classes). NSApp is a singleton on the
 // main thread, so one flag serves it.
 static HANDLING_SEND_EVENT: AtomicBool = AtomicBool::new(false);
 

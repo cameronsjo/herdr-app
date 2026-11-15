@@ -19,10 +19,10 @@ Fork lines inside upstream-owned files cause every sync conflict; new files neve
 
 1. **Mod first.** Ship a feature as a mod (`defaults/mods/<fork-mod>/`) when the mod API allows; change Rust only when it cannot.
 2. **Own files, thin seams.** Fork Rust lives in fork-only modules (`src/browser/`, `src/fork/`).
-3. **Mark every seam.** An upstream-owned file gets only the call, registration, or `mod` line that reaches fork code, marked `FORK(<feature>):` in a comment on or above it. This mirrors upstream's `HERDR:` patch marker, so `git grep 'FORK('` lists every seam to re-apply.
+3. **Mark every seam.** An upstream-owned file gets only the call, registration, or `mod` line that reaches fork code, marked `FORK(<feature>):` in a comment on or above it. This mirrors upstream's `HERDR:` patch marker, so `git grep 'FORK('` lists the seams; `scripts/fork/seams` names any upstream file with fork lines and no marker. Files that can't carry a comment (JSON, generated files) are listed in `docs/fork/CHANGES.md` § Unmarked seams.
 4. **Never widen an upstream signature, struct, or enum.** Add a function, wrapper, or fork-side table instead; a widened signature merges clean and breaks only at clippy.
 5. **Docs in fork files.** Fork docs live in `docs/fork/` and `docs/browser-*.md`. `defaults/AGENTS.md` must still name every fork command (a `cargo test` checks it): keep them in one `FORK(browser)` block.
-6. **Regenerate generated files.** `Cargo.lock`: take upstream's, then `cargo metadata --format-version 1 >/dev/null` adds the fork's deps. `THIRD-PARTY-NOTICES`: `just notices`.
+6. **Regenerate generated files.** `Cargo.lock`: take upstream's, then `cargo metadata --format-version 1 >/dev/null` adds the fork's deps. `THIRD-PARTY-NOTICES`: `just notices` (cargo-about 0.9.3, installed with `cargo install --locked cargo-about --version 0.9.3 --features cli`; without `--features cli` it installs no binary). `docs/commands.md`: `bun scripts/docs.ts` from the command table.
 7. **Measure the footprint.** `scripts/fork/seams` prints fork lines inside upstream-owned files. Every sync PR reports it; growth needs a ledger reason.
 
 ## Syncing upstream
@@ -30,7 +30,7 @@ Fork lines inside upstream-owned files cause every sync conflict; new files neve
 Run `scripts/fork/sync-upstream`; it is resumable, so re-run it after resolving conflicts. The gate mirrors upstream CI, which runs `just test` and no fmt or clippy; a stricter gate fails on upstream's own code every sync. Linux: `just test`. macOS, required before merging a sync because `browser-pane` compiles only there: `cargo test --locked --features browser-webkit` too. Compiler warnings must not rise against the pre-sync tip; a widened signature shows up there first. A clean merge is not a pass:
 
 - Before resolving, run `git diff --find-renames=30% --name-status <base> origin/master` over the seam files. A rewritten file means re-implementing its seam, not merging it.
-- After taking `--theirs` on a seam file, re-apply its seams from `git grep -n 'FORK(' <base> -- <file>`.
+- After taking `--theirs` on a seam file, re-apply every fork line from `git diff <upstream-base> <pre-sync-tip> -- <file>` (the sync script prints it). Markers are an index; the diff is the full list, and an unmarked line dropped here fails nothing (the app home's 0700 mode in `src/mods.rs` is one).
 - `src/layout/fork_browser.rs` `Saved` mirrors upstream's serde shape for `Content`. If the sync changes `Content`'s serde attributes in `src/layout.rs`, change `Saved` to match: a new variant fails to compile, a changed attribute does not.
 - Count `log_safe` and escape call sites in `src/browser/` and seam files before and after; a drop is a finding.
 - Record each conflict decision under the sync's dated heading in `docs/fork/CHANGES.md`.

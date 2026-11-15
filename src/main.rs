@@ -3,7 +3,7 @@
 
 mod badge;
 mod bench;
-mod browser;
+mod browser; // FORK(browser)
 mod commands;
 mod control;
 mod core_bin;
@@ -86,12 +86,12 @@ fn attach_console() {
 }
 
 fn main() {
-    // Debug builds: the dev-only agent-access switch is read and removed from
+    // FORK(browser): debug builds read the dev-only agent-access switch and remove it from
     // the environment before anything else (terminals never inherit it).
     #[cfg(all(target_os = "macos", feature = "browser-pane"))]
     browser::read_dev_switch();
     let args: Vec<String> = std::env::args().collect();
-    // agent-browser's plugin: answers on stdout and exits. No window, no CEF.
+    // FORK(browser): agent-browser's plugin answers on stdout and exits. No window, no CEF.
     #[cfg(all(target_os = "macos", feature = "browser-pane"))]
     if args.get(1).map(String::as_str) == Some(browser::agent::VERB) {
         std::process::exit(browser::agent::provider_main(&args[2..]));
@@ -133,6 +133,7 @@ fn main() {
                 .unwrap_or_else(|_| "warn,herdr_app=info,gpui_shell=info".into()),
         )
         .init();
+    // FORK(browser): a dev-agent-access build says so at launch.
     #[cfg(all(target_os = "macos", feature = "browser-pane", debug_assertions, feature = "dev-agent-access"))]
     if browser::dev_switch() {
         tracing::warn!(

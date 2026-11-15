@@ -664,6 +664,19 @@ fn error(id: &Value, session: Option<&str>, code: i64, message: &str) -> String 
 /// Input sent through that stream server also keeps the daemon alive.
 pub const IDLE_TIMEOUT_MS: &str = "300000";
 
+/// `AGENT_BROWSER_*` for a new local terminal (`hc.rs` `Core::run`): Herdr as
+/// agent-browser's provider, pinned to this app's socket, and a session of its
+/// own (the terminal's id is the core's to give, after it starts).
+#[cfg(all(target_os = "macos", feature = "browser-pane"))]
+pub fn local_terminal_env() -> Vec<(String, String)> {
+    let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+    let socket = crate::mods::app_dir().join("herdr-app.sock").to_string_lossy().into_owned();
+    let inherited = std::env::var("AGENT_BROWSER_PLUGINS").ok();
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or_default();
+    let session = format!("herdr-{:x}{:08x}", std::process::id(), nanos as u32);
+    plugin_env(&exe, &socket, inherited.as_deref(), &session)
+}
+
 /// The environment `run()` gives local terminals: agent-browser uses Herdr
 /// as its browser provider. Herdr's plugin entry comes first and once,
 /// before any list the app inherited; the socket is pinned in its args, so

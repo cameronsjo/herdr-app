@@ -3,7 +3,7 @@
 // Shows the program's icon (the app's program table), the agent's name or
 // the terminal's title, the folder, and the agent's status; buttons split, zoom and close
 // this pane. Props from the app: { pane, terminal }. Click: focus the pane.
-// A browser pane gets the browser bar (browser.js) in place of icon, name and folder.
+// FORK(browser): a browser pane gets the browser bar (browser.js) in place of icon, name and folder.
 
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
@@ -38,7 +38,7 @@ function folder(cwd) {
 }
 
 export default class Pane extends View {
-  init(p) {
+  init(p) { // FORK(browser): the browser bar
     this.hovered = false;
     // A browser pane has no terminal. A mod pane has none either; it never shows the bar.
     if ((props() ?? p)?.terminal == null) this.bar = new BrowserBar();
@@ -89,6 +89,7 @@ export default class Pane extends View {
         .child(this.button(t, `ph-x-${pane}`, "close", "pane.close", { pane })));
   }
 
+  // FORK(browser): the terminal header, split out of render so a browser pane can draw its bar instead.
   terminal(head, t, p) {
     const name = ((p.program?.agent || p.program?.shell) && p.program.name) || p.title || p.program?.name || "shell";
     const pic = icon(p.program, 14, t.dim);

@@ -102,7 +102,8 @@ pub struct Look {
 
 /// Which page has the keyboard: none while a dialog or popup is open (it
 /// takes typing) or while a Herdr control the person pressed has GPUI focus
-/// (a layout mod's input, a floating terminal); else the layout block's page
+/// (a layout mod's input, a floating terminal) or a mod block holds the
+/// keyboard (`pane.go` onto a focusable mod); else the layout block's page
 /// the person clicked into, while it shows; else the focused pane's page,
 /// while its tab shows. A page hidden under an overlay (`covered`) can't
 /// have it: Herdr holds it until the overlay goes, and the page gets it back
