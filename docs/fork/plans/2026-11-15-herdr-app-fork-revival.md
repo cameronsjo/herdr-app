@@ -30,7 +30,7 @@ Make `cameronsjo/herdr-app` Cameron's everyday Herdr build: upstream plus the br
 
 ## Loop
 
-- Sync PRs: closed by Cameron merging after the macOS gate (`scripts/browser-daily` build), or closing it with a reason.
+- Sync PRs: a sync with no conflicts closes by auto-merge once CI passes (`test`, which includes upstream's macOS job, and `browser-webkit`, the macOS browser build). A sync where the routine resolved conflicts stays a draft and closes by Cameron merging it or closing it with a reason. (Changed by the operator 2026-11-15, "Merge sync PRs when CI passes"; was: Cameron merges every sync after the macOS gate.)
 - The routine: ends when upstream ships an official browser mod that replaces the fork's (`docs/browser-transition.md`), at which point the fork re-evaluates whether it still needs to exist.
 - The TUI fork: closed by task 6.
 
