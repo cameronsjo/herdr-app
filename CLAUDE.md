@@ -39,6 +39,4 @@ Run `scripts/fork/sync-upstream`; it is resumable, so re-run it after resolving 
 
 `vendor/ghostty` is a submodule (`git submodule update --init --depth 1 vendor/ghostty`) and needs Zig 0.16; set `ZIG` to its binary when the default `zig` is older. The TUI fork pinned 0.15.2, so its notes do not apply here.
 
-On macOS, upstream's `files::tests::a_watched_folder_reports_changes_and_misses_none_between_waits` waits forever, with no failure message, whenever the OS delivers no FSEvents (seen 2026-11-15, in and out of the sandbox). If a run stalls on it, pass `-- --skip files::tests::a_watched_folder_reports_changes_and_misses_none_between_waits` and say so in the PR; the fork does not touch `src/files.rs`.
-
 `scripts/browser-dev-run` builds and runs the browser build in an isolated home; `scripts/browser-daily` switches the everyday app to it and back. Never stop or restart the running app or `herdr-core` from a session.

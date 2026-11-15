@@ -1063,16 +1063,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "468878af466f0c6b9311de286e3b5c7be261d78d63d49e1b9a62b83d575b9796"
 dependencies = [
  "cef-dll-sys",
- "libloading 0.9.0",
+ "libloading 0.9.1",
  "objc2 0.6.4",
  "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "cef-dll-sys"
-version = "156.2.0+156.0.14"
+version = "156.5.0+156.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73ac38bd324c86622878754fe050668ddd9081ab3244516994995c72ba8f3be7"
+checksum = "cd128040b848a5e22cfc528cfcb6d74af251e45620b1ac9770eeba64a8c3ec60"
 dependencies = [
  "anyhow",
  "cc",
@@ -2095,9 +2095,9 @@ checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
 
 [[package]]
 name = "download-cef"
-version = "3.0.0"
+version = "3.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "05ee509499d14dc47da5f824e4bb1bd558ceb259adc5475956265d48787a80da"
+checksum = "734444ee6a26f89cc9f883e9de0ced6b2afef7d4c561d7c949aeb13119f8f98d"
 dependencies = [
  "bzip2",
  "clap",
@@ -3563,8 +3563,11 @@ dependencies = [
  "parking_lot",
  "profiling",
  "raw-window-handle",
+ "skrifa 0.44.0",
  "smallvec",
  "swash",
+ "tiny-skia",
+ "ttf-parser",
  "unicode-bidi",
  "unicode-segmentation",
  "web-sys",
@@ -3809,7 +3812,7 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "herdr-app"
-version = "0.1.11"
+version = "0.1.16"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -3823,6 +3826,7 @@ dependencies = [
  "gpui-pre-linux",
  "gpui-pre-macos",
  "gpui-pre-platform",
+ "gpui-pre-wgpu",
  "gpui-pre-windows",
  "gpui-shell",
  "image",
@@ -3837,7 +3841,10 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "skrifa 0.44.0",
  "smallvec",
+ "swash",
+ "tiny-skia",
  "tracing",
  "tracing-subscriber",
  "ttf-parser",
@@ -4557,9 +4564,9 @@ dependencies = [
 
 [[package]]
 name = "libloading"
-version = "0.9.0"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "754ca22de805bb5744484a5b151a9e1a8e837d5dc232c2d7d8c2e3492edc8b60"
+checksum = "a1832accd5a4ca2795ace4d05d15c4039be15b62d3b950eff99746a990e3cc10"
 dependencies = [
  "cfg-if",
  "windows-link 0.2.1",
@@ -10269,7 +10276,6 @@ version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8d66ca9352cbd4eecbbc40871d8a11b4ac8107cfc528a6e14d7c19c69d0e1ac9"
 dependencies = [
- "as-raw-xcb-connection",
  "libc",
  "memmap2",
  "xkeysym",

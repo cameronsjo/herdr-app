@@ -50,7 +50,7 @@ Panel: none (T2 shape chosen by the operator in-session; the revival PR gets a f
 - Tap formula not deprecated yet: the TUI is still a supported host in forgectl (`internal/herdr`, `HostHerdr`), cadence, herdr-orchestrator, and dotfiles (`Brewfile.darwin`, `bin/herdr-upgrade`). Archiving leaves releases installable, so nothing breaks; retiring the TUI host everywhere is the operator's call.
 - Task 7 (routine) waits for this PR to merge: the routine syncs `fork/master`, which has no browser until then.
 - Task 2 moved the code into child modules (`src/window/fork_browser.rs`, `src/layout/fork_browser.rs`) and `src/browser/socket.rs`, not one `src/browser/` tree: a child module sees `AppWindow`'s and `Content`'s private items, so no upstream field or method had to become public. `Content::Browser` stays an upstream-enum variant for now (cameronsjo/herdr-app#18).
-- The macOS gate skips upstream's `files::tests::a_watched_folder_reports_changes_and_misses_none_between_waits`: it stalled before and after the change on this machine (no FSEvents delivered, in and out of the sandbox). The fork does not touch `src/files.rs`.
+- Task 2's gate on the pre-sync base skipped `files::tests::a_watched_folder_reports_changes_and_misses_none_between_waits`, which hung there before and after the extraction. FSEvents and `notify` 7.0.0 worked on the machine; pure upstream at `8e1208d` and the merged fork both pass it, after upstream's watcher rewrite (`17eac39`, `d8a0ba5`). The post-sync gate runs it.
 - The gate mirrors upstream CI (`cargo test --locked`, bun tests); `cargo fmt --check` failed on upstream files the fork never touched, so fmt and clippy are not gates.
 
 ## Learnings
