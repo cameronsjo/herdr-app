@@ -36,4 +36,6 @@ Run `scripts/fork/sync-upstream`; it is resumable, so re-run it after resolving 
 
 ## Building
 
+`vendor/ghostty` is a submodule (`git submodule update --init --depth 1 vendor/ghostty`) and needs Zig 0.16; set `ZIG` to its binary when the default `zig` is older. The TUI fork pinned 0.15.2, so its notes do not apply here.
+
 `scripts/browser-dev-run` builds and runs the browser build in an isolated home; `scripts/browser-daily` switches the everyday app to it and back. Never stop or restart the running app or `herdr-core` from a session.
