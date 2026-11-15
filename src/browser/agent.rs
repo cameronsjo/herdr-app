@@ -100,7 +100,10 @@ pub const ONLY_THE_PERSON: &str =
 /// anything Herdr draws in the window, so none of those may grant access,
 /// Herdr's own pane button included: it only opens the dialog.
 pub fn may_set_access(on: bool, from: Source) -> Result<(), &'static str> {
-    if !on || matches!(from, Source::NativeConfirm | Source::DevSwitch) { Ok(()) } else { Err(ONLY_THE_PERSON) }
+    // The dev switch counts only in the build that has one: a release build
+    // refuses it even if some path ever produced `Source::DevSwitch`.
+    const DEV_BUILD: bool = cfg!(all(debug_assertions, feature = "dev-agent-access"));
+    if !on || matches!(from, Source::NativeConfirm) || (DEV_BUILD && matches!(from, Source::DevSwitch)) { Ok(()) } else { Err(ONLY_THE_PERSON) }
 }
 
 /// The dialog's buttons are added Cancel first (`NSAlertFirstButtonReturn`,
@@ -166,7 +169,7 @@ pub fn consent_text(browser: &str, site: &str) -> Result<(String, String), &'sta
     Ok((
         "Let agents drive this browser?".to_owned(),
         format!(
-            "Browser {browser}, agent profile, at {}.\n\nAny agent in a Herdr terminal on this Mac can then read this page, click and type in it, run script in it and open other sites in this pane, until you click Stop agent. Use test accounts only.",
+            "Browser {browser}, agent profile, at {}.\n\nAny program running as you on this Mac, agents in Herdr terminals among them, can then read this page, click and type in it, run script in it and open other sites in this pane, until you click Stop agent. Use test accounts only.",
             super::log_safe(site)
         ),
     ))
@@ -1555,5 +1558,17 @@ mod tests {
     fn terminals_ask_agent_browser_to_exit_after_five_idle_minutes() {
         let env = plugin_env("/Apps/Herdr", "/s", None, "s");
         assert_eq!(env.iter().find(|(k, _)| k == "AGENT_BROWSER_IDLE_TIMEOUT_MS").map(|(_, v)| v.as_str()), Some("300000"));
+    }
+
+    #[test]
+    fn only_the_dialog_turns_access_on_and_the_dev_switch_only_in_its_build() {
+        use super::super::Source;
+        assert!(may_set_access(true, Source::NativeConfirm).is_ok());
+        for from in [Source::Socket, Source::Mod, Source::PaneControl] {
+            assert!(may_set_access(true, from).is_err(), "{from:?} turned access on");
+            assert!(may_set_access(false, from).is_ok(), "{from:?} could not turn access off");
+        }
+        let dev_build = cfg!(all(debug_assertions, feature = "dev-agent-access"));
+        assert_eq!(may_set_access(true, Source::DevSwitch).is_ok(), dev_build);
     }
 }

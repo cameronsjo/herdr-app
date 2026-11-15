@@ -24,8 +24,31 @@ pub fn bind_private<L>(path: &Path, bind: impl FnOnce(&Path) -> io::Result<L>) -
         if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
             tracing::warn!("cannot make {} private: {e}", path.display());
         }
+        // A folder another user can write to (or owns) lets them swap the
+        // socket for their own listener: then serve nothing. The socket was
+        // just made by this process, so its owner is this user.
+        if let Err(e) = folder_is_private(path) {
+            drop(listener);
+            let _ = std::fs::remove_file(path);
+            return Err(e);
+        }
     }
     Ok(listener)
+}
+
+/// The socket's folder is owned by the socket's owner and no one else may write to it.
+#[cfg(unix)]
+fn folder_is_private(socket: &Path) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt as _;
+    let dir = socket.parent().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "the socket path has no folder"))?;
+    let (folder, sock) = (std::fs::metadata(dir)?, std::fs::symlink_metadata(socket)?);
+    if folder.uid() != sock.uid() || folder.mode() & 0o022 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("{} is not private (owner uid {}, mode {:o}; expected uid {} and no group or other write): not serving the control socket", dir.display(), folder.uid(), folder.mode() & 0o777, sock.uid()),
+        ));
+    }
+    Ok(())
 }
 
 /// A peer running as another user is dropped before anything is read (macOS:
@@ -63,6 +86,18 @@ mod tests {
         let _client = UnixStream::connect(&path).unwrap();
         let (served, _) = listener.accept().unwrap();
         assert!(same_user(&served), "this user's own connection is dropped");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_folder_others_can_write_to_serves_no_socket() {
+        let dir = std::env::temp_dir().join(format!("herdr-sock-open-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let path = dir.join("s.sock");
+        let err = bind_private(&path, |p| UnixListener::bind(p)).err().expect("bound in a world-writable folder");
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied, "{err}");
+        assert!(!path.exists(), "the refused socket was left behind");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

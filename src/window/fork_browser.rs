@@ -147,7 +147,7 @@ impl AppWindow {
         // A mod block holding the keyboard (`pane.go` onto a focusable mod,
         // upstream's `focus_block`) is a Herdr control too: the focused pane
         // stays the browser's, but typing goes to the mod.
-        let control = control || self.focused_block.is_some();
+        let control = control || self.focused_block.as_ref().is_some_and(|b| self.mod_block_shown(b));
         let page = crate::browser::keyboard_page(dialog, control, self.fork.layout_page.as_deref(), pane_page.as_deref(), &covered).map(str::to_owned);
         self.fork.browsers.keys(page.as_deref(), window);
     }
@@ -202,6 +202,10 @@ impl AppWindow {
             // The person clicked into the page: a control that had the keyboard
             // lets go (GPUI focus too, so its caret goes); a layout block's page
             // holds the keyboard; a pane's page makes its pane the focused one.
+            // A mod block that held the keyboard lets go first (as a terminal
+            // click does), or the page could never take it back from a mod an
+            // agent focused through the socket (`pane.go`).
+            self.focused_block = None;
             if let Some(f) = self.fork.control_focus.take()
                 && f.is_focused(window)
             {
