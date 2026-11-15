@@ -1,7 +1,7 @@
 ---
 status: in-progress
 tier: T2
-next: "Task 2: extract browser seams from src/window.rs before the upstream merge"
+next: "Task 3: merge upstream master into fork/revival-20261115 and pass the macOS gate"
 approved_session_id: 07e87b2f-6fb2-46e2-afa6-dec605969fac
 branch: fork/revival-20261115
 ---
@@ -21,7 +21,7 @@ Make `cameronsjo/herdr-app` Cameron's everyday Herdr build: upstream plus the br
 ## Tasks
 
 - [x] 1. Seed the project: `CLAUDE.md`, `docs/fork/CHANGES.md`, `scripts/fork/seams`, `scripts/fork/sync-upstream`, this plan.
-- [ ] 2. Shrink the seams before merging: move browser code out of `src/window.rs` (589 lines), `src/layout.rs` (147) and `src/control.rs` (42) into `src/browser/`, leaving `FORK(browser)` call lines. Re-measure with `scripts/fork/seams`. Behavior unchanged; the macOS gate passes on the old base.
+- [x] 2. (done `06f37e1`: 1506 → 769 lines; window.rs 589 → 33, layout.rs 147 → 6, control.rs 42 → 2) Shrink the seams before merging: move browser code out of `src/window.rs` (589 lines), `src/layout.rs` (147) and `src/control.rs` (42) into `src/browser/`, leaving `FORK(browser)` call lines. Re-measure with `scripts/fork/seams`. Behavior unchanged; the macOS gate passes on the old base.
 - [ ] 3. Merge upstream (260 commits; trial merge conflicts in 10 files) with `scripts/fork/sync-upstream` logic, record decisions in the ledger, pass the Linux and macOS gates, PR into `fork/master`. `fork/master` is 0 commits ahead of upstream, so this fast-forwards it with no rewrite.
 - [x] 4. (done: cameronsjo/herdr-app#8 to #15; drops in the ledger) Gap-check each TUI-fork feature (its `docs/fork/CHANGES.md`) against upstream app and `herdr-core`; file one `cameronsjo/herdr-app` issue per missing feature, marked mod or core.
 - [ ] 5. Port features in issue order, mod first.
@@ -49,6 +49,8 @@ Panel: none (T2 shape chosen by the operator in-session; the revival PR gets a f
 - Plan lives at `docs/fork/plans/`, not `docs/plans/`: upstream's `.gitignore` ignores `docs/plans`, and un-ignoring it would add a seam.
 - Tap formula not deprecated yet: the TUI is still a supported host in forgectl (`internal/herdr`, `HostHerdr`), cadence, herdr-orchestrator, and dotfiles (`Brewfile.darwin`, `bin/herdr-upgrade`). Archiving leaves releases installable, so nothing breaks; retiring the TUI host everywhere is the operator's call.
 - Task 7 (routine) waits for this PR to merge: the routine syncs `fork/master`, which has no browser until then.
+- Task 2 moved the code into child modules (`src/window/fork_browser.rs`, `src/layout/fork_browser.rs`) and `src/browser/socket.rs`, not one `src/browser/` tree: a child module sees `AppWindow`'s and `Content`'s private items, so no upstream field or method had to become public. `Content::Browser` stays an upstream-enum variant for now (cameronsjo/herdr-app#18).
+- The macOS gate skips upstream's `files::tests::a_watched_folder_reports_changes_and_misses_none_between_waits`: it stalled before and after the change on this machine (no FSEvents delivered, in and out of the sandbox). The fork does not touch `src/files.rs`.
 - The gate mirrors upstream CI (`cargo test --locked`, bun tests); `cargo fmt --check` failed on upstream files the fork never touched, so fmt and clippy are not gates.
 
 ## Learnings

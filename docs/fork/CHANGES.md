@@ -9,6 +9,7 @@ Output of `scripts/fork/seams` at each sync, so growth is visible.
 | Date | Upstream base | Lines in upstream files | Files | Fork-only files | `FORK(` markers |
 |---|---|---:|---:|---:|---:|
 | 2026-11-15 | `b6546ce1` (before revival) | 1506 | 23 | 37 | 0 |
+| 2026-11-15 | `b6546ce1` (seams extracted, `06f37e1`) | 769 | 23 | 45 | 46 |
 
 ## Upstream syncs
 
@@ -20,7 +21,8 @@ Built 2026-10-30 to 2026-11-01 on `browser-prototype`. Design and security model
 
 - Engines behind cargo features: `browser` (CEF) and `browser-webkit` (WKWebView), both on the macOS-only `browser-pane`.
 - Panes save as a `browser-prototype` mod block, so a stock app shows one unloaded pane instead of failing the layout, and upstream's future browser mod never reads this fork's blocks.
-- Seams (upstream-owned files touched): see the footprint table; `src/window.rs` carries most of them.
+- Seams (upstream-owned files touched): see the footprint table. The window's browser code is in `src/window/fork_browser.rs`, the saved form of a browser block in `src/layout/fork_browser.rs`, and the control socket's owner-only checks in `src/browser/socket.rs`; `src/window.rs` (33 lines), `src/layout.rs` (6) and `src/control.rs` (2) keep only `FORK(browser)` call lines.
+- `Content::Browser` still widens upstream's `Content` enum, and `Content` (de)serializes through the fork's `Saved`, which must mirror upstream's serde attributes. cameronsjo/herdr-app#18 tracks removing the variant.
 
 ## Ported from the TUI fork
 
