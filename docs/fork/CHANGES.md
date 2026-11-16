@@ -73,8 +73,8 @@ Added 2026-11-15; setup order and the routine's prompt: `docs/fork/weekly-sync.m
 
 Added 2026-11-16 (Linear CAM-875). A layout without its own theme shows Artificer: `artificer-dark` in dark appearance, `artificer-light` in light (upstream: `graphite` / `paper`).
 
-- `defaults/themes/artificer-{dark,light}.json` (fork-only files): copied verbatim from `cameronsjo/artificer-design-system` `themes/herdr-app/` at `79d8170c`. That repo stays the source; when it changes the theme, copy both files again. A shipped theme file that someone edited is never overwritten (`install_theme`), and neither is a copy its `install.sh` already placed, so this only fills a missing file.
-- `src/settings.rs`: `DEFAULT_DARK` / `DEFAULT_LIGHT`, and the two `THEMES` and one `SHIPPED_THEMES` entries (six lines under four `FORK(artificer)` markers). If upstream adds a shipped theme, keep both sides' entries.
+- `defaults/themes/artificer-{dark,light}.json` (fork-only files): copied verbatim from `cameronsjo/artificer-design-system` `themes/herdr-app/` at `79d8170c`. That repo stays the source. When it changes the theme, copy both files again and add the old text to `PREVIOUS_THEMES`, or existing installs keep the old colors; `shipped_theme_upgrades_preserve_personal_edits` then needs an edit that changes an Artificer file too (it only replaces `#abb2bf` and `#c0c0c0`). A shipped theme file that someone edited is never overwritten (`install_theme`), and neither is a copy its `install.sh` already placed, so this only fills a missing file.
+- `src/settings.rs`: `DEFAULT_DARK` / `DEFAULT_LIGHT`, and the two `THEMES` and one `SHIPPED_THEMES` entries (six lines under four `FORK(artificer)` markers), and in `palette()` one line that reads a shipped theme's embedded copy when its file is missing, so the default pair never depends on `themes/` being written. If upstream adds a shipped theme, keep both sides' entries.
 - Layouts that name a theme keep it: the shipped `terminals` layout still says `graphite`, and `win98` says `win98`.
 
 ## Ported from the TUI fork
