@@ -1,6 +1,6 @@
 // The decisions pane's slate logic: reading a cadence:ask-questions slate (slate.json), the
 // person's picks on each card, and the response written back (response.json). No `herdr`
-// import, so it runs under node for the tests in tests/fork/decisions.
+// import, so scripts/fork/decisions.test.ts runs it under Bun.
 //
 // FORK(decisions): this is a port of cadence's plugins/ask/hooks/slate.ts (the Claude Code
 // decisions pane). The slate and response shapes are cadence:ask-questions' own

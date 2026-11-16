@@ -114,7 +114,7 @@ async function harness(dir: unknown, files: Record<string, string | null>) {
   const fields: any[] = [];
   const pending: Promise<unknown>[] = [];
   const herdr = {
-    props: () => (dir === undefined ? { pane: "p1" } : { dir }),
+    props: () => (dir === undefined ? { pane: "p1" } : { dir, run: "run-1" }),
     readTextFile: async (p: string) => { reads.push(p); return files[p] ?? null; },
     writeTextFile: async (p: string, text: string, expected: string | null) => {
       if (expected === null && files[p] != null) throw new Error("exists");
@@ -183,6 +183,7 @@ test("pick, type, review and send writes response.json once", async () => {
   expect(path).toBe(`${DIR}/response.json`);
   expect(expected).toBeNull();
   expect(JSON.parse(text).decisions[2].response).toBe("atlas");
+  expect(JSON.parse(text).run).toBe("run-1");
   expect(textOf(h.draw())).toContain("Sent");
   expect(h.store.size).toBe(0);
 });
@@ -207,6 +208,7 @@ test("close without sending writes the closed marker, not a response", async () 
   h.view.slate.goTo(3);
   await h.click("set-aside");
   expect(h.writes.map((w) => w[0])).toEqual([`${DIR}/closed.json`]);
+  expect(JSON.parse(h.writes[0][1]).run).toBe("run-1");
   expect(textOf(h.draw())).toContain("Closed without sending");
 });
 
@@ -215,4 +217,33 @@ test("the draft survives a reload of the pane", async () => {
   h.press("b");
   const saved = [...h.store.values()][0];
   expect(JSON.parse(saved).picks.db.choice).toBe("lite");
+});
+
+test("a slate the pane can't show tells the script, so it opens the browser", async () => {
+  const f = files();
+  f[`${DIR}/slate.json`] = JSON.stringify({ decisions: [{ id: "bad\u202e", title: "t", context: "c" }] });
+  const h = await harness(DIR, f);
+  await new Promise((r) => setTimeout(r, 0));
+  expect(textOf(h.draw())).toContain("Can't show this slate");
+  expect(textOf(h.draw())).not.toContain("\u202e");
+  const marker = JSON.parse(h.files[`${DIR}/closed.json`] ?? "{}");
+  expect(marker.run).toBe("run-1");
+  expect(marker.error).toContain("kebab-case");
+});
+
+test("closing the pane unsent counts as closed; after Send it writes nothing", async () => {
+  const h = await harness(DIR, files());
+  await h.view.close();
+  expect(JSON.parse(h.files[`${DIR}/closed.json`] ?? "{}").reason).toBe("pane closed");
+  const sent = await harness(DIR, files());
+  sent.view.slate.goTo(3);
+  await sent.click("send");
+  await sent.view.close();
+  expect(sent.writes.map((w) => w[0])).toEqual([`${DIR}/response.json`]);
+});
+
+test("a draft belongs to its run", async () => {
+  const h = await harness(DIR, files());
+  h.press("b");
+  expect([...h.store.keys()]).toEqual([`draft:${DIR}:run-1`]);
 });

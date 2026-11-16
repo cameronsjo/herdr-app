@@ -6,16 +6,18 @@
 //   herdr-app do pane.split '{"direction":"right","mod":"decisions","props":{"dir":"<slate folder>"}}'
 // It reads <dir>/slate.json. Send writes <dir>/response.json, the same file the dashboard's
 // server writes; the script sees it, appends the ledger line and closes the pane.
-// "Close without sending" writes <dir>/closed.json instead. Keys (when no field has the
+// "Close without sending", closing the pane, or a slate the pane can't show writes
+// <dir>/closed.json instead. Both carry props().run, the script's per-run nonce, so a
+// pane left over from an earlier run can never answer this one. Keys (when no field has the
 // keyboard): a-h pick, n or right next, p or left back, s skip, r take the recommended
 // options on the review page. Send has no key, so a stray letter never sends.
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea } from "gpui-base";
 import { props, readTextFile, writeTextFile, nextCommand, theme, settings } from "herdr";
-import { Slate, parseSlate, parseDir, OTHER_ID, OTHER_LABEL } from "./slate.js";
+import { Slate, parseSlate, parseDir, clean, OTHER_ID, OTHER_LABEL } from "./slate.js";
 
 const LETTERS = "abcdefgh";
-const draftKey = (dir) => `draft:${dir}`;
+const RUN = /^[A-Za-z0-9_-]{1,64}$/;
 
 export default class Decisions extends View {
   init(_props, cx) {
@@ -25,6 +27,9 @@ export default class Decisions extends View {
     this.error = null;
     this.saving = false;
     const raw = props()?.dir;
+    this.run = typeof props()?.run === "string" && RUN.test(props().run) ? props().run : null;
+    // A draft belongs to one run, so picks made on an earlier slate never fill in a new one.
+    this.draftKey = `draft:${raw}:${this.run ?? ""}`;
     this.dir = parseDir(raw);
     // No folder: an empty pane that says how one opens. A folder that isn't a slate folder
     // (an absolute path ending in .claude/decisions/<slug>) is refused before any read.
@@ -76,7 +81,7 @@ export default class Decisions extends View {
       if (!parsed.ok) return this.fail(`The slate can't be shown: ${parsed.error}.`);
       this.slate = new Slate(parsed.spec, this.dir);
       if (sent !== null) { this.phase = "sent"; return; }
-      try { this.slate.restore(JSON.parse(localStorage.getItem(draftKey(this.dir)) ?? "null")); } catch { /* no draft */ }
+      try { this.slate.restore(JSON.parse(localStorage.getItem(this.draftKey) ?? "null")); } catch { /* no draft */ }
       this.phase = "open";
       this.loadFields();
     } catch (err) {
@@ -86,11 +91,25 @@ export default class Decisions extends View {
 
   fail(message) {
     this.phase = "error";
-    this.error = message;
+    this.error = clean(message, 400);
+    // Tell the waiting script, so it opens the browser instead of waiting out its timeout.
+    this.mark({ error: this.error });
+  }
+
+  /** Writes closed.json once: create-only, so it never replaces a marker or a response. */
+  mark(extra) {
+    if (this.marked || this.dir === null) return Promise.resolve();
+    this.marked = true;
+    return writeTextFile(`${this.dir}/closed.json`, `${JSON.stringify({ run: this.run, closedAt: new Date().toISOString(), ...extra })}\n`, null).catch(() => {});
+  }
+
+  /** The pane is going away (its header's close, pane.close): unsent, it counts as closed. */
+  async close() {
+    if (this.phase === "open" && !this.saving) await this.mark({ reason: "pane closed" });
   }
 
   saveDraft() {
-    try { localStorage.setItem(draftKey(this.dir), JSON.stringify(this.slate.draft())); } catch { /* storage is a convenience */ }
+    try { localStorage.setItem(this.draftKey, JSON.stringify(this.slate.draft())); } catch { /* storage is a convenience */ }
   }
 
   /** Puts the shown card's text into the reused fields, without counting it as an edit. */
@@ -131,11 +150,11 @@ export default class Decisions extends View {
     cx.notify();
     try {
       // null: only create it. A response.json already there is never replaced.
-      await writeTextFile(`${this.dir}/response.json`, `${JSON.stringify(s.response(), null, 2)}\n`, null);
+      await writeTextFile(`${this.dir}/response.json`, `${JSON.stringify({ ...s.response(), run: this.run }, null, 2)}\n`, null);
       this.phase = "sent";
-      try { localStorage.removeItem(draftKey(this.dir)); } catch { /* storage is a convenience */ }
+      try { localStorage.removeItem(this.draftKey); } catch { /* storage is a convenience */ }
     } catch (err) {
-      this.error = `Couldn't save your answers: ${err?.message ?? err}. Nothing was sent.`;
+      this.error = clean(`Couldn't save your answers: ${err?.message ?? err}. Nothing was sent.`, 400);
     } finally {
       this.saving = false;
       cx.notify();
@@ -146,9 +165,7 @@ export default class Decisions extends View {
     if (!this.slate || this.phase !== "open" || this.saving) return;
     this.saving = true;
     cx.notify();
-    try {
-      await writeTextFile(`${this.dir}/closed.json`, `${JSON.stringify({ closedAt: new Date().toISOString() })}\n`, null);
-    } catch { /* already marked closed */ }
+    await this.mark({ reason: "closed without sending" });
     this.phase = "closed";
     this.saving = false;
     cx.notify();
