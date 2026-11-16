@@ -80,8 +80,9 @@ const PAPER: Palette = Palette {
 pub const PRESETS: &[&str] = &["graphite", "ink", "moss", "paper"];
 
 /// The theme a layout without one shows, by appearance.
-pub const DEFAULT_DARK: &str = "graphite";
-pub const DEFAULT_LIGHT: &str = "paper";
+// FORK(artificer): the fork's default is the Artificer pair (upstream: "graphite" / "paper").
+pub const DEFAULT_DARK: &str = "artificer-dark";
+pub const DEFAULT_LIGHT: &str = "artificer-light";
 
 fn preset(name: &str) -> Option<&'static Palette> {
     match name {
@@ -97,8 +98,10 @@ fn preset(name: &str) -> Option<&'static Palette> {
 const THEMES: &[(&str, &str)] = &[
     ("atom-one-dark", include_str!("../defaults/themes/atom-one-dark.json")),
     ("win98", include_str!("../defaults/themes/win98.json")),
+    ("artificer-dark", include_str!("../defaults/themes/artificer-dark.json")), // FORK(artificer)
+    ("artificer-light", include_str!("../defaults/themes/artificer-light.json")), // FORK(artificer)
 ];
-pub const SHIPPED_THEMES: &[&str] = &["atom-one-dark", "win98"];
+pub const SHIPPED_THEMES: &[&str] = &["atom-one-dark", "win98", "artificer-dark", "artificer-light"]; // FORK(artificer)
 
 /// `themes/<name>.json`: a palette, plus `colors` overrides like settings.json's.
 #[derive(Deserialize)]

@@ -69,6 +69,14 @@ Added 2026-11-15; setup order and the routine's prompt: `docs/fork/weekly-sync.m
 - `src/update.rs` `checks_core`: the fork's browser builds offer `herdr-core` updates as release builds do, except in an isolated dev run with its own app home (one `FORK(browser)` line).
 - `scripts/fork/daily-update`: a launchd agent on Cameron's Mac builds each new `fork/master` that is a PR merge with `ci.yml` and `fork-browser.yml` green and installs it as the everyday browser build, never quitting a running one.
 
+## Artificer theme
+
+Added 2026-11-16 (Linear CAM-875). A layout without its own theme shows Artificer: `artificer-dark` in dark appearance, `artificer-light` in light (upstream: `graphite` / `paper`).
+
+- `defaults/themes/artificer-{dark,light}.json` (fork-only files): copied verbatim from `cameronsjo/artificer-design-system` `themes/herdr-app/` at `79d8170c`. That repo stays the source; when it changes the theme, copy both files again. A shipped theme file that someone edited is never overwritten (`install_theme`), and neither is a copy its `install.sh` already placed, so this only fills a missing file.
+- `src/settings.rs`: `DEFAULT_DARK` / `DEFAULT_LIGHT`, and the two `THEMES` and one `SHIPPED_THEMES` entries (six lines under four `FORK(artificer)` markers). If upstream adds a shipped theme, keep both sides' entries.
+- Layouts that name a theme keep it: the shipped `terminals` layout still says `graphite`, and `win98` says `win98`.
+
 ## Ported from the TUI fork
 
 Features carried over from `cameronsjo/herdr` (archived). One entry per feature when it lands, naming the original ledger section and whether it shipped as a mod or Rust.
