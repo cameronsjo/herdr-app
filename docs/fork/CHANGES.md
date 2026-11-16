@@ -77,6 +77,15 @@ Added 2026-11-16 (Linear CAM-875). A layout without its own theme shows Artifice
 - `src/settings.rs`: `DEFAULT_DARK` / `DEFAULT_LIGHT`, and the two `THEMES` and one `SHIPPED_THEMES` entries (six lines under four `FORK(artificer)` markers), and in `palette()` one line that reads a shipped theme's embedded copy when its file is missing, so the default pair never depends on `themes/` being written. If upstream adds a shipped theme, keep both sides' entries.
 - Layouts that name a theme keep it: the shipped `terminals` layout still says `graphite`, and `win98` says `win98`.
 
+## Decisions pane
+
+Added 2026-11-16 (Linear CAM-877). A native pane for cadence:ask-questions slates, so several decisions open beside Claude's terminal instead of in a browser. Shipped as a mod; no Rust and no upstream-owned file changes.
+
+- `defaults/mods/decisions/` (fork-only): `main.js` draws the cards (pick one or many, compare candidates, typed answers, notes, a review page, Send), and `slate.js` is a port of cadence's `plugins/ask/hooks/slate.ts`, which mirrors `serve-decisions.py` `validate_spec`. Keep the three in step: a slate the dashboard takes must open here.
+- Opened by cadence's `serve-decisions.py` when it runs in a Herdr terminal: `herdr-app do pane.split '{"direction":"right","mod":"decisions","props":{"dir":"<slate folder>"}}'`. The pane reads `<dir>/slate.json` and only for a folder of the form `<absolute path>/.claude/decisions/<slug>`. Send writes `<dir>/response.json` (create-only, never replacing one), and Close without sending writes `<dir>/closed.json`. The script appends the ledger line and closes the pane. A draft survives a reload in the mod's own storage. No attachments.
+- Keys work only when no field has the keyboard (`a`-`h` pick, `n`/`p` move, `s` skip, `r` take the recommended options on the review page). Send has no key.
+- `scripts/fork/decisions.test.ts` (fork-only) runs the slate logic and the mod against stand-ins; `.github/workflows/fork-mods.yml` (fork-only) runs it, since upstream's CI runs only its own Bun tests. The shipped-mod render test in `src/mods/render_tests.rs` loads the mod with no `dir`, which draws the empty pane and reads nothing.
+
 ## Ported from the TUI fork
 
 Features carried over from `cameronsjo/herdr` (archived). One entry per feature when it lands, naming the original ledger section and whether it shipped as a mod or Rust.
