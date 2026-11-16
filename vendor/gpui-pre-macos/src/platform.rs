@@ -84,6 +84,18 @@ unsafe fn build_classes() {
         APP_CLASS = {
             let mut decl = ClassDecl::new("GPUIApplication", class!(NSApplication)).unwrap();
             decl.add_ivar::<*mut c_void>(MAC_PLATFORM_IVAR);
+            // HERDR: FORK(browser): Chromium (CEF, herdr-app's `browser` feature) needs NSApp to say whether
+            // sendEvent: is on the stack (CefAppProtocol in cef_application_mac.h). Without CEF
+            // nothing reads the flag; the app declares the protocol once CEF's framework loads.
+            decl.add_method(
+                sel!(isHandlingSendEvent),
+                is_handling_send_event as extern "C" fn(&Object, Sel) -> BOOL,
+            );
+            decl.add_method(
+                sel!(setHandlingSendEvent:),
+                set_handling_send_event as extern "C" fn(&Object, Sel, BOOL),
+            );
+            decl.add_method(sel!(sendEvent:), send_event as extern "C" fn(&Object, Sel, id));
             decl.register()
         }
     };
@@ -224,6 +236,7 @@ fn native_activation_policy(policy: ActivationPolicy) -> NSApplicationActivation
     match policy {
         ActivationPolicy::Regular => NSApplicationActivationPolicyRegular,
         ActivationPolicy::Accessory => NSApplicationActivationPolicyAccessory,
+        ActivationPolicy::Prohibited => NSApplicationActivationPolicy::NSApplicationActivationPolicyProhibited,
     }
 }
 
@@ -562,16 +575,16 @@ impl Platform for MacPlatform {
 
         unsafe {
             let app: id = msg_send![APP_CLASS, sharedApplication];
-            // An accessory app must not register in the Dock during launch, so its
-            // policy has to precede the run loop. `Regular` is applied in
-            // `did_finish_launching` instead: setting it this early leaves the menu
-            // bar of an unbundled app launched from a terminal unclickable.
+            // Non-foreground policies must precede the run loop so CLI checks
+            // never launch as a foreground app. `Regular` is applied in
+            // `did_finish_launching`: setting it this early leaves the menu bar
+            // of an unbundled app launched from a terminal unclickable.
             let policy = {
                 let mut state = self.0.lock();
                 state.application_created = true;
                 state.activation_policy
             };
-            if policy == ActivationPolicy::Accessory {
+            if policy != ActivationPolicy::Regular {
                 app.setActivationPolicy_(native_activation_policy(policy));
             }
             let app_delegate: id = msg_send![APP_DELEGATE_CLASS, new];
@@ -1368,6 +1381,28 @@ unsafe fn path_from_objc(path: id) -> PathBuf {
     PathBuf::from(path)
 }
 
+// HERDR: FORK(browser): CefAppProtocol for Chromium (see build_classes). NSApp is a singleton on the
+// main thread, so one flag serves it.
+static HANDLING_SEND_EVENT: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn is_handling_send_event(_this: &Object, _: Sel) -> BOOL {
+    if HANDLING_SEND_EVENT.load(Ordering::Relaxed) { YES } else { NO }
+}
+
+extern "C" fn set_handling_send_event(_this: &Object, _: Sel, handling: BOOL) {
+    HANDLING_SEND_EVENT.store(handling == YES, Ordering::Relaxed);
+}
+
+/// Like CEF's `CefScopedSendingEvent`: set while the event is dispatched, then the
+/// previous value back, so nested sendEvent: calls stay correct.
+extern "C" fn send_event(this: &Object, _: Sel, event: id) {
+    let was = HANDLING_SEND_EVENT.swap(true, Ordering::Relaxed);
+    unsafe {
+        let _: () = msg_send![super(this, class!(NSApplication)), sendEvent: event];
+    }
+    HANDLING_SEND_EVENT.store(was, Ordering::Relaxed);
+}
+
 unsafe fn get_mac_platform(object: &mut Object) -> &MacPlatform {
     unsafe {
         let platform_ptr: *mut c_void = *object.get_ivar(MAC_PLATFORM_IVAR);
@@ -1688,9 +1723,10 @@ unsafe extern "C" {
     pub(super) static kTISPropertyUnicodeKeyLayoutData: CFStringRef;
     pub(super) static kTISPropertyInputSourceID: CFStringRef;
     pub(super) static kTISPropertyLocalizedName: CFStringRef;
-    pub(super) static kTISPropertyInputSourceIsASCIICapable: CFStringRef;
     pub(super) static kTISPropertyInputSourceType: CFStringRef;
     pub(super) static kTISTypeKeyboardInputMode: CFStringRef;
+    pub(super) static kTISTypeKeyboardInputMethodWithoutModes: CFStringRef;
+    pub(super) static kTISTypeKeyboardInputMethodModeEnabled: CFStringRef;
 }
 
 mod security {

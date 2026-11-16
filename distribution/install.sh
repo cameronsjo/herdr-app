@@ -23,7 +23,8 @@ need tar
 case "$(uname -s)" in
   Linux) os=linux ;;
   Darwin) os=macos ;;
-  *) fail "the app runs on Linux and macOS for now" ;;
+  MINGW* | MSYS* | CYGWIN*) fail "this installer is for Linux and macOS; on Windows, run this in PowerShell: irm $releases/app/install.ps1 | iex" ;;
+  *) fail "no build for $(uname -s)" ;;
 esac
 case "$(uname -m)" in
   x86_64 | amd64) arch=x86_64 ;;
@@ -101,6 +102,10 @@ StartupWMClass=herdr-app
 EOF
   command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$data/applications" 2>/dev/null || true
   [ -f "$data/icons/hicolor/icon-theme.cache" ] && gtk-update-icon-cache -f -t "$data/icons/hicolor" >/dev/null 2>&1 || true
+  # Plasma remembers a missing icon until it is told the theme changed,
+  # so a fresh install shows an empty page in the taskbar.
+  command -v dbus-send >/dev/null 2>&1 &&
+    dbus-send --session --type=signal /KIconLoader org.kde.KIconLoader.iconChanged int32:0 2>/dev/null || true
 else
   apps="$HOME/Applications"
   app="$apps/Herdr.app"

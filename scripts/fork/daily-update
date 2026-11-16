@@ -1,0 +1,226 @@
+#!/usr/bin/env bash
+# Keeps the everyday browser build (~/Applications/Herdr Browser.app, see
+# scripts/browser-daily) on the newest fork/master, built on this Mac.
+#
+#   daily-update check     fetch fork/master; when it moved, is a PR merge, and
+#                          its CI passed (ci.yml, fork-browser.yml), build the WebKit bundle
+#                          in its own worktree. Herdr Browser not running:
+#                          install it in place. Running: leave it built and
+#                          notify once; nothing is quit or restarted.
+#   daily-update apply     put the built one in use now: quits Herdr and opens
+#                          it (scripts/browser-daily on; terminals keep running)
+#   daily-update status    what is built, installed, and waiting
+#   daily-update install   add the launchd agent (daily at 04:30, on AC power;
+#                          HERDR_DAILY_ANY_POWER=1 runs a check on battery too)
+#   daily-update uninstall remove it
+#
+# The build is the debug-profile dev bundle (scripts/browser-dev-bundle
+# --webkit), the same one `just browser-build --webkit` and browser-daily use.
+# The agent runs a copy of this script (~/.local/share/herdr-fork/); `check`
+# refreshes that copy from the build worktree by an atomic rename, so a
+# running copy is never rewritten.
+# Exit: 0 done or nothing to do; 1 a step failed (logged and notified);
+#       2 setup error.
+set -Eeuo pipefail
+
+repo_url_fork="cameronsjo/herdr-app"
+required_workflows=(".github/workflows/ci.yml" ".github/workflows/fork-browser.yml")
+state_dir="$HOME/.local/share/herdr-fork"
+built_file="$state_dir/built"          # fork/master SHA of the last good build
+installed_file="$state_dir/installed"  # SHA now in ~/Applications/Herdr Browser.app
+notified_file="$state_dir/notified"    # SHA last announced as waiting
+lock_dir="$state_dir/lock"
+log="$HOME/Library/Logs/herdr-fork-daily.log"
+label=dev.herdr.fork.daily-update
+plist="$HOME/Library/LaunchAgents/$label.plist"
+daily="$HOME/Applications/Herdr Browser.app"
+self="$state_dir/daily-update"
+
+export PATH="$HOME/.cargo/bin:$HOME/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export ZIG="${ZIG:-$HOME/.local/share/mise/installs/zig/0.16.0/bin/zig}"
+unset HERDR_APP_HOME XDG_STATE_HOME HC_SESSION HERDR_APP_ID CARGO_TARGET_DIR
+
+say() { printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*"; }
+# The text goes in as an argument, never spliced into the AppleScript source.
+notify() { osascript -e 'on run argv' -e 'display notification (item 1 of argv) with title "Herdr fork"' -e 'end run' "$1" >/dev/null 2>&1 || true; }
+running() { pgrep -f -- "$daily/Contents/MacOS/" >/dev/null 2>&1; }
+
+# Any checkout of the repo finds the primary one; the build worktree sits beside the others.
+mkdir -p "$state_dir"
+src_dir=$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+if common=$(git -C "$src_dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
+  root=$(cd -P -- "$common/.." && pwd -P)
+  printf '%s\n' "$root" > "$state_dir/root"
+else
+  root=$(cat "$state_dir/root" 2>/dev/null) || { echo "daily-update: run 'install' from a checkout of $repo_url_fork first" >&2; exit 2; }
+fi
+build="$(cd -P -- "$root/.." && pwd -P)/herdr-app-worktrees/daily"
+
+fork_remote() {
+  local r
+  for r in $(git -C "$root" remote); do
+    if [[ "$(git -C "$root" remote get-url "$r")" =~ github\.com[:/]${repo_url_fork}(\.git)?$ ]]; then echo "$r"; return 0; fi
+  done
+  echo "daily-update: no remote of $root points at $repo_url_fork" >&2; return 2
+}
+
+# One run at a time, `check` and `apply` alike: a stale lock (its pid gone) is taken over.
+lock() {
+  if ! mkdir "$lock_dir" 2>/dev/null; then
+    local pid; pid=$(cat "$lock_dir/pid" 2>/dev/null || true)
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then say "another run ($pid) holds $lock_dir: skipped"; exit 0; fi
+    rm -rf "$lock_dir"; mkdir "$lock_dir"
+  fi
+  echo $$ > "$lock_dir/pid"
+  trap 'rm -rf "$lock_dir"' EXIT
+}
+
+# Built only when both hold (fail closed: no gh, an API error, or a miss means no build):
+# - the commit is the merge commit of a PR merged into master (master moves
+#   only by PR merge: ruleset 27338965), not a direct push;
+# - each required workflow file ran on that push to master and succeeded, and
+#   none failed. Matched by workflow path and event, not by check-run name: a
+#   job or app can name a check "test", but not be .github/workflows/ci.yml.
+ci_passed() {
+  local sha=$1 prs runs wf
+  prs=$(gh api "repos/$repo_url_fork/commits/$sha/pulls" --jq ".[] | select(.merged_at != null and .base.ref == \"master\" and .merge_commit_sha == \"$sha\") | .number") || return 1
+  [[ -n "$prs" ]] || { say "${sha:0:8}: not the merge commit of a PR merged into master"; return 1; }
+  runs=$(gh api "repos/$repo_url_fork/actions/runs?head_sha=$sha&event=push&branch=master&per_page=100" --jq '.workflow_runs[] | "\(.path) \(.conclusion)"') || return 1
+  for wf in "${required_workflows[@]}"; do
+    command grep -qxF "$wf success" <<<"$runs" || { say "${sha:0:8}: $wf has not succeeded on master"; return 1; }
+    if command grep -qE "^$wf (failure|cancelled|timed_out)$" <<<"$runs"; then say "${sha:0:8}: a run of $wf failed"; return 1; fi
+  done
+}
+
+# Same steps as browser-daily on, minus quitting and opening: its own bundle id, signed ad hoc.
+install_bundle() {
+  local src="$build/target/browser-dev-webkit/Herdr Dev.app" sha=$1
+  mkdir -p "$(dirname "$daily")"
+  rm -rf "$daily.next"
+  ditto "$src" "$daily.next"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier dev.herdr.app.browser-daily" "$daily.next/Contents/Info.plist"
+  codesign --force --deep --sign - --preserve-metadata=entitlements "$daily.next"
+  rm -rf "$daily"
+  mv "$daily.next" "$daily"
+  printf '%s\n' "$sha" > "$installed_file"
+}
+
+# The agent's copy follows the build worktree's script (takes effect on the next run).
+refresh_self() {
+  local newer="$build/scripts/fork/daily-update"
+  [[ -f "$self" && -f "$newer" ]] || return 0
+  cmp -s "$newer" "$self" && return 0
+  local old_sum new_sum
+  old_sum=$(shasum -a 256 "$self" | cut -c1-12); new_sum=$(shasum -a 256 "$newer" | cut -c1-12)
+  install -m 0755 "$newer" "$self.new" && mv -f "$self.new" "$self"
+  say "updated the agent's script from the build worktree at $(git -C "$build" rev-parse --short HEAD): $old_sum -> $new_sum"
+  notify "The daily-update agent's script changed ($old_sum -> $new_sum); see $log"
+}
+
+cmd_check() {
+  lock
+  # shellcheck disable=SC2154  # trap_rc is assigned inside the trap string
+  trap 'trap_rc=$?; say "check failed at line $LINENO: $BASH_COMMAND (exit $trap_rc)"; notify "The daily build check failed; see $log"; exit 1' ERR
+  local power remote sha
+  power=$(pmset -g ps)
+  if [[ "$power" != *"AC Power"* && -z "${HERDR_DAILY_ANY_POWER:-}" ]]; then say "on battery: skipped (HERDR_DAILY_ANY_POWER=1 builds anyway)"; return 0; fi
+  remote=$(fork_remote)
+  git -C "$root" fetch --quiet --no-tags "$remote" master
+  sha=$(git -C "$root" rev-parse "refs/remotes/$remote/master")
+  if [[ "$(cat "$built_file" 2>/dev/null)" != "$sha" ]]; then
+    if ! ci_passed "$sha"; then say "${sha:0:8}: not building"; return 0; fi
+    if [[ -d "$build" ]]; then
+      git -C "$build" checkout --quiet --force --detach "$sha"
+      git -C "$build" clean -ffdxq -e target
+    else
+      git -C "$root" worktree prune
+      git -C "$root" worktree add --quiet --detach "$build" "$sha"
+    fi
+    git -C "$build" submodule update --init --depth 1 vendor/ghostty
+    say "building ${sha:0:8} (WebKit bundle)"
+    (cd "$build" && bash scripts/browser-dev-bundle --webkit)
+    printf '%s\n' "$sha" > "$built_file"
+    refresh_self
+  else
+    say "fork/master ${sha:0:8} already built"
+  fi
+  if [[ "$(cat "$installed_file" 2>/dev/null)" == "$sha" ]]; then return 0; fi
+  if running; then
+    say "${sha:0:8} built; Herdr Browser is running, so it waits"
+    if [[ "$(cat "$notified_file" 2>/dev/null)" != "$sha" ]]; then
+      notify "Build ${sha:0:8} is ready. To use it: bash $self apply (reopens Herdr; terminals keep running)"
+      printf '%s\n' "$sha" > "$notified_file"
+    fi
+  else
+    install_bundle "$sha"
+    say "installed ${sha:0:8} in $daily"
+  fi
+}
+
+cmd_apply() {
+  lock
+  local sha
+  sha=$(cat "$built_file" 2>/dev/null) || { echo "daily-update: nothing built yet; run: daily-update check" >&2; exit 1; }
+  (cd "$build" && bash scripts/browser-daily on)
+  printf '%s\n' "$sha" > "$installed_file"
+}
+
+cmd_status() {
+  echo "build worktree: $build"
+  echo "built:          $(cat "$built_file" 2>/dev/null || echo none)"
+  echo "installed:      $(cat "$installed_file" 2>/dev/null || echo none) ($daily)"
+  if running; then echo "Herdr Browser:  running"; else echo "Herdr Browser:  not running"; fi
+  if launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then echo "agent:          loaded ($plist)"; else echo "agent:          not loaded"; fi
+  echo "log:            $log"
+}
+
+cmd_install() {
+  mkdir -p "$(dirname "$plist")" "$(dirname "$log")"
+  if [[ "$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/daily-update" != "$self" ]]; then
+    install -m 0755 "${BASH_SOURCE[0]}" "$self.new" && mv -f "$self.new" "$self"
+  fi
+  cat > "$plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$label</string>
+  <key>ProgramArguments</key>
+  <array><string>/bin/bash</string><string>$self</string><string>check</string></array>
+  <key>WorkingDirectory</key><string>$HOME</string>
+  <key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>4</integer><key>Minute</key><integer>30</integer></dict>
+  <key>StandardOutPath</key><string>$log</string>
+  <key>StandardErrorPath</key><string>$log</string>
+  <key>LowPriorityIO</key><true/>
+  <key>Nice</key><integer>10</integer>
+</dict>
+</plist>
+PLIST
+  plutil -lint "$plist" >/dev/null
+  launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
+  # bootout returns before the service is gone; bootstrap fails (EIO) until it is.
+  local tries
+  for tries in 1 2 3 4 5 6 7 8 9 10; do
+    launchctl bootstrap "gui/$(id -u)" "$plist" 2>/dev/null && break
+    [[ $tries -eq 10 ]] && { echo "daily-update: launchctl bootstrap kept failing; see: launchctl print gui/$(id -u)/$label" >&2; exit 1; }
+    sleep 1
+  done
+  echo "installed: $plist (daily 04:30, on AC power); log $log"
+  echo "first build now: bash $self check"
+}
+
+cmd_uninstall() {
+  launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
+  rm -f "$plist"
+  echo "removed the agent; the build worktree $build and $daily stay"
+}
+
+case "${1:-}" in
+  check) cmd_check ;;
+  apply) cmd_apply ;;
+  status) cmd_status ;;
+  install) cmd_install ;;
+  uninstall) cmd_uninstall ;;
+  *) sed -n '2,23p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac

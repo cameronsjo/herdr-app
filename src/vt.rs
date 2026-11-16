@@ -2,10 +2,24 @@
 //! read back as frames to draw, and asked to encode keys and mouse input.
 
 use ghostty_sys::*;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::rc::Rc;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CellPosition {
+    pub row: u32,
+    pub col: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct SelectionPositions {
+    pub start: CellPosition,
+    pub end: CellPosition,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct Rgb(pub u8, pub u8, pub u8);
@@ -79,9 +93,21 @@ pub struct Cell {
     pub bold: bool,
     pub italic: bool,
     pub faint: bool,
-    pub underline: bool,
+    pub underline: Option<Underline>,
+    /// The underline's own color (SGR 58); `None` draws it in the text's color.
+    pub underline_color: Option<Rgb>,
     pub strike: bool,
     pub wide: bool,
+}
+
+/// How a cell is underlined (SGR 4, 4:1 to 4:5, 21).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Underline {
+    Single,
+    Double,
+    Curly,
+    Dotted,
+    Dashed,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -110,11 +136,37 @@ pub struct Frame {
     /// own): where input methods put their candidate window.
     pub cursor_cell: Option<(u16, u16)>,
     pub bg: Rgb,
+    /// Search highlights on the current viewport, already converted from
+    /// Ghostty's short-lived grid references into cell coordinates.
+    pub search_spans: Vec<SearchSpan>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SearchSpan {
+    pub row: u16,
+    pub start: u16,
+    pub end: u16,
+    pub selected: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SearchProgress {
+    pub total: usize,
+    /// Zero-based index in Ghostty's newest-to-oldest ordering.
+    pub selected: Option<usize>,
+    pub complete: bool,
+}
+
+impl Default for SearchProgress {
+    fn default() -> Self {
+        Self { total: 0, selected: None, complete: true }
+    }
 }
 
 /// Holds what the terminal's callbacks write into; boxed so its address is stable.
 struct Shared {
     state: GhosttyRenderState,
+    size: GhosttySizeReportSize,
     held_since: Option<Instant>,
     title_changed: bool,
     /// Replies the terminal writes back to the program (e.g. kitty graphics acks).
@@ -134,7 +186,224 @@ pub struct Placement {
     pub width: u32,
     pub height: u32,
     pub source: [u32; 4],
+    pub offset: [u32; 2],
+    /// Placeholder geometry uses integer cells; the view may use fractional cells.
+    pub cell_pixels: Option<[u32; 2]>,
     pub z: i32,
+}
+
+impl Placement {
+    pub fn pixel_geometry(&self, cell_width: f32, cell_height: f32) -> [f32; 4] {
+        let [sx, sy] = self.cell_pixels.map_or([1.0, 1.0], |[w, h]| [cell_width / w as f32, cell_height / h as f32]);
+        [
+            self.col as f32 * cell_width + self.offset[0] as f32 * sx,
+            self.row as f32 * cell_height + self.offset[1] as f32 * sy,
+            self.width as f32 * sx,
+            self.height as f32 * sy,
+        ]
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct KittyVirtualPlacementSpec {
+    image_id: u32,
+    placement_id: u32,
+    columns: u32,
+    rows: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct KittyVirtualCell {
+    x: u16,
+    y: u16,
+    image_id_low: u32,
+    image_id_high: Option<u32>,
+    placement_id: u32,
+    row: Option<u32>,
+    col: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct KittyVirtualRun {
+    x: u16,
+    y: u16,
+    image_id_low: u32,
+    image_id_high: Option<u32>,
+    placement_id: u32,
+    row: u32,
+    col: u32,
+    width: u32,
+}
+
+static KITTY_PLACEHOLDER_DIACRITICS: OnceLock<HashMap<u32, u32>> = OnceLock::new();
+
+fn kitty_virtual_cell(x: u16, y: u16, grid_ref: &GhosttyGridRef) -> Option<KittyVirtualCell> {
+    let mut graphemes = vec![0u32; 4];
+    let mut len = 0;
+    let mut style = GhosttyStyle { size: std::mem::size_of::<GhosttyStyle>(), ..Default::default() };
+    unsafe {
+        let result = ghostty_grid_ref_graphemes(grid_ref, graphemes.as_mut_ptr(), graphemes.len(), &mut len);
+        if result == GHOSTTY_OUT_OF_SPACE {
+            graphemes.resize(len, 0);
+            if ghostty_grid_ref_graphemes(grid_ref, graphemes.as_mut_ptr(), graphemes.len(), &mut len) != GHOSTTY_SUCCESS {
+                return None;
+            }
+        } else if result != GHOSTTY_SUCCESS {
+            return None;
+        }
+        if len == 0 || graphemes[0] != 0x10eeee {
+            return None;
+        }
+        if ghostty_grid_ref_style(grid_ref, &mut style) != GHOSTTY_SUCCESS {
+            return None;
+        }
+    }
+    graphemes.truncate(len);
+    Some(KittyVirtualCell {
+        x,
+        y,
+        image_id_low: kitty_placeholder_color_to_id(style.fg_color),
+        image_id_high: graphemes.get(3).and_then(|c| kitty_placeholder_diacritic_index(*c)).filter(|high| *high <= 255),
+        placement_id: kitty_placeholder_color_to_id(style.underline_color),
+        row: graphemes.get(1).and_then(|c| kitty_placeholder_diacritic_index(*c)),
+        col: graphemes.get(2).and_then(|c| kitty_placeholder_diacritic_index(*c)),
+    })
+}
+
+fn kitty_placeholder_color_to_id(color: GhosttyStyleColor) -> u32 {
+    unsafe {
+        match color.tag {
+            GHOSTTY_STYLE_COLOR_PALETTE => u32::from(color.value.palette),
+            GHOSTTY_STYLE_COLOR_RGB => {
+                let rgb = color.value.rgb;
+                (u32::from(rgb.r) << 16) | (u32::from(rgb.g) << 8) | u32::from(rgb.b)
+            }
+            _ => 0,
+        }
+    }
+}
+
+fn kitty_virtual_placement_geometry(
+    run: KittyVirtualRun,
+    spec: KittyVirtualPlacementSpec,
+    image_width: u32,
+    image_height: u32,
+    cell_width: u32,
+    cell_height: u32,
+    generation: u64,
+) -> Option<Placement> {
+    if image_width == 0 || image_height == 0 {
+        return None;
+    }
+    let cols = if spec.columns == 0 { image_width.div_ceil(cell_width) } else { spec.columns };
+    let rows = if spec.rows == 0 { image_height.div_ceil(cell_height) } else { spec.rows };
+    if run.col >= cols || run.row >= rows {
+        return None;
+    }
+    let (grid_width, grid_height) = (f64::from(cols) * f64::from(cell_width), f64::from(rows) * f64::from(cell_height));
+    let scale = (grid_width / f64::from(image_width)).min(grid_height / f64::from(image_height));
+    let (image_left, image_top) = ((grid_width - f64::from(image_width) * scale) / 2.0, (grid_height - f64::from(image_height) * scale) / 2.0);
+    let (left, top) = (f64::from(run.col) * f64::from(cell_width), f64::from(run.row) * f64::from(cell_height));
+    let (right, bottom) = (f64::from((run.col + run.width).min(cols)) * f64::from(cell_width), top + f64::from(cell_height));
+    let (x0, y0) = (left.max(image_left), top.max(image_top));
+    let (x1, y1) = (right.min(image_left + f64::from(image_width) * scale), bottom.min(image_top + f64::from(image_height) * scale));
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    let sx0 = (((x0 - image_left) / scale).round() as u32).min(image_width - 1);
+    let sy0 = (((y0 - image_top) / scale).round() as u32).min(image_height - 1);
+    let sx1 = (((x1 - image_left) / scale).round() as u32).clamp(sx0 + 1, image_width);
+    let sy1 = (((y1 - image_top) / scale).round() as u32).clamp(sy0 + 1, image_height);
+    // Round shared edges, not slice lengths, so neighboring runs meet exactly.
+    let width = (x1.round() - x0.round()) as u32;
+    let height = (y1.round() - y0.round()) as u32;
+    if width == 0 || height == 0 {
+        return None;
+    }
+    Some(Placement {
+        image: spec.image_id,
+        generation,
+        col: i32::from(run.x),
+        row: i32::from(run.y),
+        width,
+        height,
+        source: [sx0, sy0, sx1 - sx0, sy1 - sy0],
+        offset: [(x0.round() - left) as u32, (y0.round() - top) as u32],
+        cell_pixels: Some([cell_width, cell_height]),
+        // Ghostty gives placeholder images a fixed layer, ignoring the virtual placement's z.
+        z: -1,
+    })
+}
+
+fn kitty_placeholder_diacritic_index(codepoint: u32) -> Option<u32> {
+    let map = KITTY_PLACEHOLDER_DIACRITICS.get_or_init(|| {
+        // Reuse Ghostty's vendored table so Herdr decodes the same placeholder
+        // row/column diacritics that libghostty accepts.
+        let source =
+            include_str!("../vendor/ghostty/src/terminal/kitty/graphics_unicode.zig");
+        let mut map = HashMap::new();
+        let mut in_table = false;
+        for line in source.lines() {
+            let line = line.trim();
+            if line.starts_with("const diacritics:") {
+                in_table = true;
+                continue;
+            }
+            if !in_table {
+                continue;
+            }
+            if line == "};" {
+                break;
+            }
+            let Some(hex) = line
+                .strip_prefix("0x")
+                .and_then(|value| value.strip_suffix(','))
+            else {
+                continue;
+            };
+            if let Ok(value) = u32::from_str_radix(hex, 16) {
+                map.insert(value, map.len() as u32);
+            }
+        }
+        map
+    });
+    map.get(&codepoint).copied()
+}
+
+
+impl KittyVirtualRun {
+    fn from_cell(cell: KittyVirtualCell) -> Self {
+        Self {
+            x: cell.x,
+            y: cell.y,
+            image_id_low: cell.image_id_low,
+            image_id_high: cell.image_id_high,
+            placement_id: cell.placement_id,
+            row: cell.row.unwrap_or(0),
+            col: cell.col.unwrap_or(0),
+            width: 1,
+        }
+    }
+
+    fn append(&mut self, cell: KittyVirtualCell) -> bool {
+        if self.image_id_low != cell.image_id_low
+            || self.placement_id != cell.placement_id
+            || cell.row.is_some_and(|row| row != self.row)
+            || cell.col.is_some_and(|col| col != self.col + self.width)
+            || cell
+                .image_id_high
+                .is_some_and(|high| Some(high) != self.image_id_high)
+        {
+            return false;
+        }
+        self.width += 1;
+        true
+    }
+
+    fn image_id(self) -> u32 {
+        self.image_id_low | (self.image_id_high.unwrap_or(0) << 24)
+    }
+
 }
 
 unsafe extern "C" fn on_write_pty(_t: GhosttyTerminal, userdata: *mut c_void, data: *const u8, len: usize) {
@@ -230,6 +499,11 @@ fn install_png_decoder() {
 
 pub struct Vt {
     term: GhosttyTerminal,
+    /// Created lazily when a find bar opens; each terminal owns its own search.
+    search: Option<GhosttySearch>,
+    search_active: bool,
+    search_progress: SearchProgress,
+    search_spans: Vec<SearchSpan>,
     shared: Box<Shared>,
     rows_it: GhosttyRenderStateRowIterator,
     cells: GhosttyRenderStateRowCells,
@@ -237,6 +511,7 @@ pub struct Vt {
     key_event: GhosttyKeyEvent,
     mouse: GhosttyMouseEncoder,
     mouse_event: GhosttyMouseEvent,
+    last_mouse_report: Vec<u8>,
     pub cols: u16,
     pub rows: u16,
     theme: Theme,
@@ -255,6 +530,7 @@ pub struct Vt {
     seen: HashMap<[u64; 2], (Rc<Vec<Cell>>, Option<(u16, u16)>)>,
     /// The width and colors they were read with: a change reads every row.
     seen_with: (u16, u64),
+    placements_cache: RefCell<Option<Vec<Placement>>>,
     /// Whether the program wants win32 key events (Ghostty doesn't track it).
     pub win32: crate::win32_keys::Win32Input,
 }
@@ -264,6 +540,66 @@ type CursorKey = (bool, u16, u16, bool, i32);
 
 /// Where a link shows: (viewport row, first column, last column) per row.
 pub type Spans = Vec<(u16, u16, u16)>;
+
+/// A character of link text and the cell it shows in.
+#[derive(Clone)]
+struct Spot {
+    y: u32,
+    x: u16,
+    width: u16,
+    byte: usize,
+    uri: Option<String>,
+}
+
+/// A screen row's text, where each character shows, and whether the
+/// terminal wrapped it onto the next.
+struct Row {
+    text: String,
+    spots: Vec<Spot>,
+    wraps: bool,
+}
+
+/// The text of `rows` and where each character shows. Where a row doesn't
+/// wrap, it loses its trailing blanks and the next row its leading ones, so
+/// a path a program broke across them reads whole.
+fn link_text(rows: &[Row]) -> (String, Vec<Spot>) {
+    let mut text = String::new();
+    let mut spots = Vec::new();
+    for (i, row) in rows.iter().enumerate() {
+        let blank = |s: &Spot| row.text[s.byte..].starts_with(' ');
+        let start = if i > 0 && !rows[i - 1].wraps { row.spots.iter().position(|s| !blank(s)).unwrap_or(row.spots.len()) } else { 0 };
+        let end = if i + 1 < rows.len() && !row.wraps { row.spots.iter().rposition(|s| !blank(s)).map_or(0, |e| e + 1) } else { row.spots.len() };
+        if start >= end {
+            continue;
+        }
+        let from = row.spots[start].byte;
+        let to = row.spots.get(end).map_or(row.text.len(), |s| s.byte);
+        let base = text.len();
+        text.push_str(&row.text[from..to]);
+        spots.extend(row.spots[start..end].iter().map(|s| Spot { byte: base + s.byte - from, ..s.clone() }));
+    }
+    (text, spots)
+}
+
+impl Row {
+    /// Whether the row runs on into the next: the terminal wrapped it, or it
+    /// reaches the right edge, where a program breaks a line too long to fit.
+    fn full(&self, cols: u16) -> bool {
+        // Cells a program may leave blank at the edge of its own width.
+        const EDGE: u16 = 4;
+        self.wraps || self.spots.iter().rev().find(|s| !self.text[s.byte..].starts_with(' ')).is_some_and(|s| s.x + s.width + EDGE >= cols)
+    }
+}
+
+/// The run of text without whitespace at byte `at`; empty on whitespace.
+fn word_range(text: &str, at: usize) -> std::ops::Range<usize> {
+    if text[at..].starts_with(char::is_whitespace) {
+        return at..at;
+    }
+    let start = text[..at].rfind(char::is_whitespace).map_or(0, |i| i + text[i..].chars().next().map_or(1, char::len_utf8));
+    let end = text[at..].find(char::is_whitespace).map_or(text.len(), |i| at + i);
+    start..end
+}
 
 /// A link found in the terminal: what it says, and where it shows.
 #[derive(Clone, Debug, PartialEq)]
@@ -281,6 +617,16 @@ fn hyperlink_uri(r: &GhosttyGridRef) -> Option<String> {
         res = unsafe { ghostty_grid_ref_hyperlink_uri(r, buf.as_mut_ptr(), buf.len(), &mut len) };
     }
     (res == GHOSTTY_SUCCESS && len > 0).then(|| String::from_utf8_lossy(&buf[..len]).into_owned())
+}
+
+fn is_wide(r: &GhosttyGridRef) -> bool {
+    let mut cell: GhosttyCell = Default::default();
+    let mut wide: GhosttyCellWide = GHOSTTY_CELL_WIDE_NARROW;
+    let read = unsafe {
+        ghostty_grid_ref_cell(r, &mut cell) == GHOSTTY_SUCCESS
+            && ghostty_cell_get(cell, GHOSTTY_CELL_DATA_WIDE, &mut wide as *mut _ as *mut c_void) == GHOSTTY_SUCCESS
+    };
+    read && wide == GHOSTTY_CELL_WIDE_WIDE
 }
 
 #[derive(Clone, Copy)]
@@ -305,12 +651,23 @@ unsafe extern "C" fn on_render_hold(_t: GhosttyTerminal, userdata: *mut c_void, 
     }
 }
 
+unsafe extern "C" fn on_size(_t: GhosttyTerminal, userdata: *mut c_void, out: *mut GhosttySizeReportSize) -> bool {
+    let shared = unsafe { &*(userdata as *const Shared) };
+    if shared.size.cell_width == 0 || shared.size.cell_height == 0 {
+        return false;
+    }
+    unsafe { *out = shared.size };
+    true
+}
+
 unsafe extern "C" fn on_title(_t: GhosttyTerminal, userdata: *mut c_void) {
     let shared = unsafe { &mut *(userdata as *mut Shared) };
     shared.title_changed = true;
 }
 
 const SYNC_OUTPUT: GhosttyMode = 2026;
+/// On from the start, as in Ghostty: VS16 makes ✍️ two cells wide and in color.
+const GRAPHEME_CLUSTER: GhosttyMode = 2027;
 const BRACKETED_PASTE: GhosttyMode = 2004;
 const MAX_HOLD: Duration = Duration::from_millis(1000);
 const SCROLLBACK_MAX_LINES: usize = 10_000;
@@ -324,6 +681,8 @@ impl Vt {
         unsafe {
             let mut term = std::ptr::null_mut();
             ok(ghostty_terminal_new(std::ptr::null(), &mut term, cols.max(1), rows.max(1)), "terminal_new");
+            let cluster = GhosttyTerminalModeConfig { mode: GRAPHEME_CLUSTER, value: true };
+            ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_MODE_DEFAULT, &cluster as *const _ as *const c_void);
             let mut state = std::ptr::null_mut();
             ok(ghostty_render_state_new(std::ptr::null(), &mut state), "render_state_new");
             let mut rows_it = std::ptr::null_mut();
@@ -340,13 +699,15 @@ impl Vt {
             ok(ghostty_mouse_event_new(std::ptr::null(), &mut mouse_event), "mouse_event_new");
 
             install_png_decoder();
-            let mut shared = Box::new(Shared { state, held_since: None, title_changed: false, replies: Vec::new(), clipboard_write: true, clipboard: [None, None] });
+            let mut shared = Box::new(Shared { state, size: GhosttySizeReportSize { rows: rows.max(1), columns: cols.max(1), cell_width: 0, cell_height: 0 }, held_since: None, title_changed: false, replies: Vec::new(), clipboard_write: true, clipboard: [None, None] });
             let ud = &mut *shared as *mut Shared as *const c_void;
             ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_USERDATA, ud);
             let hold: GhosttyTerminalRenderHoldFn = Some(on_render_hold);
             ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_RENDER_HOLD, std::mem::transmute(hold));
             let title: GhosttyTerminalTitleChangedFn = Some(on_title);
             ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_TITLE_CHANGED, std::mem::transmute(title));
+            let size: GhosttyTerminalSizeFn = Some(on_size);
+            ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_SIZE, std::mem::transmute(size));
             let write: GhosttyTerminalWritePtyFn = Some(on_write_pty);
             ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_WRITE_PTY, std::mem::transmute(write));
             let clipboard: GhosttyTerminalClipboardWriteFn = Some(on_clipboard_write);
@@ -378,12 +739,17 @@ impl Vt {
             );
             let mut vt = Vt {
                 term,
+                search: None,
+                search_active: false,
+                search_progress: SearchProgress::default(),
+                search_spans: Vec::new(),
                 shared,
                 rows_it,
                 cells,
                 keys,
                 key_event,
                 mouse,
+                last_mouse_report: Vec::new(),
                 mouse_event,
                 cols,
                 rows,
@@ -396,6 +762,7 @@ impl Vt {
                 drawn: Default::default(),
                 seen: HashMap::new(),
                 seen_with: (0, 0),
+                placements_cache: RefCell::new(None),
                 win32: Default::default(),
             };
             vt.apply_theme();
@@ -437,6 +804,9 @@ impl Vt {
 
     /// Visible kitty graphics placements, bottom layer first.
     pub fn placements(&self) -> Vec<Placement> {
+        if let Some(placements) = self.placements_cache.borrow().as_ref() {
+            return placements.clone();
+        }
         let mut out = Vec::new();
         unsafe {
             let mut g: GhosttyKittyGraphics = std::ptr::null_mut();
@@ -447,6 +817,7 @@ impl Vt {
             if ghostty_kitty_graphics_placement_iterator_new(std::ptr::null(), &mut it) != GHOSTTY_SUCCESS {
                 return out;
             }
+            let mut specs = Vec::new();
             if ghostty_kitty_graphics_get(g, GHOSTTY_KITTY_GRAPHICS_DATA_PLACEMENT_ITERATOR, &mut it as *mut _ as *mut c_void) == GHOSTTY_SUCCESS {
                 while ghostty_kitty_graphics_placement_next(it) {
                     let (mut id, mut z, mut virt) = (0u32, 0i32, false);
@@ -454,7 +825,15 @@ impl Vt {
                     ghostty_kitty_graphics_placement_get(it, GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_Z, &mut z as *mut _ as *mut c_void);
                     ghostty_kitty_graphics_placement_get(it, GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_IS_VIRTUAL, &mut virt as *mut _ as *mut c_void);
                     let img = ghostty_kitty_graphics_image(g, id);
-                    if virt || img.is_null() {
+                    if virt {
+                        let (mut placement_id, mut columns, mut rows) = (0u32, 0u32, 0u32);
+                        ghostty_kitty_graphics_placement_get(it, GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_PLACEMENT_ID, &mut placement_id as *mut _ as *mut c_void);
+                        ghostty_kitty_graphics_placement_get(it, GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_COLUMNS, &mut columns as *mut _ as *mut c_void);
+                        ghostty_kitty_graphics_placement_get(it, GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_ROWS, &mut rows as *mut _ as *mut c_void);
+                        specs.push(KittyVirtualPlacementSpec { image_id: id, placement_id, columns, rows });
+                        continue;
+                    }
+                    if img.is_null() {
                         continue;
                     }
                     let mut info = GhosttyKittyGraphicsPlacementRenderInfo { size: std::mem::size_of::<GhosttyKittyGraphicsPlacementRenderInfo>(), ..Default::default() };
@@ -471,14 +850,102 @@ impl Vt {
                         width: info.pixel_width,
                         height: info.pixel_height,
                         source: [info.source_x, info.source_y, info.source_width, info.source_height],
+                        offset: [0, 0],
+                        cell_pixels: None,
                         z,
                     });
                 }
             }
             ghostty_kitty_graphics_placement_iterator_free(it);
+            out.extend(self.kitty_virtual_image_placements(g, &specs));
         }
         out.sort_by_key(|p| p.z);
+        *self.placements_cache.borrow_mut() = Some(out.clone());
         out
+    }
+
+    fn kitty_virtual_image_placements(&self, graphics: GhosttyKittyGraphics, specs: &[KittyVirtualPlacementSpec]) -> Vec<Placement> {
+        if specs.is_empty() {
+            return Vec::new();
+        }
+        let (mut width, mut height) = (0u32, 0u32);
+        unsafe {
+            ghostty_terminal_get(self.term, GHOSTTY_TERMINAL_DATA_WIDTH_PX, &mut width as *mut _ as *mut c_void);
+            ghostty_terminal_get(self.term, GHOSTTY_TERMINAL_DATA_HEIGHT_PX, &mut height as *mut _ as *mut c_void);
+        }
+        let cell_width = (width / u32::from(self.cols.max(1))).max(1);
+        let cell_height = (height / u32::from(self.rows.max(1))).max(1);
+        let mut runs = Vec::new();
+        for y in 0..self.rows {
+            let Some(first) = self.grid_ref(GHOSTTY_POINT_TAG_VIEWPORT, 0, u32::from(y)) else { continue };
+            let mut row = GhosttyRow::default();
+            let mut placeholders = false;
+            unsafe {
+                ghostty_grid_ref_row(&first, &mut row);
+                ghostty_row_get(row, GHOSTTY_ROW_DATA_KITTY_VIRTUAL_PLACEHOLDER, &mut placeholders as *mut _ as *mut c_void);
+            }
+            if !placeholders {
+                continue;
+            }
+            let mut current: Option<KittyVirtualRun> = None;
+            for x in 0..self.cols {
+                let cell = self.grid_ref(GHOSTTY_POINT_TAG_VIEWPORT, x, u32::from(y))
+                    .and_then(|grid_ref| kitty_virtual_cell(x, y, &grid_ref));
+                match cell {
+                    Some(cell) => {
+                        if let Some(run) = current.as_mut() {
+                            if run.append(cell) {
+                                continue;
+                            }
+                            runs.push(*run);
+                        }
+                        current = Some(KittyVirtualRun::from_cell(cell));
+                    }
+                    None => {
+                        if let Some(run) = current.take() {
+                            runs.push(run);
+                        }
+                    }
+                }
+            }
+            if let Some(run) = current {
+                runs.push(run);
+            }
+        }
+        let mut placements = Vec::new();
+        for run in runs {
+            let id = run.image_id();
+            let Some(spec) = specs.iter().find(|spec| spec.image_id == id
+                && (run.placement_id == 0 || spec.placement_id == run.placement_id)) else { continue };
+            let image = unsafe { ghostty_kitty_graphics_image(graphics, id) };
+            if image.is_null() {
+                continue;
+            }
+            let (mut image_width, mut image_height, mut generation) = (0u32, 0u32, 0u64);
+            unsafe {
+                ghostty_kitty_graphics_image_get(image, GHOSTTY_KITTY_IMAGE_DATA_WIDTH, &mut image_width as *mut _ as *mut c_void);
+                ghostty_kitty_graphics_image_get(image, GHOSTTY_KITTY_IMAGE_DATA_HEIGHT, &mut image_height as *mut _ as *mut c_void);
+                ghostty_kitty_graphics_image_get(image, GHOSTTY_KITTY_IMAGE_DATA_GENERATION, &mut generation as *mut _ as *mut c_void);
+            }
+            let Some(placement) = kitty_virtual_placement_geometry(run, *spec, image_width, image_height, cell_width, cell_height, generation) else { continue };
+
+            // Extend the slice ending right above with the same source columns: one
+            // sprite per image, as sprites meeting at a row edge show seams.
+            let bottom = |p: &Placement| i64::from(p.row) * i64::from(cell_height) + i64::from(p.offset[1]) + i64::from(p.height);
+            let top = i64::from(placement.row) * i64::from(cell_height) + i64::from(placement.offset[1]);
+            let above = placements.iter_mut().find(|p: &&mut Placement| (p.image, p.generation, p.col, p.width, p.offset[0], p.cell_pixels)
+                    == (placement.image, placement.generation, placement.col, placement.width, placement.offset[0], placement.cell_pixels)
+                && (p.source[0], p.source[2], p.source[1] + p.source[3]) == (placement.source[0], placement.source[2], placement.source[1])
+                && bottom(p) == top);
+            match above {
+                Some(p) => {
+                    p.height += placement.height;
+                    p.source[3] += placement.source[3];
+                }
+                None => placements.push(placement),
+            }
+        }
+        placements
     }
 
     /// An image's pixels as BGRA (what GPUI uploads), cropped to `source`.
@@ -582,6 +1049,109 @@ impl Vt {
         }
     }
 
+    fn cursor_position(&self) -> CellPosition {
+        let (mut col, mut row) = (0u16, 0u16);
+        unsafe {
+            ghostty_terminal_get(self.term, GHOSTTY_TERMINAL_DATA_CURSOR_X, &mut col as *mut _ as *mut c_void);
+            ghostty_terminal_get(self.term, GHOSTTY_TERMINAL_DATA_CURSOR_Y, &mut row as *mut _ as *mut c_void);
+        }
+        let reference = self.grid_ref(GHOSTTY_POINT_TAG_ACTIVE, col, row as u32).expect("cursor is in the active screen");
+        self.cell_position(&reference).expect("cursor is in the screen")
+    }
+
+    fn cell_position(&self, reference: &GhosttyGridRef) -> Option<CellPosition> {
+        let mut point = GhosttyPointCoordinate::default();
+        (unsafe { ghostty_terminal_point_from_grid_ref(self.term, reference, GHOSTTY_POINT_TAG_SCREEN, &mut point) } == GHOSTTY_SUCCESS)
+            .then_some(CellPosition { row: point.y, col: point.x })
+    }
+
+    fn selection(&self) -> Option<GhosttySelection> {
+        let mut selection = GhosttySelection { size: std::mem::size_of::<GhosttySelection>(), ..Default::default() };
+        (unsafe { ghostty_terminal_get(self.term, GHOSTTY_TERMINAL_DATA_SELECTION, &mut selection as *mut _ as *mut c_void) } == GHOSTTY_SUCCESS)
+            .then_some(selection)
+    }
+
+    pub fn selection_positions(&self) -> Option<SelectionPositions> {
+        let selection = self.selection()?;
+        Some(SelectionPositions { start: self.cell_position(&selection.start)?, end: self.cell_position(&selection.end)? })
+    }
+
+    pub fn select_at(&mut self, at: Option<CellPosition>, mode: &str) -> Result<(), String> {
+        if !matches!(mode, "cell" | "word" | "line") {
+            return Err("terminal.select mode is cell, word or line".into());
+        }
+        let at = at.unwrap_or_else(|| self.cursor_position());
+        let reference = self.grid_ref(GHOSTTY_POINT_TAG_SCREEN, at.col, at.row).ok_or("terminal.select at is outside the screen and history")?;
+        let mut selection = GhosttySelection {
+            size: std::mem::size_of::<GhosttySelection>(), start: reference, end: reference, ..Default::default()
+        };
+        let result = unsafe {
+            match mode {
+                "word" => {
+                    let options = GhosttyTerminalSelectWordOptions { size: std::mem::size_of::<GhosttyTerminalSelectWordOptions>(), ref_: reference, ..Default::default() };
+                    ghostty_terminal_select_word(self.term, &options, &mut selection)
+                }
+                "line" => {
+                    let options = GhosttyTerminalSelectLineOptions { size: std::mem::size_of::<GhosttyTerminalSelectLineOptions>(), ref_: reference, semantic_prompt_boundary: true, ..Default::default() };
+                    ghostty_terminal_select_line(self.term, &options, &mut selection)
+                }
+                _ => GHOSTTY_SUCCESS,
+            }
+        };
+        if result == GHOSTTY_NO_VALUE {
+            self.clear_selection();
+            return Ok(());
+        }
+        if result != GHOSTTY_SUCCESS {
+            return Err("terminal.select could not select that cell".into());
+        }
+        unsafe { ghostty_terminal_set(self.term, GHOSTTY_TERMINAL_OPT_SELECTION, &selection as *const _ as *const c_void); }
+        Ok(())
+    }
+
+    pub fn adjust_selection(&mut self, direction: &str) -> Result<(), String> {
+        let adjustment = match direction {
+            "left" => GHOSTTY_SELECTION_ADJUST_LEFT,
+            "right" => GHOSTTY_SELECTION_ADJUST_RIGHT,
+            "up" => GHOSTTY_SELECTION_ADJUST_UP,
+            "down" => GHOSTTY_SELECTION_ADJUST_DOWN,
+            "page_up" => GHOSTTY_SELECTION_ADJUST_PAGE_UP,
+            "page_down" => GHOSTTY_SELECTION_ADJUST_PAGE_DOWN,
+            "home" => GHOSTTY_SELECTION_ADJUST_HOME,
+            "end" => GHOSTTY_SELECTION_ADJUST_END,
+            "line_start" => GHOSTTY_SELECTION_ADJUST_BEGINNING_OF_LINE,
+            "line_end" => GHOSTTY_SELECTION_ADJUST_END_OF_LINE,
+            _ => return Err("terminal.adjust_selection direction is left, right, up, down, page_up, page_down, home, end, line_start or line_end".into()),
+        };
+        let mut selection = self.selection().ok_or("terminal.adjust_selection needs a selection")?;
+        if unsafe { ghostty_terminal_selection_adjust(self.term, &mut selection, adjustment) } != GHOSTTY_SUCCESS {
+            return Err("terminal.adjust_selection could not move the selection".into());
+        }
+        // Convert before installing the snapshot: any mutating call invalidates its refs.
+        let end = self.cell_position(&selection.end).ok_or("selection end is outside the screen")?;
+        unsafe { ghostty_terminal_set(self.term, GHOSTTY_TERMINAL_OPT_SELECTION, &selection as *const _ as *const c_void); }
+        let scrollbar = self.scrollbar();
+        let row = u64::from(end.row);
+        if row < scrollbar.offset {
+            self.scroll_to_row(row as usize);
+        } else if row >= scrollbar.offset.saturating_add(scrollbar.len) {
+            self.scroll_to_row(row.saturating_sub(scrollbar.len.saturating_sub(1)) as usize);
+        }
+        Ok(())
+    }
+
+    /// Select the active screen and its history without formatting or copying text.
+    pub fn select_all(&mut self) {
+        let mut selection = GhosttySelection { size: std::mem::size_of::<GhosttySelection>(), ..Default::default() };
+        unsafe {
+            if ghostty_terminal_select_all(self.term, &mut selection) == GHOSTTY_SUCCESS {
+                ghostty_terminal_set(self.term, GHOSTTY_TERMINAL_OPT_SELECTION, &selection as *const _ as *const c_void);
+            } else {
+                self.clear_selection();
+            }
+        }
+    }
+
     /// The selected text, if anything is selected.
     pub fn selection_text(&self) -> Option<String> {
         unsafe {
@@ -615,8 +1185,11 @@ impl Vt {
 
     /// The link at a viewport cell: a link the program marked (OSC 8), or a
     /// URL or path in the text. Follows lines the terminal wrapped, also into
-    /// rows scrolled out of view.
-    pub fn link_at(&self, col: u16, row: u16, find: impl FnOnce(&str, usize) -> Option<std::ops::Range<usize>>) -> Option<LinkHit> {
+    /// rows scrolled out of view. Then tries the lines around joined, their
+    /// indentation dropped: programs like Claude Code break long paths onto
+    /// new lines themselves. `find` is told when its text holds lines joined; a
+    /// link found there wins when it's longer.
+    pub fn link_at(&self, col: u16, row: u16, mut find: impl FnMut(&str, usize, bool) -> Option<std::ops::Range<usize>>) -> Option<LinkHit> {
         if col >= self.cols || row >= self.rows {
             return None;
         }
@@ -630,65 +1203,132 @@ impl Vt {
             p.y
         };
         let hovered = top + row as u32;
-        let wraps = |y: u32| unsafe {
+        // A URL longer than this many rows isn't one worth finding.
+        const REACH: u32 = 32;
+        let mut first = hovered;
+        while first > 0 && hovered - first < REACH && self.wraps(first - 1) {
+            first -= 1;
+        }
+        let mut last = hovered;
+        while last - hovered < REACH && self.wraps(last) && self.grid_ref(GHOSTTY_POINT_TAG_SCREEN, 0, last + 1).is_some() {
+            last += 1;
+        }
+        let mut rows: Vec<Row> = (first..=last).map_while(|y| self.link_row(y)).collect();
+        let (text, spots) = link_text(&rows);
+        let at = spots.iter().position(|s| s.y == hovered && s.x <= col && col < s.x + s.width)?;
+        let hit = self.link_in(&text, &spots, top, at, &mut find, false);
+        if spots[at].uri.is_some() {
+            return hit;
+        }
+
+        // Lines a program broke itself, joined: only across rows that reach
+        // the right edge, and only where the hovered word runs into one.
+        const BROKEN: u32 = 4;
+        let word = word_range(&text, spots[at].byte);
+        let mut above = Vec::new();
+        if text[..word.start].trim().is_empty() {
+            for y in (first.saturating_sub(BROKEN)..first).rev() {
+                match self.link_row(y) {
+                    Some(row) if row.full(self.cols) => above.push(row),
+                    _ => break,
+                }
+            }
+        }
+        let mut below = Vec::new();
+        if text[word.end..].trim().is_empty() && rows.last().is_some_and(|row| row.full(self.cols)) {
+            for y in last + 1..=last + BROKEN {
+                let Some(row) = self.link_row(y) else { break };
+                let full = row.full(self.cols);
+                below.push(row);
+                if !full {
+                    break;
+                }
+            }
+        }
+        let (group, up_most, down_most) = (rows.len(), above.len(), below.len());
+        rows.splice(0..0, above.into_iter().rev());
+        rows.extend(below);
+        // Fewest rows first; the longest link wins, so a break next to a
+        // slash doesn't stop at the folder before it. A join that leaves the
+        // hovered word as it was can't find anything new.
+        let mut tried = vec![text[word].to_owned()];
+        let mut best: Option<(LinkHit, String, Vec<Spot>, usize)> = None;
+        // Whether `find` last saw the link we'd return: it may keep what it saw.
+        let mut fresh = true;
+        for joined in 1..=up_most + down_most {
+            for up in joined.saturating_sub(down_most)..=joined.min(up_most) {
+                let start = up_most - up;
+                let (text, spots) = link_text(&rows[start..start + group + joined]);
+                let Some(at) = spots.iter().position(|s| s.y == hovered && s.x <= col && col < s.x + s.width) else { continue };
+                let word = &text[word_range(&text, spots[at].byte)];
+                if tried.iter().any(|t| t == word) {
+                    continue;
+                }
+                tried.push(word.to_owned());
+                let Some(found) = self.link_in(&text, &spots, top, at, &mut find, true) else { continue };
+                let longest = best.as_ref().map(|b| &b.0).or(hit.as_ref()).map_or(0, |h| h.target.len());
+                fresh = found.target.len() > longest;
+                if fresh {
+                    best = Some((found, text, spots, at));
+                }
+            }
+        }
+        match best {
+            Some((found, ..)) if fresh => Some(found),
+            Some((_, text, spots, at)) => self.link_in(&text, &spots, top, at, &mut find, true),
+            None if fresh => hit,
+            None => self.link_in(&text, &spots, top, at, &mut find, false),
+        }
+    }
+
+    /// Whether the terminal wrapped screen row `y` onto the next.
+    fn wraps(&self, y: u32) -> bool {
+        unsafe {
             let Some(r) = self.grid_ref(GHOSTTY_POINT_TAG_SCREEN, 0, y) else { return false };
             let mut line: GhosttyRow = Default::default();
             let mut wrap = false;
             ghostty_grid_ref_row(&r, &mut line) == GHOSTTY_SUCCESS
                 && ghostty_row_get(line, GHOSTTY_ROW_DATA_WRAP, &mut wrap as *mut _ as *mut c_void) == GHOSTTY_SUCCESS
                 && wrap
-        };
-        // A URL longer than this many rows isn't one worth finding.
-        const REACH: u32 = 32;
-        let mut first = hovered;
-        while first > 0 && hovered - first < REACH && wraps(first - 1) {
-            first -= 1;
         }
-        let mut last = hovered;
-        while last - hovered < REACH && wraps(last) && self.grid_ref(GHOSTTY_POINT_TAG_SCREEN, 0, last + 1).is_some() {
-            last += 1;
-        }
+    }
 
-        struct Spot {
-            y: u32,
-            x: u16,
-            width: u16,
-            byte: usize,
-            uri: Option<String>,
-        }
+    /// The text of screen row `y` and where each character shows.
+    fn link_row(&self, y: u32) -> Option<Row> {
+        let mut r = self.grid_ref(GHOSTTY_POINT_TAG_SCREEN, 0, y)?;
         let mut text = String::new();
         let mut spots: Vec<Spot> = Vec::new();
-        for y in first..=last {
-            let mut r = self.grid_ref(GHOSTTY_POINT_TAG_SCREEN, 0, y)?;
-            for x in 0..self.cols {
-                r.x = x;
-                let (wide, linked) = unsafe {
-                    let mut cell: GhosttyCell = Default::default();
-                    ghostty_grid_ref_cell(&r, &mut cell);
-                    let mut wide: GhosttyCellWide = GHOSTTY_CELL_WIDE_NARROW;
-                    ghostty_cell_get(cell, GHOSTTY_CELL_DATA_WIDE, &mut wide as *mut _ as *mut c_void);
-                    let mut linked = false;
-                    ghostty_cell_get(cell, GHOSTTY_CELL_DATA_HAS_HYPERLINK, &mut linked as *mut _ as *mut c_void);
-                    (wide, linked)
-                };
-                if wide == GHOSTTY_CELL_WIDE_SPACER_TAIL || wide == GHOSTTY_CELL_WIDE_SPACER_HEAD {
-                    continue;
-                }
-                let byte = text.len();
-                let mut cps = [0u32; 16];
-                let mut len = 0usize;
-                unsafe { ghostty_grid_ref_graphemes(&r, cps.as_mut_ptr(), cps.len(), &mut len) };
-                let before = text.len();
-                text.extend(cps[..len.min(cps.len())].iter().filter_map(|c| char::from_u32(*c)));
-                if text.len() == before {
-                    text.push(' ');
-                }
-                let uri = linked.then(|| hyperlink_uri(&r)).flatten();
-                let width = if wide == GHOSTTY_CELL_WIDE_WIDE { 2 } else { 1 };
-                spots.push(Spot { y, x, width, byte, uri });
+        for x in 0..self.cols {
+            r.x = x;
+            let (wide, linked) = unsafe {
+                let mut cell: GhosttyCell = Default::default();
+                ghostty_grid_ref_cell(&r, &mut cell);
+                let mut wide: GhosttyCellWide = GHOSTTY_CELL_WIDE_NARROW;
+                ghostty_cell_get(cell, GHOSTTY_CELL_DATA_WIDE, &mut wide as *mut _ as *mut c_void);
+                let mut linked = false;
+                ghostty_cell_get(cell, GHOSTTY_CELL_DATA_HAS_HYPERLINK, &mut linked as *mut _ as *mut c_void);
+                (wide, linked)
+            };
+            if wide == GHOSTTY_CELL_WIDE_SPACER_TAIL || wide == GHOSTTY_CELL_WIDE_SPACER_HEAD {
+                continue;
             }
+            let byte = text.len();
+            let mut cps = [0u32; 16];
+            let mut len = 0usize;
+            unsafe { ghostty_grid_ref_graphemes(&r, cps.as_mut_ptr(), cps.len(), &mut len) };
+            text.extend(cps[..len.min(cps.len())].iter().filter_map(|c| char::from_u32(*c)));
+            if text.len() == byte {
+                text.push(' ');
+            }
+            let uri = linked.then(|| hyperlink_uri(&r)).flatten();
+            let width = if wide == GHOSTTY_CELL_WIDE_WIDE { 2 } else { 1 };
+            spots.push(Spot { y, x, width, byte, uri });
         }
-        let at = spots.iter().position(|s| s.y == hovered && s.x <= col && col < s.x + s.width)?;
+        Some(Row { text, spots, wraps: self.wraps(y) })
+    }
+
+    /// The link `find` sees in `text` at spot `at`.
+    fn link_in(&self, text: &str, spots: &[Spot], top: u32, at: usize, find: &mut impl FnMut(&str, usize, bool) -> Option<std::ops::Range<usize>>, joined: bool) -> Option<LinkHit> {
         let (target, chosen): (String, Vec<&Spot>) = match spots[at].uri.clone() {
             Some(uri) => {
                 let same = |s: &&Spot| s.uri.as_deref() == Some(uri.as_str());
@@ -697,7 +1337,7 @@ impl Vt {
                 (uri, spots[start..end].iter().collect())
             }
             None => {
-                let range = find(&text, spots[at].byte)?;
+                let range = find(text, spots[at].byte, joined)?;
                 (text[range.clone()].to_owned(), spots.iter().filter(|s| range.contains(&s.byte)).collect())
             }
         };
@@ -718,8 +1358,10 @@ impl Vt {
     }
 
     pub fn write(&mut self, bytes: &[u8]) {
+        self.placements_cache.get_mut().take();
         self.win32.watch(bytes);
         unsafe { ghostty_terminal_vt_write(self.term, bytes.as_ptr(), bytes.len()) };
+        self.feed_search();
     }
 
     pub fn allow_clipboard_write(&mut self, allow: bool) {
@@ -734,9 +1376,12 @@ impl Vt {
         if cols == 0 || rows == 0 {
             return;
         }
+        self.placements_cache.get_mut().take();
         self.cols = cols;
         self.rows = rows;
+        self.shared.size = GhosttySizeReportSize { rows, columns: cols, cell_width: cell_w.max(1), cell_height: cell_h.max(1) };
         unsafe { ghostty_terminal_resize(self.term, cols, rows, cell_w.max(1), cell_h.max(1)) };
+        self.feed_search();
     }
 
     pub fn take_title(&mut self) -> Option<String> {
@@ -781,14 +1426,200 @@ impl Vt {
     }
 
     pub fn scroll_viewport(&mut self, delta: isize) {
+        self.placements_cache.get_mut().take();
         let mut s = GhosttyTerminalScrollViewport { tag: GHOSTTY_SCROLL_VIEWPORT_DELTA, ..Default::default() };
         s.value.delta = delta;
         unsafe { ghostty_terminal_scroll_viewport(self.term, s) };
+        self.feed_search();
+    }
+
+    /// Scrolls so `row` (from the scrollback's top) is the first visible row.
+    pub fn scroll_to_row(&mut self, row: usize) {
+        self.placements_cache.get_mut().take();
+        let mut s = GhosttyTerminalScrollViewport { tag: GHOSTTY_SCROLL_VIEWPORT_ROW, ..Default::default() };
+        s.value.row = row;
+        unsafe { ghostty_terminal_scroll_viewport(self.term, s) };
+        self.feed_search();
+    }
+
+    /// What a scrollbar needs: the scrollable area's total rows, the viewport's
+    /// offset into it, and the viewport's length.
+    pub fn scrollbar(&self) -> GhosttyTerminalScrollbar {
+        let mut sb = GhosttyTerminalScrollbar::default();
+        unsafe { ghostty_terminal_get(self.term, GHOSTTY_TERMINAL_DATA_SCROLLBAR, &mut sb as *mut _ as *mut c_void) };
+        sb
     }
 
     pub fn scroll_to_bottom(&mut self) {
+        self.placements_cache.get_mut().take();
         let s = GhosttyTerminalScrollViewport { tag: GHOSTTY_SCROLL_VIEWPORT_BOTTOM, ..Default::default() };
         unsafe { ghostty_terminal_scroll_viewport(self.term, s) };
+        self.feed_search();
+    }
+
+    /// Start (or reuse) this terminal's Ghostty search. The handle belongs to
+    /// this Vt, so searches never leak between terminal tabs or panes.
+    pub fn start_search(&mut self, needle: &str) {
+        if self.search.is_none() {
+            let mut search = std::ptr::null_mut();
+            let result = unsafe { ghostty_search_new(std::ptr::null(), &mut search, self.term) };
+            if result != GHOSTTY_SUCCESS || search.is_null() {
+                tracing::warn!("terminal search: ghostty_search_new failed: {result:?}");
+                return;
+            }
+            self.search = Some(search);
+        }
+        self.set_search_needle(needle);
+    }
+
+    pub fn set_search_needle(&mut self, needle: &str) {
+        let Some(search) = self.search else { return };
+        self.search_active = !needle.is_empty();
+        let value = GhosttyString { ptr: needle.as_ptr(), len: needle.len() };
+        let value = if needle.is_empty() { std::ptr::null() } else { &value as *const _ as *const c_void };
+        let result = unsafe { ghostty_search_set(search, GHOSTTY_SEARCH_OPT_NEEDLE, value) };
+        if result != GHOSTTY_SUCCESS {
+            return;
+        }
+        if self.search_active {
+            self.feed_search();
+            self.progress_search();
+        } else {
+            self.search_progress = SearchProgress::default();
+            self.search_spans.clear();
+        }
+    }
+
+    pub fn clear_search(&mut self) {
+        self.set_search_needle("");
+    }
+
+    pub fn search_progress(&self) -> SearchProgress {
+        self.search_progress
+    }
+
+    /// Make one bounded unit of progress. Interactive searches must not call
+    /// Ghostty's blocking `run` on the UI thread.
+    pub fn progress_search(&mut self) -> bool {
+        let Some(search) = self.search.filter(|_| self.search_active) else { return false };
+        let before = (self.search_progress, self.search_spans.clone());
+        let mut status = GHOSTTY_SEARCH_STATUS_COMPLETE;
+        unsafe { ghostty_search_get(search, GHOSTTY_SEARCH_DATA_STATUS, &mut status as *mut _ as *mut c_void); }
+        if status == GHOSTTY_SEARCH_STATUS_FEED_REQUIRED {
+            self.feed_search();
+        }
+        let result = unsafe { ghostty_search_tick(search, &mut status) };
+        if result == GHOSTTY_SUCCESS {
+            self.read_search_data(search, status);
+        }
+        before != (self.search_progress, self.search_spans.clone())
+    }
+
+    /// Navigate only after incremental indexing is complete; the Ghostty
+    /// select API catches up synchronously, so calling it early could stall UI.
+    pub fn search_navigate(&mut self, previous: bool) -> bool {
+        let Some(search) = self.search.filter(|_| self.search_active && self.search_progress.complete) else { return false };
+        let option = if previous { GHOSTTY_SEARCH_OPT_SELECT_PREV } else { GHOSTTY_SEARCH_OPT_SELECT_NEXT };
+        if unsafe { ghostty_search_set(search, option, std::ptr::null()) } != GHOSTTY_SUCCESS {
+            return false;
+        }
+        self.feed_search();
+        true
+    }
+
+    fn feed_search(&mut self) {
+        let Some(search) = self.search.filter(|_| self.search_active) else { return };
+        if unsafe { ghostty_search_feed(search) } != GHOSTTY_SUCCESS {
+            return;
+        }
+        let mut status = GHOSTTY_SEARCH_STATUS_COMPLETE;
+        unsafe { ghostty_search_get(search, GHOSTTY_SEARCH_DATA_STATUS, &mut status as *mut _ as *mut c_void); }
+        self.read_search_data(search, status);
+    }
+
+    fn read_search_data(&mut self, search: GhosttySearch, status: GhosttySearchStatus) {
+        let mut total = 0usize;
+        let _ = unsafe { ghostty_search_get(search, GHOSTTY_SEARCH_DATA_TOTAL_MATCHES, &mut total as *mut _ as *mut c_void) };
+        let mut selected_index = 0usize;
+        let selected = unsafe {
+            ghostty_search_get(search, GHOSTTY_SEARCH_DATA_SELECTED_INDEX, &mut selected_index as *mut _ as *mut c_void) == GHOSTTY_SUCCESS
+        }.then_some(selected_index);
+        self.search_progress = SearchProgress { total, selected, complete: status == GHOSTTY_SEARCH_STATUS_COMPLETE };
+
+        // Ghostty returns viewport-only snapshots, not pointers into terminal
+        // state. Convert them immediately: any later terminal mutation makes
+        // the grid refs stale.
+        let mut buffer = GhosttySelectionBuffer { ptr: std::ptr::null_mut(), cap: 0, len: 0 };
+        let result = unsafe { ghostty_search_get(search, GHOSTTY_SEARCH_DATA_VIEWPORT_MATCHES, &mut buffer as *mut _ as *mut c_void) };
+        let mut matches = Vec::new();
+        if result == GHOSTTY_OUT_OF_SPACE && buffer.len > 0 {
+            matches = std::iter::repeat_with(|| GhosttySelection { size: std::mem::size_of::<GhosttySelection>(), ..Default::default() })
+                .take(buffer.len)
+                .collect();
+            buffer.ptr = matches.as_mut_ptr();
+            buffer.cap = matches.len();
+            buffer.len = 0;
+            if unsafe { ghostty_search_get(search, GHOSTTY_SEARCH_DATA_VIEWPORT_MATCHES, &mut buffer as *mut _ as *mut c_void) } != GHOSTTY_SUCCESS {
+                self.search_spans.clear();
+                return;
+            }
+        } else if result != GHOSTTY_SUCCESS {
+            self.search_spans.clear();
+            return;
+        }
+
+        let mut selected_match = GhosttySelection { size: std::mem::size_of::<GhosttySelection>(), ..Default::default() };
+        let has_selected_match = unsafe {
+            ghostty_search_get(search, GHOSTTY_SEARCH_DATA_SELECTED_MATCH, &mut selected_match as *mut _ as *mut c_void) == GHOSTTY_SUCCESS
+        };
+        let mut spans = Vec::new();
+        for matched in matches.iter().take(buffer.len) {
+            let selected = if has_selected_match {
+                let mut equal = false;
+                unsafe { ghostty_terminal_selection_equal(self.term, matched, &selected_match, &mut equal); }
+                equal
+            } else {
+                false
+            };
+            let mut start = GhosttyPointCoordinate::default();
+            let mut end = GhosttyPointCoordinate::default();
+            let (start_ok, end_ok) = unsafe {
+                (
+                    ghostty_terminal_point_from_grid_ref(self.term, &matched.start, GHOSTTY_POINT_TAG_VIEWPORT, &mut start),
+                    ghostty_terminal_point_from_grid_ref(self.term, &matched.end, GHOSTTY_POINT_TAG_VIEWPORT, &mut end),
+                )
+            };
+            if start_ok != GHOSTTY_SUCCESS || end_ok != GHOSTTY_SUCCESS {
+                continue;
+            }
+            let swapped = (start.y, start.x) > (end.y, end.x);
+            if swapped {
+                std::mem::swap(&mut start, &mut end);
+            }
+            // A match ends on a wide character's first cell; cover its second too.
+            if is_wide(if swapped { &matched.start } else { &matched.end }) {
+                end.x += 1;
+            }
+            let last_row = end.y.min(self.rows.saturating_sub(1) as u32);
+            if start.y >= self.rows as u32 || start.y > last_row {
+                continue;
+            }
+            for row in start.y..=last_row {
+                let first = if row == start.y { start.x } else { 0 };
+                let last = if row == end.y { end.x } else { self.cols.saturating_sub(1) };
+                if first <= last && first < self.cols {
+                    spans.push(SearchSpan { row: row as u16, start: first, end: last.min(self.cols.saturating_sub(1)), selected });
+                }
+            }
+        }
+        self.search_spans = spans;
+    }
+
+    pub fn scroll_to_top(&mut self) {
+        self.placements_cache.get_mut().take();
+        let s = GhosttyTerminalScrollViewport { tag: GHOSTTY_SCROLL_VIEWPORT_TOP, ..Default::default() };
+        unsafe { ghostty_terminal_scroll_viewport(self.term, s) };
+        self.feed_search();
     }
 
     /// Wraps pasted text the way the program asked (bracketed paste or not).
@@ -838,6 +1669,10 @@ impl Vt {
             }
             (cursor, generation, colors)
         }
+    }
+
+    pub fn render_hold_deadline(&self) -> Option<Instant> {
+        self.shared.held_since.map(|since| since + MAX_HOLD)
     }
 
     /// Updates the render state (respecting synchronized output) and reads one frame.
@@ -890,7 +1725,7 @@ impl Vt {
                         let mut row = Vec::with_capacity(self.cols as usize);
                         let mut x: u16 = 0;
                         while ghostty_render_state_row_cells_next(self.cells) {
-                            row.push(self.read_cell(fg_default, selected && x >= sel.start_x && x <= sel.end_x));
+                            row.push(self.read_cell(fg_default, &colors.palette, selected && x >= sel.start_x && x <= sel.end_x));
                             x += 1;
                         }
                         Rc::new(row)
@@ -920,11 +1755,11 @@ impl Vt {
             self.drawn = self.drawable();
             ghostty_render_state_clean(state);
             let cursor_cell = cur.viewport_has_value.then_some((cur.viewport_x, cur.viewport_y));
-            Frame { rows, all, cursor, cursor_cell, bg: bg_default }
+            Frame { rows, all, cursor, cursor_cell, bg: bg_default, search_spans: self.search_spans.clone() }
         }
     }
 
-    unsafe fn read_cell(&mut self, fg_default: Rgb, selected: bool) -> Cell {
+    unsafe fn read_cell(&mut self, fg_default: Rgb, palette: &[GhosttyColorRgb; 256], selected: bool) -> Cell {
         unsafe {
             let c = self.cells;
             let mut raw: GhosttyCell = Default::default();
@@ -968,10 +1803,32 @@ impl Vt {
                 }
             }
 
+            if text.starts_with('\u{10eeee}') {
+                text.clear();
+                style.underline = 0;
+                style.strikethrough = false;
+            }
+
             // Contrast adjustment is opt-in; graphics always keep their colors.
             if self.theme.minimum_contrast > 1.0 && !preserves_graphics_color(&text) {
                 fg = readable(fg, bg.unwrap_or(self.theme.bg), self.theme.minimum_contrast);
             }
+
+            let underline = match style.underline as GhosttySgrUnderline {
+                GHOSTTY_SGR_UNDERLINE_NONE => None,
+                GHOSTTY_SGR_UNDERLINE_DOUBLE => Some(Underline::Double),
+                GHOSTTY_SGR_UNDERLINE_CURLY => Some(Underline::Curly),
+                GHOSTTY_SGR_UNDERLINE_DOTTED => Some(Underline::Dotted),
+                GHOSTTY_SGR_UNDERLINE_DASHED => Some(Underline::Dashed),
+                _ => Some(Underline::Single),
+            };
+            // Reverse video swaps the text's colors, not the underline's own.
+            // Lazy, so cells without an underline skip the decode.
+            let underline_color = underline.and_then(|_| match style.underline_color.tag {
+                GHOSTTY_STYLE_COLOR_PALETTE => Some(Rgb::from(palette[style.underline_color.value.palette as usize])),
+                GHOSTTY_STYLE_COLOR_RGB => Some(Rgb::from(style.underline_color.value.rgb)),
+                _ => None,
+            });
 
             Cell {
                 text,
@@ -980,7 +1837,8 @@ impl Vt {
                 bold: style.bold,
                 italic: style.italic,
                 faint: style.faint,
-                underline: style.underline != 0,
+                underline,
+                underline_color,
                 strike: style.strikethrough,
                 wide: wide == GHOSTTY_CELL_WIDE_WIDE,
             }
@@ -996,7 +1854,12 @@ impl Vt {
             ghostty_key_encoder_setopt_from_terminal(self.keys, self.term);
             #[cfg(target_os = "macos")]
             {
-                let option = if gpui_macos::option_as_alt() { GHOSTTY_OPTION_AS_ALT_TRUE } else { GHOSTTY_OPTION_AS_ALT_FALSE };
+                let option = match gpui_macos::option_as_alt() {
+                    gpui_macos::OptionAsAlt::None => GHOSTTY_OPTION_AS_ALT_FALSE,
+                    gpui_macos::OptionAsAlt::Both => GHOSTTY_OPTION_AS_ALT_TRUE,
+                    gpui_macos::OptionAsAlt::Left => GHOSTTY_OPTION_AS_ALT_LEFT,
+                    gpui_macos::OptionAsAlt::Right => GHOSTTY_OPTION_AS_ALT_RIGHT,
+                };
                 ghostty_key_encoder_setopt(self.keys, GHOSTTY_KEY_ENCODER_OPT_MACOS_OPTION_AS_ALT, &option as *const _ as *const c_void);
             }
             let e = self.key_event;
@@ -1066,10 +1929,30 @@ impl Vt {
             let mut buf = [0u8; 64];
             let mut len = 0usize;
             let r = ghostty_mouse_encoder_encode(self.mouse, e, buf.as_mut_ptr() as *mut _, buf.len(), &mut len);
-            if r != GHOSTTY_SUCCESS {
+            if r != GHOSTTY_SUCCESS || len == 0 {
                 return Vec::new();
             }
-            buf[..len].to_vec()
+            // Refreshing the encoder's terminal/size options resets its cell tracking.
+            if action == GHOSTTY_MOUSE_ACTION_MOTION && self.last_mouse_report == buf[..len] {
+                return Vec::new();
+            }
+            let report = buf[..len].to_vec();
+            // Remember the motion equivalent of a press/release, so a focus click
+            // cannot start a drag at the same cell. Let the encoder handle each
+            // format's coordinates, including the finer SGR-pixel positions.
+            if action != GHOSTTY_MOUSE_ACTION_MOTION {
+                ghostty_mouse_event_set_action(e, GHOSTTY_MOUSE_ACTION_MOTION);
+                if action == GHOSTTY_MOUSE_ACTION_RELEASE {
+                    ghostty_mouse_event_clear_button(e);
+                }
+                len = 0;
+                if ghostty_mouse_encoder_encode(self.mouse, e, buf.as_mut_ptr() as *mut _, buf.len(), &mut len) != GHOSTTY_SUCCESS {
+                    len = 0;
+                }
+            }
+            self.last_mouse_report.clear();
+            self.last_mouse_report.extend_from_slice(&buf[..len]);
+            report
         }
     }
 }
@@ -1077,6 +1960,9 @@ impl Vt {
 impl Drop for Vt {
     fn drop(&mut self) {
         unsafe {
+            if let Some(search) = self.search {
+                ghostty_search_free(search);
+            }
             ghostty_selection_gesture_event_free(self.press);
             ghostty_selection_gesture_event_free(self.drag);
             ghostty_selection_gesture_event_free(self.release);
@@ -1098,6 +1984,166 @@ mod tests {
     use super::*;
 
     #[test]
+    fn keyboard_selection_tracks_history_while_output_arrives() {
+        let mut vt = Vt::new(20, 4);
+        for line in 0..12 {
+            vt.write(format!("line {line:02}\r\n").as_bytes());
+        }
+        assert_eq!(vt.cursor_position(), CellPosition { row: 12, col: 0 });
+        vt.select_at(None, "cell").unwrap();
+        vt.adjust_selection("left").unwrap();
+        assert_eq!(vt.selection_positions().unwrap(), SelectionPositions {
+            start: CellPosition { row: 12, col: 0 }, end: CellPosition { row: 11, col: 6 },
+        });
+        vt.adjust_selection("up").unwrap();
+        vt.write(b"more output\r\n");
+        vt.adjust_selection("page_up").unwrap();
+        let selected = vt.selection_positions().unwrap();
+        assert_eq!(selected.start, CellPosition { row: 12, col: 0 });
+        assert_eq!(selected.end, CellPosition { row: 6, col: 6 });
+        assert!(u64::from(selected.end.row) >= vt.scrollbar().offset);
+        assert!(u64::from(selected.end.row) < vt.scrollbar().offset + vt.scrollbar().len);
+        assert_eq!(vt.selection_text().as_deref(), Some("6\nline 07\nline 08\nline 09\nline 10\nline 11\nm"));
+        vt.adjust_selection("page_down").unwrap();
+        vt.adjust_selection("down").unwrap();
+        vt.adjust_selection("line_start").unwrap();
+        assert_eq!(vt.selection_positions().unwrap().end, CellPosition { row: 11, col: 0 });
+        vt.adjust_selection("line_end").unwrap();
+        assert_eq!(vt.selection_positions().unwrap().end, CellPosition { row: 11, col: 19 });
+        vt.adjust_selection("home").unwrap();
+        assert_eq!(vt.selection_positions().unwrap().end, CellPosition { row: 0, col: 0 });
+        vt.adjust_selection("end").unwrap();
+        assert_eq!(vt.selection_positions().unwrap().end, CellPosition { row: 12, col: 19 });
+        vt.clear_selection();
+        assert_eq!(vt.selection_positions(), None);
+        assert!(vt.adjust_selection("left").unwrap_err().contains("needs a selection"));
+    }
+
+    #[test]
+    fn keyboard_selection_matches_mouse_words_lines_and_highlights() {
+        let mut vt = Vt::new(30, 3);
+        vt.write("hello 日本語\r\nsecond line".as_bytes());
+        let at = Some(CellPosition { row: 0, col: 1 });
+        vt.select_at(at, "word").unwrap();
+        assert_eq!(vt.selection_text().as_deref(), Some("hello"));
+        let word = vt.selection_positions();
+        for _ in 0..2 {
+            vt.select(Select::Press, 1, 0, 14.0, 5.0, 10.0, 60.0);
+            vt.select(Select::Release, 1, 0, 14.0, 5.0, 10.0, 60.0);
+        }
+        assert_eq!(vt.selection_positions(), word);
+        vt.select_at(at, "line").unwrap();
+        assert_eq!(vt.selection_text().as_deref(), Some("hello 日本語"));
+        let line = vt.selection_positions();
+        vt.select(Select::Press, 1, 0, 14.0, 5.0, 10.0, 60.0);
+        vt.select(Select::Release, 1, 0, 14.0, 5.0, 10.0, 60.0);
+        assert_eq!(vt.selection_positions(), line);
+        vt.select_at(Some(CellPosition { row: 1, col: 0 }), "cell").unwrap();
+        vt.adjust_selection("right").unwrap();
+        assert_eq!(vt.selection_text().as_deref(), Some("se"));
+        let frame = vt.frame();
+        assert_eq!(frame.rows[1][0].bg, Some(theme().selection_bg));
+        assert_eq!(frame.rows[1][1].bg, Some(theme().selection_bg));
+        assert_ne!(frame.rows[1][2].bg, Some(theme().selection_bg));
+        let selected = vt.selection_positions();
+        assert!(vt.select_at(Some(CellPosition { row: 100, col: 0 }), "cell").is_err());
+        assert!(vt.select_at(at, "invalid").is_err());
+        assert!(vt.adjust_selection("word").is_err());
+        assert_eq!(vt.selection_positions(), selected);
+        vt.write(b"\x1b[?1049h\x1b[H");
+        assert_eq!(vt.cursor_position().row, 0);
+        assert_eq!(vt.selection_positions(), None);
+        vt.select_at(None, "cell").unwrap();
+        vt.adjust_selection("home").unwrap();
+        assert_eq!(vt.selection_positions().unwrap().end.row, 0);
+    }
+
+    fn finish_search(vt: &mut Vt) {
+        for _ in 0..100_000 {
+            if vt.search_progress().complete {
+                return;
+            }
+            vt.progress_search();
+        }
+        panic!("terminal search did not finish incrementally");
+    }
+
+    #[test]
+    fn terminal_search_matches_case_insensitively_and_wraps_navigation() {
+        let mut vt = Vt::new(32, 4);
+        vt.write(b"Needle here\r\nnot this\r\nneedle again");
+        vt.select(Select::Press, 0, 0, 1.0, 5.0, 10.0, 40.0);
+        vt.select(Select::Drag, 5, 0, 60.0, 5.0, 10.0, 40.0);
+        vt.select(Select::Release, 5, 0, 60.0, 5.0, 10.0, 40.0);
+        let clipboard_selection = vt.selection_text();
+        assert!(clipboard_selection.is_some());
+        vt.start_search("needle");
+        finish_search(&mut vt);
+
+        assert_eq!(vt.search_progress().total, 2);
+        assert_eq!(vt.search_progress().selected, None);
+        assert_eq!(vt.search_spans.len(), 2);
+        assert!(vt.search_spans.iter().all(|span| !span.selected));
+
+        assert!(vt.search_navigate(false));
+        assert_eq!(vt.search_progress().selected, Some(0));
+        assert!(vt.search_spans.iter().any(|span| span.selected));
+        assert_eq!(vt.selection_text(), clipboard_selection, "search doesn't replace the user's copy selection");
+        assert!(vt.search_navigate(false));
+        assert_eq!(vt.search_progress().selected, Some(1));
+        assert!(vt.search_navigate(false));
+        assert_eq!(vt.search_progress().selected, Some(0), "next wraps to newest");
+        assert!(vt.search_navigate(true));
+        assert_eq!(vt.search_progress().selected, Some(1), "previous wraps to oldest");
+
+        vt.clear_search();
+        assert_eq!(vt.search_progress(), SearchProgress::default());
+        assert!(vt.search_spans.is_empty());
+    }
+
+    #[test]
+    fn terminal_search_covers_scrollback_and_its_state_is_per_terminal() {
+        let mut first = Vt::new(32, 3);
+        let mut second = Vt::new(32, 3);
+        for line in 0..10 {
+            first.write(format!("first-{line}\r\n").as_bytes());
+            second.write(format!("second-{line}\r\n").as_bytes());
+        }
+
+        first.start_search("first-0");
+        second.start_search("second-9");
+        finish_search(&mut first);
+        finish_search(&mut second);
+        assert_eq!(first.search_progress().total, 1);
+        assert_eq!(second.search_progress().total, 1);
+        assert!(first.search_spans.is_empty(), "old scrollback isn't in the viewport yet");
+        let second_spans = second.search_spans.clone();
+        assert!(!second_spans.is_empty(), "the second terminal's current match is visible");
+
+        assert!(first.search_navigate(false));
+        assert!(!first.search_spans.is_empty(), "selecting a history result scrolls it into view");
+        assert!(first.search_spans.iter().all(|span| span.selected));
+        assert_eq!(second.search_spans, second_spans, "searching one terminal doesn't draw in another");
+    }
+
+    #[test]
+    fn terminal_search_highlights_both_cells_of_a_wide_character() {
+        let spans = |cols: u16, text: &str, query: &str| {
+            let mut vt = Vt::new(cols, 3);
+            vt.write(text.as_bytes());
+            vt.start_search(query);
+            finish_search(&mut vt);
+            vt.search_spans.iter().map(|span| (span.row, span.start, span.end)).collect::<Vec<_>>()
+        };
+        assert_eq!(spans(20, "日本語 ab", "本"), vec![(0, 2, 3)]);
+        assert_eq!(spans(20, "日本語 ab", "日本"), vec![(0, 0, 3)]);
+        assert_eq!(spans(20, "x😀y", "😀"), vec![(0, 1, 2)]);
+        assert_eq!(spans(6, "abcd日", "日"), vec![(0, 4, 5)], "in the last two columns");
+        assert_eq!(spans(5, "abcd日", "d日"), vec![(0, 3, 4), (1, 0, 1)], "wrapped to the next row");
+        assert_eq!(spans(20, "日本語 ab", "語 a"), vec![(0, 4, 7)], "a narrow end keeps its own cell");
+    }
+
+    #[test]
     fn scrollback_retains_five_thousand_styled_lines() {
         for cols in [80, 200] {
             let mut vt = Vt::new(cols, 25);
@@ -1114,6 +2160,30 @@ mod tests {
                 vt.scroll_viewport(25);
             }
         }
+    }
+
+    #[test]
+    fn vs16_makes_an_emoji_two_cells_wide() {
+        let mut vt = Vt::new(10, 2);
+        vt.write("\u{270d}\u{fe0f}!\x1bc\u{270d}\u{fe0f}!".as_bytes());
+        let f = vt.frame();
+        assert!(f.rows[0][0].wide, "also after a reset");
+        assert_eq!(f.rows[0][0].text, "\u{270d}\u{fe0f}");
+        assert_eq!(f.rows[0][2].text, "!");
+    }
+
+    #[test]
+    fn synchronized_output_releases_at_its_deadline() {
+        let mut vt = Vt::new(20, 3);
+        vt.write(b"before");
+        vt.write(b"\x1b[?2026h\r\x1b[Kafter");
+        let text = |frame: Frame| frame.rows[0].iter().map(|c| c.text.as_str()).collect::<String>();
+        assert!(text(vt.frame()).starts_with("before"));
+        let since = Instant::now() - MAX_HOLD - Duration::from_millis(1);
+        vt.shared.held_since = Some(since);
+        assert_eq!(vt.render_hold_deadline(), Some(since + MAX_HOLD));
+        assert!(text(vt.frame()).starts_with("after"));
+        assert_eq!(vt.render_hold_deadline(), None);
     }
 
     #[test]
@@ -1157,7 +2227,7 @@ mod tests {
         vt.resize(30, 5, 9, 18);
         assert!(vt.take_replies().is_empty(), "a shell receives no resize input");
         vt.write(b"\x1b[?2048h");
-        vt.take_replies();
+        assert_eq!(vt.take_replies(), b"\x1b[48;5;30;90;270t", "enabling reports current geometry before pixel mouse input");
         vt.resize(40, 6, 9, 18);
         assert_eq!(vt.take_replies(), b"\x1b[48;6;40;108;360t");
         assert!(vt.take_replies().is_empty(), "the report is sent only once");
@@ -1302,6 +2372,118 @@ mod tests {
     }
 
     #[test]
+    fn mouse_hover_tracks_only_changed_cells_and_respects_button_mode() {
+        let mut vt = Vt::new(80, 2);
+        let size = (80, 2, 10.0, 20.0);
+        vt.write(b"\x1b[?1003h\x1b[?1006h");
+        assert_eq!(vt.encode_mouse(GHOSTTY_MOUSE_ACTION_MOTION, None, 0, 15.0, 5.0, size, false), b"\x1b[<35;2;1M");
+        assert!(vt.encode_mouse(GHOSTTY_MOUSE_ACTION_MOTION, None, 0, 16.0, 5.0, size, false).is_empty());
+        assert_eq!(vt.encode_mouse(GHOSTTY_MOUSE_ACTION_MOTION, None, 0, 25.0, 5.0, size, false), b"\x1b[<35;3;1M");
+        vt.write(b"\x1b[?1002h");
+        assert!(vt.encode_mouse(GHOSTTY_MOUSE_ACTION_MOTION, None, 0, 35.0, 5.0, size, false).is_empty());
+        assert_eq!(vt.encode_mouse(GHOSTTY_MOUSE_ACTION_MOTION, Some(GHOSTTY_MOUSE_BUTTON_LEFT), 0, 35.0, 5.0, size, true), b"\x1b[<32;4;1M");
+        vt.write(b"\x1b[?1003h\x1b[?1016h");
+        assert_eq!(vt.encode_mouse(GHOSTTY_MOUSE_ACTION_MOTION, None, 0, 15.0, 5.0, size, false), b"\x1b[<35;15;5M");
+        assert_eq!(vt.encode_mouse(GHOSTTY_MOUSE_ACTION_MOTION, None, 0, 16.0, 5.0, size, false), b"\x1b[<35;16;5M");
+    }
+
+    #[test]
+    fn mouse_clicks_do_not_report_same_cell_drags_in_any_cell_encoding() {
+        let size = (80, 2, 11.7, 20.0);
+        for tracking in [b"\x1b[?1002h".as_slice(), b"\x1b[?1003h"] {
+            for format in [b"".as_slice(), b"\x1b[?1005h", b"\x1b[?1006h", b"\x1b[?1015h"] {
+                let mut vt = Vt::new(80, 2);
+                vt.write(tracking);
+                vt.write(format);
+                let left = Some(GHOSTTY_MOUSE_BUTTON_LEFT);
+                for _ in 0..2 {
+                    assert!(!vt.encode_mouse(GHOSTTY_MOUSE_ACTION_PRESS, left, 0, 15.0, 5.0, size, true).is_empty());
+                    assert!(vt.encode_mouse(GHOSTTY_MOUSE_ACTION_MOTION, left, 0, 15.0, 5.0, size, true).is_empty());
+                    assert!(vt.encode_mouse(GHOSTTY_MOUSE_ACTION_MOTION, left, 0, 16.0, 6.0, size, true).is_empty());
+                    assert!(!vt.encode_mouse(GHOSTTY_MOUSE_ACTION_RELEASE, left, 0, 16.0, 6.0, size, false).is_empty());
+                    assert!(vt.encode_mouse(GHOSTTY_MOUSE_ACTION_MOTION, None, 0, 16.0, 6.0, size, false).is_empty());
+                }
+                assert!(!vt.encode_mouse(GHOSTTY_MOUSE_ACTION_PRESS, left, 0, 15.0, 5.0, size, true).is_empty());
+                assert!(!vt.encode_mouse(GHOSTTY_MOUSE_ACTION_MOTION, left, 0, 25.0, 5.0, size, true).is_empty());
+                assert!(vt.encode_mouse(GHOSTTY_MOUSE_ACTION_MOTION, left, 0, 26.0, 6.0, size, true).is_empty());
+                // Another button can report at the same cell; press/release are never filtered.
+                let right = Some(GHOSTTY_MOUSE_BUTTON_RIGHT);
+                assert!(!vt.encode_mouse(GHOSTTY_MOUSE_ACTION_PRESS, right, 0, 25.0, 5.0, size, true).is_empty());
+                assert!(vt.encode_mouse(GHOSTTY_MOUSE_ACTION_MOTION, right, 0, 26.0, 6.0, size, true).is_empty());
+                assert!(!vt.encode_mouse(GHOSTTY_MOUSE_ACTION_MOTION, left, 0, 26.0, 6.0, size, true).is_empty());
+                assert!(!vt.encode_mouse(GHOSTTY_MOUSE_ACTION_RELEASE, right, 0, 26.0, 6.0, size, true).is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn button_motion_needs_the_views_press_ownership_gate() {
+        let mut vt = Vt::new(80, 2);
+        vt.write(b"\x1b[?1002h\x1b[?1006h");
+        // Ghostty trusts the event's button even if this pane never saw a press.
+        assert_eq!(vt.encode_mouse(GHOSTTY_MOUSE_ACTION_MOTION, Some(GHOSTTY_MOUSE_BUTTON_LEFT), 0, 35.0, 5.0, (80, 2, 10.0, 20.0), false), b"\x1b[<32;4;1M");
+    }
+
+    #[test]
+    fn select_all_covers_history_and_screen_from_any_viewport() {
+        let mut vt = Vt::new(12, 2);
+        vt.write("old 日本語\r\nwrapped abcdefghijklmnop\r\nlast".as_bytes());
+        for scroll in [0, -100, 1] {
+            vt.scroll_viewport(scroll);
+            vt.select_all();
+            assert_eq!(vt.selection_text().as_deref(), Some("old 日本語\nwrapped abcdefghijklmnop\nlast"));
+            vt.clear_selection();
+            assert_eq!(vt.selection_text(), None);
+        }
+    }
+
+    #[test]
+    fn select_all_uses_only_the_active_screen() {
+        let mut vt = Vt::new(20, 3);
+        vt.select_all();
+        assert_eq!(vt.selection_text(), None);
+        vt.write(b"primary history\r\nprimary screen\x1b[?1049h\x1b[Halt only");
+        vt.select_all();
+        assert_eq!(vt.selection_text().as_deref(), Some("alt only"));
+        vt.write(b"\x1b[?1049l");
+        vt.select_all();
+        assert_eq!(vt.selection_text().as_deref(), Some("primary history\nprimary screen"));
+        vt.select(Select::Press, 0, 0, 2.0, 5.0, 10.0, 60.0);
+        assert_eq!(vt.selection_text(), None, "a plain click clears select-all too");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "manual 64 MiB scrollback performance check"]
+    fn select_all_large_scrollback() {
+        let mut vt = Vt::new(80, 25);
+        let bytes = 64usize * 1024 * 1024;
+        let lines = usize::MAX;
+        unsafe {
+            ok(ghostty_terminal_set(vt.term, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES, &bytes as *const _ as *const c_void), "scrollback bytes");
+            ok(ghostty_terminal_set(vt.term, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES, &lines as *const _ as *const c_void), "scrollback lines");
+        }
+        let line = format!("{}\r\n", "x".repeat(79));
+        for _ in 0..200_000 {
+            vt.write(line.as_bytes());
+        }
+        let memory = || {
+            std::fs::read_to_string("/proc/self/status").unwrap().lines()
+                .find(|line| line.starts_with("VmRSS:")).unwrap().to_owned()
+        };
+        let before = memory();
+        let started = Instant::now();
+        for _ in 0..1000 {
+            vt.select_all();
+        }
+        eprintln!("64 MiB budget, {} rows; 1000 selections: {:?}; RSS before {before}, after {}", vt.scrollbar().total, started.elapsed(), memory());
+        let text = vt.selection_text().unwrap();
+        assert!(text.starts_with(&"x".repeat(79)));
+        assert!(text.trim_end().ends_with(&"x".repeat(79)));
+        eprintln!("copy on request: {} bytes", text.len());
+    }
+
+    #[test]
     fn dragging_selects_and_copies_text() {
         let mut vt = Vt::new(20, 3);
         vt.write(b"hello world\r\nsecond");
@@ -1322,6 +2504,7 @@ mod tests {
         let p = vt.placements();
         assert_eq!(p.len(), 1, "{p:?}");
         assert_eq!((p[0].image, p[0].col, p[0].row), (7, 0, 0));
+        assert_eq!(p[0].pixel_geometry(9.75, 20.5), [0.0, 0.0, 1.0, 1.0]);
         let (w, h, bgra) = vt.image_bgra(7, p[0].source).unwrap();
         assert_eq!((w, h), (1, 1));
         assert_eq!(&bgra[..], &[0, 0, 255, 255]);
@@ -1329,15 +2512,227 @@ mod tests {
         assert!(reply.contains("i=7") && reply.contains("OK"), "{reply:?}");
     }
 
+    fn virtual_image(vt: &mut Vt, id: u32, placement: u32) {
+        use base64::Engine;
+        let pixels = base64::engine::general_purpose::STANDARD.encode([255u8, 0, 0].repeat(32));
+        vt.write(format!("\x1b_Ga=T,U=1,f=24,i={id},p={placement},s=8,v=4,c=8,r=4,q=2;{pixels}\x1b\\").as_bytes());
+    }
+
+    fn placeholder(row: usize, col: usize, high: Option<usize>) -> String {
+        let marks = ['\u{305}', '\u{30d}', '\u{30e}', '\u{310}', '\u{312}', '\u{33d}', '\u{33e}', '\u{33f}'];
+        format!("\u{10eeee}{}{}{}", marks[row], marks[col], high.map(|i| marks[i].to_string()).unwrap_or_default())
+    }
+
+    #[test]
+    fn kitty_placeholders_resolve_slices_and_scroll_with_their_cells() {
+        let mut vt = Vt::new(20, 6);
+        vt.resize(20, 6, 8, 8);
+        virtual_image(&mut vt, 7, 0);
+        vt.write(b"\x1b[38;5;7m");
+        for row in 0..4 {
+            for col in 0..8 {
+                vt.write(placeholder(row, col, None).as_bytes());
+            }
+            vt.write(b"\r\n");
+        }
+        let frame = vt.frame();
+        assert!(frame.rows.iter().flat_map(|r| r.iter()).all(|c| c.text.is_empty()));
+        // The row slices join into one sprite, so no seams show between rows.
+        let p = vt.placements();
+        assert_eq!(p.len(), 1, "{p:?}");
+        assert_eq!((p[0].image, p[0].col, p[0].row, p[0].width, p[0].height), (7, 0, 0, 64, 32));
+        assert_eq!(p[0].source, [0, 0, 8, 4]);
+        assert_eq!(p[0].pixel_geometry(9.75, 20.5), [0.0, 0.0, 78.0, 82.0]);
+        vt.write(b"\x1b[6;1H\n\n");
+        vt.frame();
+        let p = vt.placements();
+        assert_eq!(p.len(), 1, "{p:?}");
+        assert_eq!((p[0].row, p[0].height, p[0].source), (0, 16, [0, 2, 8, 2]));
+    }
+
+    #[test]
+    fn kitty_placeholders_support_partial_runs_and_omitted_diacritics() {
+        let mut vt = Vt::new(20, 6);
+        vt.resize(20, 6, 8, 8);
+        virtual_image(&mut vt, 7, 0);
+        vt.write(b"\x1b[38;5;7m");
+        vt.write(format!("{}\u{10eeee}  {}", placeholder(2, 3, None), placeholder(2, 7, None)).as_bytes());
+        let p = vt.placements();
+        assert_eq!(p.len(), 2, "{p:?}");
+        assert_eq!((p[0].col, p[0].width, p[0].source), (0, 16, [3, 2, 2, 1]));
+        assert_eq!((p[1].col, p[1].width, p[1].source), (4, 8, [7, 2, 1, 1]));
+    }
+
+    #[test]
+    fn kitty_placeholders_decode_ids_before_theme_and_contrast() {
+        let mut vt = Vt::new(20, 6);
+        vt.resize(20, 6, 8, 8);
+        virtual_image(&mut vt, 0x01020304, 0x050607);
+        virtual_image(&mut vt, 263, 0);
+        let mut theme = vt.theme.clone();
+        theme.minimum_contrast = 21.0;
+        theme.palette16[7] = Rgb(255, 0, 0);
+        vt.set_theme(theme);
+        vt.write(b"\x1b[38;2;2;3;4;58;2;5;6;7m");
+        vt.write(placeholder(1, 2, Some(1)).as_bytes());
+        vt.write(b"\x1b[59;38;2;0;1;7m");
+        vt.write(placeholder(3, 4, None).as_bytes());
+        vt.frame();
+        let p = vt.placements();
+        assert_eq!(p.len(), 2, "{p:?}");
+        assert_eq!((p[0].image, p[0].source), (0x01020304, [2, 1, 1, 1]));
+        assert_eq!((p[1].image, p[1].source), (263, [4, 3, 1, 1]));
+    }
+
+    #[test]
+    fn kitty_placeholders_without_images_never_draw_text_or_decorations() {
+        let mut vt = Vt::new(20, 6);
+        vt.write("\x1b[4;9m\u{10eeee}\u{305}\u{30d}".as_bytes());
+        let frame = vt.frame();
+        let c = &frame.rows[0][0];
+        assert!(c.text.is_empty() && c.underline.is_none() && !c.strike);
+        assert!(vt.placements().is_empty());
+    }
+
+    #[test]
+    fn cells_carry_the_underline_style_and_its_color() {
+        let mut vt = Vt::new(20, 6);
+        // Every way to ask for each style, one cell each.
+        let styles = [
+            ("4", Some(Underline::Single)),
+            ("4:1", Some(Underline::Single)),
+            ("21", Some(Underline::Double)),
+            ("4:2", Some(Underline::Double)),
+            ("4:3", Some(Underline::Curly)),
+            ("4:4", Some(Underline::Dotted)),
+            ("4:5", Some(Underline::Dashed)),
+            ("4:0", None),
+        ];
+        for (sgr, _) in styles {
+            vt.write(format!("\x1b[{sgr}mx\x1b[0m").as_bytes());
+        }
+        let frame = vt.frame();
+        for (x, (sgr, style)) in styles.into_iter().enumerate() {
+            assert_eq!(frame.rows[0][x].underline, style, "SGR {sgr}");
+            assert_eq!(frame.rows[0][x].underline_color, None, "SGR {sgr}");
+        }
+        assert_eq!(frame.rows[0][styles.len()].underline, None);
+
+        // The color in both spellings, from the palette, taken back with 59,
+        // and without an underline to draw it.
+        vt.write(b"\r\n\x1b[38;2;1;2;3m");
+        vt.write(b"\x1b[4:3m\x1b[58:2::255:0:0ma\x1b[58;2;0;255;0mb\x1b[58:5:196mc\x1b[58;5;1md\x1b[59me\x1b[24m\x1b[58:2::255:0:0mf\x1b[0m");
+        let frame = vt.frame();
+        let colors: Vec<_> = frame.rows[1][..6].iter().map(|c| c.underline_color).collect();
+        assert_eq!(colors, [Some(Rgb(255, 0, 0)), Some(Rgb(0, 255, 0)), Some(Rgb(255, 0, 0)), Some(theme().palette16[1]), None, None]);
+        assert!(frame.rows[1][..5].iter().all(|c| c.underline == Some(Underline::Curly) && c.fg == Rgb(1, 2, 3)));
+        assert_eq!(frame.rows[1][5].underline, None);
+
+        // Reverse video swaps the text's colors, not the underline's.
+        vt.write(b"\r\n\x1b[7;4;58:2::9:8:7mr\x1b[0m");
+        let c = vt.frame().rows[2][0].clone();
+        assert_eq!((c.underline, c.underline_color), (Some(Underline::Single), Some(Rgb(9, 8, 7))));
+    }
+
+    #[test]
+    fn underline_color_set_before_the_underline_appears_with_it() {
+        let mut vt = Vt::new(20, 2);
+        // 58 first, no underline yet: the color waits on the style, not the order.
+        vt.write(b"\x1b[58:5:196ma\x1b[4:2mb\x1b[24mc\x1b[4md\x1b[58:2::1:2:3me\x1b[0m");
+        let frame = vt.frame();
+        let cells: Vec<_> = frame.rows[0][..5].iter().map(|c| (c.underline, c.underline_color)).collect();
+        let (red, own) = (Some(Rgb(255, 0, 0)), Some(Rgb(1, 2, 3)));
+        assert_eq!(cells, [(None, None), (Some(Underline::Double), red), (None, None), (Some(Underline::Single), red), (Some(Underline::Single), own)]);
+    }
+
+    #[test]
+    fn kitty_placeholder_cache_tracks_writes_resize_and_viewport() {
+        let mut vt = Vt::new(20, 6);
+        vt.resize(20, 6, 8, 8);
+        virtual_image(&mut vt, 7, 0);
+        vt.write(b"\x1b[38;5;7m");
+        vt.write(placeholder(0, 0, None).as_bytes());
+        let first = vt.placements();
+        assert_eq!(first, vt.placements());
+        assert!(vt.placements_cache.borrow().is_some());
+        vt.resize(20, 6, 16, 16);
+        assert!(vt.placements_cache.borrow().is_none());
+        assert_eq!(vt.placements()[0].width, 16);
+        vt.write(b"\x1b[6;1H\n\n");
+        assert!(vt.placements().is_empty());
+        vt.scroll_viewport(-2);
+        assert_eq!(vt.placements().len(), 1);
+        vt.scroll_to_bottom();
+        assert!(vt.placements().is_empty());
+        vt.scroll_viewport(-2);
+        assert_eq!(vt.placements().len(), 1);
+        vt.write(b"\x1b_Ga=d,d=I,i=7,q=2\x1b\\");
+        assert!(vt.placements().is_empty());
+    }
+
+    #[test]
+    fn kitty_placeholders_repeat_enlarged_source_pixels_without_holes() {
+        let mut vt = Vt::new(20, 6);
+        vt.resize(20, 6, 8, 8);
+        vt.write(b"\x1b_Ga=T,U=1,f=24,i=7,s=1,v=1,c=4,r=4,q=2;/wAA\x1b\\\x1b[38;5;7m");
+        for row in 0..4 {
+            for col in 0..4 {
+                vt.write(placeholder(row, col, None).as_bytes());
+            }
+            vt.write(b"\r\n");
+        }
+        let placements = vt.placements();
+        assert_eq!(placements.len(), 4);
+        for p in placements {
+            assert_eq!(p.source, [0, 0, 1, 1]);
+            assert_eq!((p.width, p.height), (32, 8));
+        }
+    }
+
+    #[test]
+    fn kitty_placeholders_use_the_fixed_layer_below_nonnegative_direct_images() {
+        let mut vt = Vt::new(20, 6);
+        vt.resize(20, 6, 8, 8);
+        virtual_image(&mut vt, 7, 1);
+        vt.write(b"\x1b_Ga=p,U=1,i=7,p=1,c=8,r=4,z=10,q=2\x1b\\\x1b[38;5;7m");
+        vt.write(placeholder(0, 0, None).as_bytes());
+        vt.write(b"\x1b[H\x1b_Ga=T,f=24,i=8,s=1,v=1,z=1,q=2;/wAA\x1b\\");
+        let placements = vt.placements();
+        assert_eq!(placements.len(), 2);
+        assert_eq!((placements[0].image, placements[0].z), (7, -1));
+        assert_eq!((placements[1].image, placements[1].z), (8, 1));
+    }
+
+    #[test]
+    fn kitty_placeholder_diacritics_match_the_vendored_table() {
+        assert_eq!(kitty_placeholder_diacritic_index(0x305), Some(0));
+        assert_eq!(kitty_placeholder_diacritic_index(0x1d244), Some(296));
+        assert_eq!(kitty_placeholder_diacritic_index(0x301), None);
+    }
+
+    #[test]
+    fn kitty_placeholders_center_images_without_stretching() {
+        let mut vt = Vt::new(20, 6);
+        vt.resize(20, 6, 8, 20);
+        virtual_image(&mut vt, 7, 0);
+        vt.write(b"\x1b[38;5;7m");
+        vt.write(placeholder(1, 0, None).as_bytes());
+        vt.write(placeholder(1, 1, None).as_bytes());
+        let p = vt.placements();
+        assert_eq!(p.len(), 1, "{p:?}");
+        assert_eq!(p[0].source, [0, 0, 2, 2]);
+        assert_eq!((p[0].width, p[0].height, p[0].offset), (16, 16, [0, 4]));
+    }
+
     #[test]
     fn links_follow_wrapped_lines() {
         let mut vt = Vt::new(20, 4);
         vt.write(b"go https://example.com/a/long/path ok");
-        let hit = vt.link_at(5, 1, crate::links::find).unwrap();
+        let hit = vt.link_at(5, 1, found).unwrap();
         assert_eq!(hit.target, "https://example.com/a/long/path");
         assert_eq!(hit.spans, vec![(0, 3, 19), (1, 0, 13)]);
-        assert_eq!(vt.link_at(1, 0, crate::links::find), None);
-        assert_eq!(vt.link_at(16, 1, crate::links::find), None);
+        assert_eq!(vt.link_at(1, 0, found), None);
+        assert_eq!(vt.link_at(16, 1, found), None);
     }
 
     #[test]
@@ -1345,19 +2740,117 @@ mod tests {
         let mut vt = Vt::new(10, 2);
         vt.write(b"https://example.com/abcdefgh");
         // Three rows of link on a two-row screen: the first scrolled away.
-        let hit = vt.link_at(2, 0, crate::links::find).unwrap();
+        let hit = vt.link_at(2, 0, found).unwrap();
         assert_eq!(hit.target, "https://example.com/abcdefgh");
         assert_eq!(hit.spans, vec![(0, 0, 9), (1, 0, 7)]);
+    }
+
+    #[test]
+    fn links_join_lines_a_program_broke() {
+        let mut vt = Vt::new(20, 4);
+        // Broken by the program, as Claude Code does: a newline, then indentation.
+        vt.write(b"  see /tmp/abc/de\r\n  fg/x.png ok");
+        let whole = |text: &str, at: usize, _| {
+            let range = crate::links::find(text, at)?;
+            (&text[range.clone()] == "/tmp/abc/defg/x.png").then_some(range)
+        };
+        for (col, row) in [(8, 0), (3, 1)] {
+            let hit = vt.link_at(col, row, whole).unwrap();
+            assert_eq!(hit.target, "/tmp/abc/defg/x.png");
+            assert_eq!(hit.spans, vec![(0, 6, 16), (1, 2, 9)]);
+        }
+        // A word ending the line above stays out of it.
+        let mut vt = Vt::new(16, 4);
+        vt.write(b"> I think when\r\n  /tmp/abc/de\r\n  fg/x.png ok");
+        let hit = vt.link_at(3, 1, whole).unwrap();
+        assert_eq!(hit.spans, vec![(1, 2, 12), (2, 2, 9)]);
+        assert_eq!(vt.link_at(3, 2, whole).unwrap().target, "/tmp/abc/defg/x.png");
+        let mut vt = Vt::new(20, 4);
+        vt.write(b"  see /tmp/abc/de\r\n  fg/x.png ok");
+        // What reads as a link on its own line keeps it unless the join is one.
+        let unjoined = |text: &str, at: usize, joined: bool| crate::links::find(text, at).filter(|_| !joined);
+        assert_eq!(vt.link_at(8, 0, unjoined).unwrap().target, "/tmp/abc/de");
+        assert_eq!(vt.link_at(13, 1, whole), None);
+    }
+
+    #[test]
+    fn joined_lines_prefer_the_longest_link() {
+        // Broken next to slashes: the first rows name folders that exist.
+        let mut vt = Vt::new(15, 4);
+        vt.write(b"  /Users/me/ab\r\n  /Workspace/o\r\n  /x.rs end");
+        let exists = |text: &str, at: usize, _| {
+            let range = crate::links::find(text, at)?;
+            ["/Users/me/ab", "/Users/me/ab/Workspace/o", "/Users/me/ab/Workspace/o/x.rs"].contains(&&text[range.clone()]).then_some(range)
+        };
+        for (col, row) in [(4, 0), (4, 1), (3, 2)] {
+            assert_eq!(vt.link_at(col, row, exists).unwrap().target, "/Users/me/ab/Workspace/o/x.rs");
+        }
+    }
+
+    #[test]
+    fn only_rows_reaching_the_edge_join() {
+        let exists = |text: &str, at: usize, _| {
+            let range = crate::links::find(text, at)?;
+            ["src/", "src/vt.rs", "/tmp/ab", "/tmp/ab/cd/x.png"].contains(&&text[range.clone()]).then_some(range)
+        };
+        // A folder an agent lists, its files below: not one path.
+        let mut vt = Vt::new(30, 4);
+        vt.write(b"src/\r\n  vt.rs");
+        assert_eq!(vt.link_at(1, 0, exists), None);
+        assert_eq!(vt.link_at(3, 1, exists), None);
+        // A blank line ends what a program broke.
+        let mut vt = Vt::new(11, 4);
+        vt.write(b"see /tmp/ab\r\n\r\n/cd/x.png");
+        assert_eq!(vt.link_at(6, 0, exists).unwrap().target, "/tmp/ab");
+    }
+
+    #[test]
+    fn joined_lines_tell_find() {
+        let mut vt = Vt::new(26, 4);
+        vt.write(b"Visit https://example.com\r\n  and then run it");
+        // Glued, the URL would take in the word below it.
+        assert_eq!(vt.link_at(3, 1, found).unwrap().target, "https://example.comand");
+        let unjoined = |text: &str, at: usize, joined: bool| crate::links::find(text, at).filter(|_| !joined);
+        assert_eq!(vt.link_at(3, 1, unjoined), None);
+        assert_eq!(vt.link_at(8, 0, unjoined).unwrap().target, "https://example.com");
+    }
+
+    #[test]
+    fn find_last_sees_the_link_returned() {
+        let mut vt = Vt::new(6, 4);
+        vt.write(b"  xx/a\r\n  b");
+        let seen = std::cell::RefCell::new(String::new());
+        // Joined, a shorter link than the row's own: the row's wins.
+        let find = |text: &str, at: usize, joined: bool| {
+            let range = if joined { at..at + 1 } else { crate::links::word(text, at)? };
+            *seen.borrow_mut() = text[range.clone()].to_owned();
+            Some(range)
+        };
+        assert_eq!(vt.link_at(3, 0, find).unwrap().target, "xx/a");
+        assert_eq!(*seen.borrow(), "xx/a");
+    }
+
+    #[test]
+    fn joins_that_leave_the_word_alone_skip_find() {
+        let mut vt = Vt::new(13, 4);
+        vt.write(b"one two three\r\nfour five six\r\nseven");
+        let mut calls = 0;
+        assert_eq!(vt.link_at(6, 1, |_: &str, _, _| { calls += 1; None }), None);
+        assert_eq!(calls, 1);
+    }
+
+    fn found(text: &str, at: usize, _: bool) -> Option<std::ops::Range<usize>> {
+        crate::links::find(text, at)
     }
 
     #[test]
     fn marked_links_open_their_uri() {
         let mut vt = Vt::new(30, 2);
         vt.write(b"see \x1b]8;;https://herdr.dev\x1b\\the docs\x1b]8;;\x1b\\ now");
-        let hit = vt.link_at(6, 0, crate::links::find).unwrap();
+        let hit = vt.link_at(6, 0, found).unwrap();
         assert_eq!(hit.target, "https://herdr.dev");
         assert_eq!(hit.spans, vec![(0, 4, 11)]);
-        assert_eq!(vt.link_at(13, 0, crate::links::find), None);
+        assert_eq!(vt.link_at(13, 0, found), None);
     }
 
     #[test]
@@ -1409,5 +2902,46 @@ mod tests {
         vt.write(b"\x1b]2;hello\x07");
         assert_eq!(vt.take_title().as_deref(), Some("hello"));
         assert_eq!(vt.take_title(), None);
+    }
+
+    #[test]
+    fn absolute_scroll_refreshes_search_highlights_across_pages() {
+        let mut vt = Vt::new(80, 24);
+        vt.write(b"ONLY TOP NEEDLE\r\n");
+        for line in 1..=2000 {
+            vt.write(format!("nonmatching line {line}\r\n").as_bytes());
+        }
+        vt.start_search("NEEDLE");
+        finish_search(&mut vt);
+        assert_eq!(vt.search_progress().total, 1);
+        assert!(vt.search_spans.is_empty());
+
+        vt.scroll_to_row(0);
+        assert_eq!(vt.search_spans.len(), 1);
+        assert_eq!(vt.search_spans[0].row, 0);
+        for row in [500, 1000, 1500] {
+            vt.scroll_to_row(row);
+            assert!(vt.search_spans.is_empty(), "stale highlights at row {row}");
+            vt.scroll_to_top();
+            assert_eq!(vt.search_spans.len(), 1, "missing top highlight after row {row}");
+            assert_eq!(vt.search_spans[0].row, 0);
+        }
+    }
+
+    #[test]
+    fn scroll_to_top_reaches_the_oldest_line_and_bottom_returns() {
+        let mut vt = Vt::new(20, 5);
+        for line in 1..=50 {
+            vt.write(format!("{line:04}\r\n").as_bytes());
+        }
+        let visible = |vt: &mut Vt| -> Vec<String> {
+            vt.frame().rows.iter().map(|row| row.iter().map(|c| c.text.as_str()).collect::<String>()).collect()
+        };
+        vt.scroll_to_top();
+        let top = visible(&mut vt);
+        assert!(top[0].starts_with("0001"), "{top:?}");
+        vt.scroll_to_bottom();
+        let bottom = visible(&mut vt);
+        assert!(bottom.iter().any(|row| row.starts_with("0050")), "{bottom:?}");
     }
 }

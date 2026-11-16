@@ -6,9 +6,11 @@ use gpui::App;
 use gpui_shell::{Capabilities, ExecuteGrant, HostError, HostModule, HostObject, HostValue, NetworkGrant};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::rc::{Rc, Weak};
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime};
 
@@ -30,6 +32,17 @@ pub fn frame_dir() -> PathBuf {
 pub fn home() -> PathBuf {
     // HOME, or the profile folder on Windows.
     std::env::home_dir().unwrap_or_else(|| "/".into())
+}
+
+thread_local! {
+    static CHECKING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// True while `herdr-app check` loads a mod: `init()` runs there with live
+/// exec and write capabilities, so mods can see it (`herdr.checking()`) and
+/// those side effects warn.
+fn checking() -> bool {
+    CHECKING.with(|c| c.get())
 }
 
 /// The fonts on this machine (`fonts()`): read when the window opens and
@@ -61,6 +74,14 @@ const AGENTS_MD: &str = include_str!("../defaults/AGENTS.md");
 /// mods. Shipped mods are replaced whole; edits are first moved to a clone.
 pub fn write_workspace() -> std::io::Result<()> {
     let dir = app_dir();
+    // FORK(browser): the app home holds the control socket and the browser profiles: only
+    // this user may open it (created 0700, an existing one tightened).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir)?;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+    }
     std::fs::create_dir_all(mods_dir())?;
     write_if_changed(&dir.join("AGENTS.md"), AGENTS_MD)?;
     // Agents read AGENTS.md now; the pointer file we used to write goes (only ours).
@@ -338,6 +359,9 @@ pub struct Hint {
     pub place: Option<String>,
     #[serde(default)]
     pub size: Option<f32>,
+    /// `pane.go` can give it the keyboard.
+    #[serde(default)]
+    pub focusable: bool,
 }
 
 #[derive(Clone)]
@@ -385,6 +409,10 @@ pub enum Request {
     Run { name: String, args: Value },
     OpenOverlay { id: String, spec: Value },
     CloseOverlay { id: String },
+    /// The OS window's title; `None` restores the default.
+    SetWindowTitle(Option<String>),
+    /// The app icon's badge (the Dock on macOS); `None` clears it.
+    SetBadge(Option<String>),
     Refresh,
     /// From `herdr-app do` / `herdr-app status` (control.rs); answer on `reply`.
     Control { cmd: Value, reply: std::sync::mpsc::Sender<Value> },
@@ -538,6 +566,7 @@ thread_local! {
     /// Snapshots the window publishes; mods read them synchronously and
     /// re-render when they change.
     static SNAPSHOT: RefCell<Snapshot> = RefCell::new(Snapshot::default());
+    static PANE_VIEWS: RefCell<HashMap<String, gpui::WeakEntity<crate::terminal::TerminalView>>> = RefCell::new(HashMap::new());
     static AGENT_ORDER: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     static SHARED: RefCell<Option<SharedStore>> = const { RefCell::new(None) };
     /// Where key commands for each loaded copy go: (copy, mod, sender).
@@ -545,6 +574,8 @@ thread_local! {
     /// The copies on screen: only they get commands (a hidden copy kept alive must
     /// not act on the person's keys).
     static SHOWN_COPIES: RefCell<std::collections::HashSet<u64>> = RefCell::new(std::collections::HashSet::new());
+    static LIVE_READS: RefCell<HashMap<u64, Weak<RefCell<LiveReads>>>> = RefCell::new(HashMap::new());
+    static REVISIONS: RefCell<HashMap<&'static str, u64>> = RefCell::new(HashMap::new());
     static COPY_SEQ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static OVERLAY_SEQ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
@@ -556,6 +587,8 @@ pub struct Snapshot {
     pub agents: Value,
     /// Every pane: { pane, terminal, tab, title, cwd, branch, status, app, focused, zoomed }.
     pub panes: Value,
+    /// Every open browser: { browser, url, title, loading, can_go_back, can_go_forward, space, pane, agent_access, focused }.
+    pub browsers: Value, // FORK(browser)
     pub terminals: Value,
     pub focused: Value,
     /// Floating blocks by id: { edge, align, vertical }.
@@ -567,38 +600,83 @@ pub struct Snapshot {
 impl Default for Snapshot {
     /// Lists start empty, never null, so mods can map over them right away.
     fn default() -> Self {
-        Snapshot { layout: Value::Null, spaces: json!([]), machines: json!([]), agents: json!([]), panes: json!([]), terminals: json!([]), focused: Value::Null, floats: json!({}), window: Value::Null }
+        Snapshot { layout: Value::Null, spaces: json!([]), machines: json!([]), agents: json!([]), panes: json!([]), browsers: json!([]), terminals: json!([]), focused: Value::Null, floats: json!({}), window: Value::Null } // FORK(browser): browsers
     }
 }
 
 /// Replaces one part of the snapshot; returns whether it changed.
-pub fn publish(set: impl FnOnce(&mut Snapshot) -> (Value, Value)) -> bool {
-    SNAPSHOT.with(|s| {
-        let mut s = s.borrow_mut();
-        let (old, new) = set(&mut s);
+fn publish(key: &'static str, set: impl FnOnce(&mut Snapshot) -> (Value, Value)) -> bool {
+    let changed = SNAPSHOT.with(|s| {
+        let (old, new) = set(&mut s.borrow_mut());
         old != new
-    })
+    });
+    if changed {
+        REVISIONS.with_borrow_mut(|r| *r.entry(key).or_default() += 1);
+    }
+    changed
 }
 
 pub fn publish_layout(layout: &Node) -> bool {
     let v = serde_json::to_value(layout).unwrap_or(Value::Null);
-    publish(|s| (std::mem::replace(&mut s.layout, v.clone()), v))
+    publish("layout", |s| (std::mem::replace(&mut s.layout, v.clone()), v))
 }
 pub fn publish_machines(v: Value) -> bool {
-    publish(|s| (std::mem::replace(&mut s.machines, v.clone()), v))
+    publish("machines", |s| (std::mem::replace(&mut s.machines, v.clone()), v))
 }
 pub fn publish_spaces(v: Value) -> bool {
-    publish(|s| (std::mem::replace(&mut s.spaces, v.clone()), v))
+    publish("spaces", |s| (std::mem::replace(&mut s.spaces, v.clone()), v))
 }
 pub fn publish_agents(v: Value) -> bool {
-    publish(|s| (std::mem::replace(&mut s.agents, v.clone()), v))
+    publish("agents", |s| (std::mem::replace(&mut s.agents, v.clone()), v))
 }
+pub fn panes_scrolled() {
+    REVISIONS.with_borrow_mut(|r| *r.entry("panes").or_default() += 1);
+}
+
+pub fn track_pane_view(pane: String, view: &gpui::Entity<crate::terminal::TerminalView>) {
+    PANE_VIEWS.with_borrow_mut(|views| { views.insert(pane, view.downgrade()); });
+}
+
 pub fn publish_panes(v: Value) -> bool {
-    publish(|s| (std::mem::replace(&mut s.panes, v.clone()), v))
+    PANE_VIEWS.with_borrow_mut(|views| views.retain(|pane, _| {
+        v.as_array().into_iter().flatten().any(|p| p["pane"].as_str() == Some(pane.strip_suffix("#swap").unwrap_or(pane)))
+    }));
+    publish("panes", |s| (std::mem::replace(&mut s.panes, v.clone()), v))
 }
-pub fn publish_terminals(v: Value) -> bool {
-    publish(|s| (std::mem::replace(&mut s.terminals, v.clone()), v))
+pub fn publish_browsers(v: Value) -> bool { // FORK(browser)
+    publish("browsers", |s| (std::mem::replace(&mut s.browsers, v.clone()), v))
 }
+pub fn publish_terminals(mut v: Value) -> bool {
+    publish("terminals", |s| {
+        let selections: HashMap<_, _> = s.terminals.as_array().into_iter().flatten()
+            .filter_map(|t| Some((t["address"].as_str()?, t["selection"].clone()))).collect();
+        for terminal in v.as_array_mut().into_iter().flatten() {
+            terminal["selection"] = terminal["address"].as_str().and_then(|address| selections.get(address)).cloned().unwrap_or(Value::Null);
+        }
+        (std::mem::replace(&mut s.terminals, v.clone()), v)
+    })
+}
+/// Only selection changes refresh readers; output and cursor motion do not.
+pub fn publish_selection(address: &str, selection: Value) -> bool {
+    publish("terminals", |s| {
+        let old = s.terminals.clone();
+        if let Some(terminal) = s.terminals.as_array_mut().and_then(|list| list.iter_mut().find(|t| t["address"] == address)) {
+            terminal["selection"] = selection.clone();
+        }
+        (old, s.terminals.clone())
+    })
+}
+
+pub fn publish_focused_selection(selection: Value) -> bool {
+    publish("focused", |s| {
+        let old = s.focused.clone();
+        if s.focused.is_object() {
+            s.focused["selection"] = selection;
+        }
+        (old, s.focused.clone())
+    })
+}
+
 pub fn terminal_address(word: &str, source: &str) -> Option<String> {
     SNAPSHOT.with(|s| {
         let s = s.borrow();
@@ -608,17 +686,75 @@ pub fn terminal_address(word: &str, source: &str) -> Option<String> {
 }
 
 pub fn publish_floats(v: Value) -> bool {
-    publish(|s| (std::mem::replace(&mut s.floats, v.clone()), v))
+    publish("floats", |s| (std::mem::replace(&mut s.floats, v.clone()), v))
 }
 pub fn publish_window(v: Value) -> bool {
-    publish(|s| (std::mem::replace(&mut s.window, v.clone()), v))
+    publish("window", |s| (std::mem::replace(&mut s.window, v.clone()), v))
 }
-pub fn publish_focused(v: Value) -> bool {
-    publish(|s| (std::mem::replace(&mut s.focused, v.clone()), v))
+pub fn publish_focused(mut v: Value) -> bool {
+    publish("focused", |s| {
+        if v.is_object() {
+            v["selection"] = s.focused["selection"].clone();
+        }
+        (std::mem::replace(&mut s.focused, v.clone()), v)
+    })
 }
 
-fn read(f: impl FnOnce(&Snapshot) -> &Value) -> HostValue {
-    SNAPSHOT.with(|s| to_host(f(&s.borrow())))
+#[derive(Default)]
+struct LiveReads(HashMap<&'static str, u64>);
+
+impl LiveReads {
+    fn record(&mut self, key: &'static str, revisions: &HashMap<&'static str, u64>) {
+        self.0.entry(key).or_insert_with(|| revisions.get(key).copied().unwrap_or(0));
+    }
+
+    fn changed(&mut self, revisions: &HashMap<&'static str, u64>) -> bool {
+        let mut changed = false;
+        for (key, seen) in &mut self.0 {
+            let revision = revisions.get(key).copied().unwrap_or(0);
+            changed |= *seen != revision;
+            *seen = revision;
+        }
+        changed
+    }
+}
+
+fn read(reads: &RefCell<LiveReads>, key: &'static str, f: impl FnOnce(&Snapshot) -> &Value) -> HostValue {
+    REVISIONS.with_borrow(|r| reads.borrow_mut().record(key, r));
+    SNAPSHOT.with(|s| {
+        let snapshot = s.borrow();
+        if key != "panes" {
+            return to_host(f(&snapshot));
+        }
+        // Output and resizing change these numbers without invalidating mods.
+        let mut panes = snapshot.panes.clone();
+        gpui_shell::with_current_app(|cx| {
+            PANE_VIEWS.with_borrow(|views| {
+                for pane in panes.as_array_mut().into_iter().flatten() {
+                    if let Some(view) = pane["pane"].as_str().and_then(|id| {
+                        views.get(&format!("{id}#swap")).and_then(|v| v.upgrade())
+                            .or_else(|| views.get(id).and_then(|v| v.upgrade()))
+                    }) {
+                        pane["scroll"] = view.read(cx).scroll_metrics().map(|m| m.json()).unwrap_or(Value::Null);
+                    }
+                }
+            });
+        });
+        to_host(&panes)
+    })
+}
+
+fn reader(reads: Rc<RefCell<LiveReads>>, key: &'static str, f: fn(&Snapshot) -> &Value) -> impl Fn(&gpui_shell::HostArguments) -> gpui_shell::HostResult {
+    move |_| Ok(read(&reads, key, f))
+}
+
+/// Reads in callbacks and child views count too: keep their dependencies until the copy unloads.
+pub fn snapshot_changed(copy: u64) -> bool {
+    LIVE_READS.with_borrow(|copies| {
+        copies.get(&copy).and_then(Weak::upgrade).is_some_and(|reads| {
+            REVISIONS.with_borrow(|r| reads.borrow_mut().changed(r))
+        })
+    })
 }
 
 /// Delivers `command` to every shown copy of `mod`. Returns whether any listens.
@@ -634,6 +770,19 @@ pub fn send_command(name: &str, command: &str) -> bool {
             }
         }
         any
+    })
+}
+
+/// Delivers `command` to one shown copy (the block given the keyboard, not
+/// every copy of its mod).
+pub fn send_command_to(copy: u64, command: &str) -> bool {
+    if !SHOWN_COPIES.with(|s| s.borrow().contains(&copy)) {
+        return false;
+    }
+    COMMANDS.with(|c| {
+        let mut c = c.borrow_mut();
+        c.retain(|(_, _, tx)| !tx.is_closed());
+        c.iter().any(|(id, _, tx)| *id == copy && tx.try_send(command.to_owned()).is_ok())
     })
 }
 
@@ -696,11 +845,23 @@ fn opt_str(v: Option<&HostValue>, key: &str) -> Option<String> {
 }
 
 const EXEC_LIMIT: Duration = Duration::from_secs(30);
+const EXEC_MAX: Duration = Duration::from_secs(600);
 const EXEC_OUTPUT: u64 = 8 << 20;
 
-fn run_blocking(command: &str, args: &[String], cwd: Option<String>) -> Result<(i32, String, String), String> {
+fn exec_limit(options: Option<&HostValue>) -> Result<Duration, HostError> {
+    match options.and_then(|o| o.get("timeout")) {
+        // `timeout: undefined` reaches here as Null: both mean the default, as omitting it does.
+        None | Some(HostValue::Null) => Ok(EXEC_LIMIT),
+        Some(HostValue::Number(ms)) if ms.is_finite() && *ms > 0.0 => Ok(Duration::from_secs_f64(ms.min(EXEC_MAX.as_millis() as f64) / 1000.0)),
+        _ => Err(HostError::new("timeout must be a positive number of milliseconds")),
+    }
+}
+
+pub(crate) fn run_blocking(command: &str, args: &[String], cwd: Option<String>, limit: Duration) -> Result<(i32, String, String), String> {
     use std::io::Read;
-    let mut child = crate::spawn::command(command)
+    // The core may have no `hc` link beside it (a Windows zip has only herdr-core.exe).
+    let program = if command == "hc" { crate::core_bin::path() } else { PathBuf::from(command) };
+    let mut child = crate::spawn::command(program)
         .args(args)
         .current_dir(cwd.map(PathBuf::from).unwrap_or_else(home))
         .stdin(Stdio::null())
@@ -724,10 +885,10 @@ fn run_blocking(command: &str, args: &[String], cwd: Option<String>) -> Result<(
     let status = loop {
         match child.try_wait() {
             Ok(Some(s)) => break s,
-            Ok(None) if start.elapsed() > EXEC_LIMIT => {
+            Ok(None) if start.elapsed() > limit => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(format!("{command} took longer than 30 s and was stopped"));
+                return Err(format!("{command} took longer than {} s and was stopped", limit.as_secs_f64()));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(10)),
             Err(e) => return Err(e.to_string()),
@@ -738,51 +899,46 @@ fn run_blocking(command: &str, args: &[String], cwd: Option<String>) -> Result<(
 
 /// Runs a program on another machine through the core's exec: its exact output.
 pub fn run_remote(machine: &str, command: &str, args: &[String], cwd: Option<String>) -> Result<(i32, Vec<u8>, Vec<u8>), String> {
+    run_remote_with_limit(machine, command, args, cwd, EXEC_LIMIT)
+}
+
+fn run_remote_with_limit(machine: &str, command: &str, args: &[String], cwd: Option<String>, limit: Duration) -> Result<(i32, Vec<u8>, Vec<u8>), String> {
     use base64::Engine;
-    let mut hc_args: Vec<String> = vec!["exec".into(), "--json".into(), "--on".into(), machine.into(), "--timeout".into(), EXEC_LIMIT.as_secs().to_string()];
+    let mut hc_args: Vec<String> = vec!["exec".into(), "--json".into(), "--on".into(), machine.into(), "--timeout".into(), limit.as_secs_f64().to_string()];
     if let Some(c) = cwd {
         hc_args.extend(["--cwd".into(), c]);
     }
     hc_args.push("--".into());
     hc_args.push(command.into());
     hc_args.extend(args.iter().cloned());
-    let (_, out, err) = run_blocking("hc", &hc_args, None)?;
+    // Let the remote timeout end the program and deliver its result before the wrapper expires.
+    let (_, out, err) = run_blocking("hc", &hc_args, None, limit + Duration::from_secs(5))?;
     let v: Value = serde_json::from_str(out.trim()).or_else(|_| serde_json::from_str(err.trim())).map_err(|_| format!("hc exec: {}", err.trim()))?;
     if let Some(e) = v.get("error") {
         return Err(e.get("message").and_then(Value::as_str).unwrap_or("hc exec failed").to_owned());
     }
     if v.get("timed_out").and_then(Value::as_bool) == Some(true) {
-        return Err(format!("{command} took longer than {} s on {machine} and was stopped", EXEC_LIMIT.as_secs()));
+        return Err(format!("{command} took longer than {} s on {machine} and was stopped", limit.as_secs_f64()));
     }
     let bytes = |k: &str| base64::engine::general_purpose::STANDARD.decode(v.get(k).and_then(Value::as_str).unwrap_or_default()).map_err(|e| e.to_string());
     let code = v.get("code").and_then(Value::as_i64).map_or(-1, |c| c as i32);
     Ok((code, bytes("stdout")?, bytes("stderr")?))
 }
 
-/// A program's output here, if it ran (for the app's own checks).
-pub fn run_here(command: &str, args: &[String]) -> Option<String> {
-    run_blocking(command, args, None).ok().map(|(_, out, _)| out)
-}
-
-/// A program's output on another machine, if it ran.
-pub fn run_on(machine: &str, command: &str, args: &[String]) -> Option<String> {
-    run_remote(machine, command, args, None).ok().map(|(_, out, _)| String::from_utf8_lossy(&out).into_owned())
-}
-
 /// The agents a machine can start (`knownAgents()`), asked at most once a minute.
-fn known_agents(on: Option<String>, list: Vec<Value>) -> Value {
+fn known_agents(on: Option<String>, list: Vec<Value>) -> Result<Value, String> {
     type InstalledCache = std::collections::HashMap<Option<String>, (std::time::Instant, Vec<String>, Vec<String>)>;
     static SEEN: std::sync::Mutex<Option<InstalledCache>> = std::sync::Mutex::new(None);
     let commands: Vec<String> = list.iter().filter_map(|a| a["run"][0].as_str().map(str::to_owned)).collect();
     let cached = SEEN.lock().ok().and_then(|s| s.as_ref()?.get(&on).filter(|(at, checked, _)| at.elapsed().as_secs() < 60 && checked == &commands).map(|(_, _, v)| v.clone()));
-    let have = cached.unwrap_or_else(|| {
-        let found = crate::programs::installed(&commands, on.as_deref());
+    let have = if let Some(cached) = cached { cached } else {
+        let found = crate::programs::installed(&commands, on.as_deref())?;
         if let Ok(mut s) = SEEN.lock() {
             s.get_or_insert_with(std::collections::HashMap::new).insert(on.clone(), (std::time::Instant::now(), commands, found.clone()));
         }
         found
-    });
-    Value::Array(
+    };
+    Ok(Value::Array(
         list.into_iter()
             .map(|mut a| {
                 let run = a["run"][0].as_str().unwrap_or_default().to_owned();
@@ -790,7 +946,7 @@ fn known_agents(on: Option<String>, list: Vec<Value>) -> Value {
                 a
             })
             .collect(),
-    )
+    ))
 }
 
 /// A text file on another machine: `cat`, or `type` where there is none (Windows).
@@ -808,15 +964,21 @@ fn read_remote(machine: &str, path: &str) -> Result<Option<String>, String> {
     Ok(Some(String::from_utf8_lossy(&out).into_owned()))
 }
 
-fn exec_future(command: String, args: Vec<String>, cwd: Option<String>, on: Option<String>) -> impl std::future::Future<Output = Result<HostValue, HostError>> + Send {
+fn exec_future(command: String, args: Vec<String>, cwd: Option<String>, on: Option<String>, limit: Duration) -> impl std::future::Future<Output = Result<HostValue, HostError>> + Send {
     let (tx, rx) = async_channel::bounded(1);
-    std::thread::spawn(move || {
+    let run = move || {
         let r = match on {
-            Some(m) => run_remote(&m, &command, &args, cwd).map(|(c, o, e)| (c, String::from_utf8_lossy(&o).into_owned(), String::from_utf8_lossy(&e).into_owned())),
-            None => run_blocking(&command, &args, cwd),
+            Some(m) => run_remote_with_limit(&m, &command, &args, cwd, limit).map(|(c, o, e)| (c, String::from_utf8_lossy(&o).into_owned(), String::from_utf8_lossy(&e).into_owned())),
+            None => run_blocking(&command, &args, cwd, limit),
         };
         let _ = tx.send_blocking(r);
-    });
+    };
+    #[cfg(not(test))]
+    std::thread::spawn(run);
+    // GPUI tests cannot be woken from a foreign thread. Queue the real result
+    // before polling the receiver, without changing production dispatch.
+    #[cfg(test)]
+    run();
     async move {
         let (code, stdout, stderr) = rx.recv().await.map_err(|_| HostError::new("the command was lost"))?.map_err(HostError::new)?;
         Ok(HostObject::new().field("code", code as f64).field("stdout", stdout).field("stderr", stderr).into())
@@ -824,17 +986,26 @@ fn exec_future(command: String, args: Vec<String>, cwd: Option<String>, on: Opti
 }
 
 fn module(inst: Instance, copy: u64) -> HostModule {
+    let reads = Rc::new(RefCell::new(LiveReads::default()));
+    LIVE_READS.with_borrow_mut(|copies| {
+        copies.retain(|_, reads| reads.strong_count() > 0);
+        copies.insert(copy, Rc::downgrade(&reads));
+    });
     let props = inst.props.clone();
     let feedback_frame = inst.name == "frame-feedback";
     let feedback_from = inst.props.get("from").and_then(Value::as_str).unwrap_or("person").to_owned();
     let feedback_layout = inst.props.get("layout").and_then(Value::as_str).unwrap_or("other").to_owned();
     let (cmd_tx, commands) = async_channel::unbounded::<String>();
-    COMMANDS.with(|c| c.borrow_mut().push((copy, inst.name.clone(), cmd_tx)));
+    COMMANDS.with_borrow_mut(|commands| {
+        commands.retain(|(_, _, tx)| !tx.is_closed());
+        commands.push((copy, inst.name.clone(), cmd_tx));
+    });
     HostModule::new("herdr")
         .declarations(DECLARATIONS)
         .async_function("exec", |a| {
             let command = a.string(0)?.to_owned();
-            Ok(exec_future(command, strings(a.get(1)), opt_str(a.get(2), "cwd"), opt_str(a.get(2), "on")))
+            if checking() { tracing::warn!("check: mod exec'd `{command}`; the child runs for real"); }
+            Ok(exec_future(command, strings(a.get(1)), opt_str(a.get(2), "cwd"), opt_str(a.get(2), "on"), exec_limit(a.get(2))?))
         })
         .async_function("readTextFile", |a| {
             let path = a.string(0)?.to_owned();
@@ -846,9 +1017,15 @@ fn module(inst: Instance, copy: u64) -> HostModule {
         })
         .async_function("writeTextFile", |a| {
             let expected = a.get(2).and_then(|v| match v { HostValue::Str(s) => Some(s.clone()), _ => None });
-            Ok(crate::mod_files::write_text(a.string(0)?.to_owned(), a.string(1)?.to_owned(), expected))
+            let path = a.string(0)?.to_owned();
+            if checking() { tracing::warn!("check: mod wrote `{path}`; the write lands for real"); }
+            Ok(crate::mod_files::write_text(path, a.string(1)?.to_owned(), expected))
         })
-        .async_function("hc", |a| Ok(exec_future("hc".into(), strings(a.get(0)), None, None)))
+        .async_function("hc", |a| {
+            if checking() { tracing::warn!("check: mod called hc; it runs for real"); }
+            Ok(exec_future("hc".into(), strings(a.get(0)), None, None, EXEC_LIMIT))
+        })
+        .function("checking", |_| Ok(HostValue::Bool(checking())))
         .function("home", |_| Ok(home().to_string_lossy().into_owned().into()))
         .function("appHome", |_| Ok(app_dir().to_string_lossy().into_owned().into()))
         .function("fonts", |_| Ok(to_host(&json!(*FONTS.lock().unwrap()))))
@@ -900,7 +1077,10 @@ fn module(inst: Instance, copy: u64) -> HostModule {
             std::thread::spawn(move || {
                 let _ = tx.send_blocking(known_agents(on, list));
             });
-            Ok(async move { Ok(to_host(&rx.recv().await.unwrap_or(Value::Array(Vec::new())))) })
+            Ok(async move {
+                let agents = rx.recv().await.map_err(|_| HostError::new("the agent check was lost"))?.map_err(HostError::new)?;
+                Ok(to_host(&agents))
+            })
         })
         .async_function("pickFolder", |a| {
             let prompt = a.get(0).map(from_host).and_then(|v| v.get("prompt").and_then(Value::as_str).map(str::to_owned)).unwrap_or_else(|| "Open".into());
@@ -952,17 +1132,34 @@ fn module(inst: Instance, copy: u64) -> HostModule {
             }
             Ok(HostValue::Null)
         })
-        .function("spaces", |_| Ok(read(|s| &s.spaces)))
-        .function("machines", |_| Ok(read(|s| &s.machines)))
-        .function("agents", |_| Ok(read(|s| &s.agents)))
-        .function("panes", |_| Ok(read(|s| &s.panes)))
+        .function("spaces", reader(reads.clone(), "spaces", |s| &s.spaces))
+        .function("machines", reader(reads.clone(), "machines", |s| &s.machines))
+        .function("agents", reader(reads.clone(), "agents", |s| &s.agents))
+        .function("panes", reader(reads.clone(), "panes", |s| &s.panes))
+        .function("browsers", reader(reads.clone(), "browsers", |s| &s.browsers)) // FORK(browser)
         .function("setAgentOrder", |a| {
             AGENT_ORDER.with(|s| *s.borrow_mut() = strings(a.get(0)));
             Ok(HostValue::Null)
         })
-        .function("terminals", |_| Ok(read(|s| &s.terminals)))
-        .function("focused", |_| Ok(read(|s| &s.focused)))
-        .function("layout", |_| Ok(read(|s| &s.layout)))
+        .function("setWindowTitle", |a| {
+            let title = match a.get(0) {
+                Some(v) if !v.is_null() => Some(a.string(0)?.to_owned()),
+                _ => None,
+            };
+            request(Request::SetWindowTitle(title));
+            Ok(HostValue::Null)
+        })
+        .function("setBadge", |a| {
+            let text = match a.get(0) {
+                Some(v) if !v.is_null() => Some(a.string(0)?.to_owned()),
+                _ => None,
+            };
+            request(Request::SetBadge(text));
+            Ok(HostValue::Null)
+        })
+        .function("terminals", reader(reads.clone(), "terminals", |s| &s.terminals))
+        .function("focused", reader(reads.clone(), "focused", |s| &s.focused))
+        .function("layout", reader(reads.clone(), "layout", |s| &s.layout))
         .function("layouts", |_| Ok(to_host(&json!(crate::window::layout_names()))))
         .function("commands", |_| {
             let list: Vec<Value> = crate::commands::COMMANDS
@@ -974,7 +1171,7 @@ fn module(inst: Instance, copy: u64) -> HostModule {
                 .collect();
             Ok(to_host(&Value::Array(list)))
         })
-        .function("window", |_| Ok(read(|s| &s.window)))
+        .function("window", reader(reads.clone(), "window", |s| &s.window))
         .function("theme", |_| Ok(to_host(&serde_json::to_value(&*crate::settings::theme()).unwrap_or(Value::Null))))
         .function("settings", |_| Ok(to_host(&serde_json::to_value(&*crate::settings::get()).unwrap_or(Value::Null))))
         .function("keys", |_| {
@@ -1007,7 +1204,8 @@ fn module(inst: Instance, copy: u64) -> HostModule {
         })
         .function("placement", {
             let float = props.get("float").and_then(Value::as_str).map(str::to_owned);
-            move |_| Ok(float.as_ref().map_or(HostValue::Null, |id| read(|s| s.floats.get(id).unwrap_or(&Value::Null))))
+            let reads = reads.clone();
+            move |_| Ok(float.as_ref().map_or(HostValue::Null, |id| read(&reads, "floats", |s| s.floats.get(id).unwrap_or(&Value::Null))))
         })
         .function("props", move |_| Ok(to_host(&props)))
         .function("shared", |a| {
@@ -1018,7 +1216,7 @@ fn module(inst: Instance, copy: u64) -> HostModule {
             set_shared(a.string(0)?.to_owned(), from_host(a.value(1)?));
             Ok(HostValue::Null)
         })
-        .async_function("watchFolder", |a| {
+        .cancellable_async_function("watchFolder", HostValue::Array(vec![]), |a| {
             let path = a.string(0)?.to_owned();
             Ok(async move { crate::files::next_change(path).await.map(|v| to_host(&json!(v))).map_err(HostError::new) })
         })
@@ -1070,7 +1268,16 @@ fn capabilities() -> Capabilities {
         .clipboard_write(true)
 }
 
-/// What mods may touch, and the `herdr` module they import. Also used by `herdr-app check`.
+/// Checks exercise shared state in memory, without reading or writing the person's
+/// file. A check still loads the mod for real, so mods are told (`herdr.checking()`)
+/// and its exec and write side effects warn.
+pub fn install_check_policy() {
+    CHECKING.with(|c| c.set(true));
+    SHARED.with_borrow_mut(|slot| *slot = Some(SharedStore { values: Default::default(), path: app_dir().join("shared.json"), writable: false, writer: None }));
+    install_policy();
+}
+
+/// What mods may touch, and the `herdr` module they import.
 pub fn install_policy() -> async_channel::Receiver<Request> {
     gpui_shell::policy::update_default(|p| {
         p.with_capabilities(capabilities())
@@ -1116,15 +1323,200 @@ pub fn prepare_load(inst: &Instance) -> u64 {
 mod tests {
     use super::*;
 
+    #[test]
+    fn an_input_selection_uses_the_theme_selection_colour() {
+        let mut tokens = gpui_base::SemanticThemeTokens::default();
+        tokens.colors.accent = gpui::hsla(0.1, 0.5, 0.5, 1.0);
+        tokens.colors.selection = gpui::hsla(0.6, 0.5, 0.5, 0.3);
+
+        let style = gpui_base::input::InputEditorStyle::default().resolved(&tokens);
+
+        assert_eq!(style.selection, tokens.colors.selection);
+    }
+
+    #[test]
+    fn exec_timeout_defaults_caps_and_rejects_invalid_values() {
+        assert_eq!(exec_limit(None).unwrap(), EXEC_LIMIT);
+        assert_eq!(exec_limit(Some(&HostObject::new().field("timeout", HostValue::Null).into())).unwrap(), EXEC_LIMIT);
+        let options = |ms| HostObject::new().field("timeout", ms).into();
+        assert_eq!(exec_limit(Some(&options(1250.0))).unwrap(), Duration::from_millis(1250));
+        assert_eq!(exec_limit(Some(&options(900_000.0))).unwrap(), EXEC_MAX);
+        for ms in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(exec_limit(Some(&options(ms))).is_err());
+        }
+        assert!(exec_limit(Some(&HostObject::new().field("timeout", "30").into())).is_err());
+    }
+
+    #[test]
+    fn hc_runs_the_core_the_app_uses_even_without_an_hc_link() {
+        const CHILD: &str = "HERDR_TEST_HC_IS_THE_CORE";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "mods::tests::hc_runs_the_core_the_app_uses_even_without_an_hc_link", "--nocapture"])
+                .env(CHILD, "1").output().unwrap();
+            assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("herdr-hc-is-the-core-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        #[cfg(unix)]
+        let core = {
+            use std::os::unix::fs::PermissionsExt;
+            let core = dir.join("herdr-core");
+            std::fs::write(&core, "#!/bin/sh\necho \"the chosen core: $*\"\n").unwrap();
+            std::fs::set_permissions(&core, std::fs::Permissions::from_mode(0o755)).unwrap();
+            core
+        };
+        #[cfg(windows)]
+        let core = {
+            let core = dir.join("herdr-core.cmd");
+            std::fs::write(&core, "@echo the chosen core: %*\r\n").unwrap();
+            core
+        };
+        crate::core_bin::use_core(core);
+        let (code, stdout, stderr) = run_blocking("hc", &["ls".into()], None, Duration::from_secs(5)).unwrap();
+        assert_eq!((code, stdout.trim()), (0, "the chosen core: ls"), "{stderr}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exec_uses_the_requested_deadline_and_reports_it() {
+        let args = ["-c".into(), "sleep 0.15; printf done".into()];
+        let error = run_blocking("sh", &args, None, Duration::from_millis(30)).unwrap_err();
+        assert!(error.contains("0.03 s"), "{error}");
+        let (code, stdout, _) = run_blocking("sh", &args, None, Duration::from_secs(2)).unwrap();
+        assert_eq!((code, stdout.as_str()), (0, "done"));
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn exec_returns_real_output_and_errors_under_the_test_scheduler(_cx: &mut gpui::TestAppContext) {
+        let result = exec_future("sh".into(), vec!["-c".into(), "printf out; printf err >&2; exit 7".into()], None, None, EXEC_LIMIT).await.unwrap();
+        assert!(matches!(result.get("code"), Some(HostValue::Number(7.0))));
+        assert!(matches!(result.get("stdout"), Some(HostValue::Str(s)) if s == "out"));
+        assert!(matches!(result.get("stderr"), Some(HostValue::Str(s)) if s == "err"));
+        assert!(exec_future("herdr_test_missing_command_638".into(), vec![], None, None, EXEC_LIMIT).await.is_err());
+        let error = exec_future("sh".into(), vec!["-c".into(), "sleep 0.15; printf late".into()], None, None, Duration::from_millis(30)).await.unwrap_err();
+        assert!(error.to_string().contains("0.03 s"), "{error}");
+    }
+
+    #[test]
+    fn live_reads_ignore_unread_inputs_and_keep_pending_changes() {
+        let mut revisions = HashMap::new();
+        let mut list = LiveReads::default();
+        let mut chrome = LiveReads::default();
+        list.record("agents", &revisions);
+        chrome.record("layout", &revisions);
+        revisions.insert("terminals", 1);
+        assert!(!list.changed(&revisions));
+        assert!(!chrome.changed(&revisions));
+        revisions.insert("agents", 1);
+        // A callback reading the new snapshot must not swallow a pending redraw.
+        list.record("agents", &revisions);
+        assert!(list.changed(&revisions));
+        assert!(!chrome.changed(&revisions));
+        assert!(!list.changed(&revisions));
+        // Dependencies first read by a child or a callback remain subscribed.
+        list.record("focused", &revisions);
+        revisions.insert("focused", 1);
+        assert!(list.changed(&revisions));
+    }
+
+    #[test]
+    fn selection_snapshots_survive_core_refresh() {
+        std::thread::spawn(|| {
+            let list = json!([{"address":"t1"}, {"address":"t2"}]);
+            publish_terminals(list.clone());
+            let selection = json!({"start":{"row":5,"col":2},"end":{"row":1,"col":8}});
+            publish_selection("t1", selection.clone());
+            publish_terminals(list);
+            SNAPSHOT.with_borrow(|s| {
+                assert_eq!(s.terminals[0]["selection"], selection);
+                assert_eq!(s.terminals[1]["selection"], Value::Null);
+            });
+            publish_selection("t1", Value::Null);
+            SNAPSHOT.with_borrow(|s| assert_eq!(s.terminals[0]["selection"], Value::Null));
+        }).join().unwrap();
+    }
+
+    #[test]
+    fn equal_snapshots_do_not_refresh_readers() {
+        std::thread::spawn(|| {
+            let reads = Rc::new(RefCell::new(LiveReads::default()));
+            LIVE_READS.with_borrow_mut(|copies| { copies.insert(1, Rc::downgrade(&reads)); });
+            read(&reads, "agents", |s| &s.agents);
+            assert!(!snapshot_changed(1));
+            assert!(!publish_agents(json!([])));
+            assert!(!snapshot_changed(1));
+            assert!(publish_terminals(json!([{"address":"t1"}])));
+            assert!(!snapshot_changed(1));
+            assert!(publish_agents(json!([{"address":"t1","status":"working"}])));
+            assert!(snapshot_changed(1));
+            assert!(!snapshot_changed(1));
+            assert!(!publish_agents(json!([{"address":"t1","status":"working"}])));
+            assert!(!snapshot_changed(1));
+            drop(reads);
+            assert!(!snapshot_changed(1));
+        }).join().unwrap();
+    }
+
+    #[test]
+    fn loading_copies_reclaims_closed_command_channels_without_dispatch() {
+        std::thread::spawn(|| {
+            let inst = Instance { name: "test".into(), props: Value::Null };
+            let live = module(inst.clone(), 1);
+            for copy in 2..102 {
+                drop(module(inst.clone(), copy));
+                COMMANDS.with_borrow(|commands| assert!(commands.len() <= 2));
+            }
+            drop(live);
+            let last = module(inst, 102);
+            COMMANDS.with_borrow(|commands| assert_eq!(commands.len(), 1));
+            drop(last);
+        }).join().unwrap();
+    }
+
+    #[test]
+    fn keyboard_focus_is_opt_in_and_commands_only_reach_the_shown_copy() {
+        for metadata in [json!({}), json!({"focusable": false})] {
+            assert!(!serde_json::from_value::<Hint>(metadata).unwrap().focusable);
+        }
+        assert!(serde_json::from_value::<Hint>(json!({"focusable": true})).unwrap().focusable);
+
+        let (first_tx, first) = async_channel::unbounded();
+        let (second_tx, second) = async_channel::unbounded();
+        let (hidden_tx, hidden) = async_channel::unbounded();
+        COMMANDS.with_borrow_mut(|c| *c = vec![
+            (1, "same-mod".into(), first_tx),
+            (2, "same-mod".into(), second_tx),
+            (3, "same-mod".into(), hidden_tx),
+        ]);
+        set_shown_copies([1, 2].into());
+        assert!(send_command_to(2, "focus"));
+        assert_eq!(second.try_recv().unwrap(), "focus");
+        assert!(first.is_empty());
+        assert!(hidden.is_empty());
+        assert!(!send_command_to(3, "focus"));
+        assert!(!send_command_to(99, "focus"));
+        // Existing mod key bindings still broadcast to every shown copy.
+        assert!(send_command("same-mod", "existing-key"));
+        assert_eq!(first.try_recv().unwrap(), "existing-key");
+        assert_eq!(second.try_recv().unwrap(), "existing-key");
+        assert!(hidden.is_empty());
+        COMMANDS.with_borrow_mut(Vec::clear);
+        set_shown_copies(Default::default());
+    }
+
     #[cfg(unix)]
     #[test]
     fn known_agents_uses_snapshot_and_refreshes_changed_commands() {
         let snapshot = vec![json!({"key": "claude", "run": ["herdr_issue57_not_installed"]})];
-        let first = std::thread::spawn(move || known_agents(None, snapshot)).join().unwrap();
+        let first = std::thread::spawn(move || known_agents(None, snapshot)).join().unwrap().unwrap();
         assert_eq!(first[0]["run"], json!(["herdr_issue57_not_installed"]));
         assert_eq!(first[0]["installed"], false);
         let snapshot = vec![json!({"key": "claude", "run": ["printf"]}), json!({"key": "claude-alt", "run": ["printf"]})];
-        let next = std::thread::spawn(move || known_agents(None, snapshot)).join().unwrap();
+        let next = std::thread::spawn(move || known_agents(None, snapshot)).join().unwrap().unwrap();
         assert_eq!(next.as_array().unwrap().len(), 2);
         assert_eq!(next[0]["installed"], true);
         assert_eq!(next[1]["key"], "claude-alt");
@@ -1133,7 +1525,7 @@ mod tests {
 
     #[test]
     fn shared_bursts_persist_only_complete_snapshots_and_finish_at_final_state() {
-        let root = if cfg!(target_os = "linux") { PathBuf::from("/var/tmp") } else { std::env::temp_dir() };
+        let root = if cfg!(target_os = "linux") { crate::test_tmp() } else { std::env::temp_dir() };
         let dir = root.join(format!("herdr-shared-stress-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("shared.json");
@@ -1145,6 +1537,9 @@ mod tests {
                 while reading.load(std::sync::atomic::Ordering::Relaxed) {
                     match std::fs::read(&path) {
                         Ok(bytes) => { serde_json::from_slice::<Value>(&bytes).unwrap(); }
+                        // Windows refuses to open a file while a rename replaces it. The reader
+                        // got no bytes, so that is not a torn snapshot.
+                        Err(e) if cfg!(windows) && e.kind() == std::io::ErrorKind::PermissionDenied => {}
                         Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::NotFound),
                     }
                     std::thread::yield_now();
@@ -1171,7 +1566,7 @@ mod tests {
 
     #[test]
     fn corrupt_shared_file_is_kept_before_starting_empty() {
-        let root = if cfg!(target_os = "linux") { PathBuf::from("/var/tmp") } else { std::env::temp_dir() };
+        let root = if cfg!(target_os = "linux") { crate::test_tmp() } else { std::env::temp_dir() };
         let dir = root.join(format!("herdr-shared-corrupt-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("shared.json");

@@ -62,6 +62,16 @@ impl AppWindow {
         });
     }
 
+    /// The root's `window_blur`: frosted glass behind the window, else opaque.
+    pub(super) fn apply_blur(&mut self, window: &mut Window) {
+        let want = self.chrome.window_blur;
+        if self.blur_applied == want {
+            return;
+        }
+        self.blur_applied = want;
+        window.set_background_appearance(if want { gpui::WindowBackgroundAppearance::Blurred } else { gpui::WindowBackgroundAppearance::Opaque });
+    }
+
     /// What mods know about the window: `window()`.
     pub(super) fn window_json(&self, window: &Window) -> Value {
         let platform = if cfg!(target_os = "macos") {
@@ -250,20 +260,19 @@ mod win {
     /// The `system` title bar: a strip in the theme, Windows' buttons on the
     /// right. Windows itself handles the areas (drag, snap layouts, double-click).
     pub(super) fn strip(maximized: bool, _cx: &mut Context<AppWindow>) -> AnyElement {
-        let button = |glyph: &'static str, area: WindowControlArea, hover: Hsla, hover_text: Hsla| {
+        let button = |id: &'static str, icon: &'static [u8], area: WindowControlArea, hover: Hsla, hover_text: Hsla| {
             div()
-                .id(glyph)
+                .id(id)
+                .group(id)
                 .window_control_area(area)
                 .w(settings::z(WIN_BUTTON))
                 .h_full()
                 .flex()
                 .items_center()
                 .justify_center()
-                .font_family("Segoe MDL2 Assets")
-                .text_size(settings::z(10.0))
-                .text_color(c("dim"))
-                .hover(move |s| s.bg(hover).text_color(hover_text))
-                .child(glyph)
+                .hover(move |s| s.bg(hover))
+                .child(svg().data(icon).size(settings::z(16.0)).text_color(c("dim"))
+                    .group_hover(id, move |s| s.text_color(hover_text)))
         };
         let red: Hsla = rgb(0xc42b1c).into();
         div()
@@ -272,9 +281,9 @@ mod win {
             .w_full()
             .flex()
             .child(div().flex_1().h_full().window_control_area(WindowControlArea::Drag))
-            .child(button("\u{E921}", WindowControlArea::Min, c("raised"), c("foreground")))
-            .child(button(if maximized { "\u{E923}" } else { "\u{E922}" }, WindowControlArea::Max, c("raised"), c("foreground")))
-            .child(button("\u{E8BB}", WindowControlArea::Close, red, gpui::white()))
+            .child(button("win-min", include_bytes!("../../defaults/mods/tabs/win-min.svg"), WindowControlArea::Min, c("raised"), c("foreground")))
+            .child(button("win-max", if maximized { include_bytes!("../../defaults/mods/tabs/win-restore.svg") } else { include_bytes!("../../defaults/mods/tabs/win-max.svg") }, WindowControlArea::Max, c("raised"), c("foreground")))
+            .child(button("win-close", include_bytes!("../../defaults/mods/tabs/win-close.svg"), WindowControlArea::Close, red, gpui::white()))
             .into_any_element()
     }
 }

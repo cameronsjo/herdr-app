@@ -1,5 +1,8 @@
 set windows-shell := ["powershell.exe", "-NoLogo", "-NoProfile", "-Command"]
 
+default:
+    @just --list
+
 notes-clip scene version="":
     bun scripts/notes-media.ts clip "{{scene}}" "{{version}}"
 
@@ -40,6 +43,7 @@ build:
     cargo build --locked
 
 test:
+    bun test scripts/files.test.ts scripts/machine-add.test.ts scripts/picker.test.ts scripts/palette.test.ts scripts/agents.test.ts scripts/spaces.test.ts scripts/mod-storage.test.ts scripts/worktree.test.ts scripts/settings.test.ts scripts/tabs.test.ts
     cargo test --locked
 
 docs-generate: build
@@ -48,6 +52,42 @@ docs-generate: build
 docs-check: build
     bun test scripts/docs.test.ts
     bun scripts/docs.ts check
+
+# FORK(browser): browser dev recipes, from here to browser-fixture.
+# Builds target/browser-dev/Herdr Dev.app (scripts/browser-dev-bundle): the
+# `browser` feature, CEF's framework and helpers. CEF_PATH (default
+# ~/.cache/herdr-app/cef) keeps CEF's ~600 MB download outside the repo; a
+# bare `cargo build --features browser` without it is refused (build.rs).
+# Herdr with Chromium browser panes, built but not started (macOS)
+[macos]
+browser-build *args:
+    bash scripts/browser-dev-bundle {{args}}
+
+# Runs the dev bundle on its own home and core (/tmp/hbd.dev, kept between
+# runs; FRESH=1 for a new one), never your real ones, and serves the test
+# pages on 127.0.0.1:8765. `/tmp/hbd.dev/herdr-app do …` drives it. A new
+# home opens a terminal and the test page. Details: scripts/browser-dev-run.
+# Herdr with Chromium browser panes, on its own home (macOS)
+[macos]
+browser-dev *args:
+    bash scripts/browser-dev-run {{args}}
+
+# Rebuilds, then quits the running dev app and starts the new build in the background
+[macos]
+browser-relaunch *args:
+    bash scripts/browser-dev-run --relaunch {{args}}
+
+# Quits the dev app and stops its core
+[macos]
+browser-stop:
+    bash scripts/browser-dev-run --stop
+
+# Serves scripts/ on http://127.0.0.1:8765 for browser panes (they open
+# http, https and about:blank only): open
+# http://127.0.0.1:8765/browser-fixture.html with --profile agent.
+# Serves scripts/ over loopback http for browser panes
+browser-fixture port="8765":
+    python3 -m http.server {{port}} --bind 127.0.0.1 --directory scripts
 
 [linux]
 install:

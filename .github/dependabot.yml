@@ -5,6 +5,23 @@ updates:
     directory: /
     schedule:
       interval: monthly
+    open-pull-requests-limit: 0  # FORK(browser): version PRs off; upstream bumps ci.yml's pins and syncs bring them
     groups:
       actions:
         patterns: ["*"]
+  # FORK(browser): version bumps for the fork's own dependencies only. Upstream
+  # owns every other one; a fork-side bump would conflict at every sync. Only
+  # tungstenite stands alone: cef is pinned to the CEF binary it downloads (bump
+  # both by hand), and objc2-web-kit and block2 must move with upstream's objc2
+  # crates. `allow` may also limit Dependabot security PRs to this list; the
+  # repo's Dependabot alerts still list every advisory.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    allow:
+      - dependency-name: tungstenite
+    commit-message:
+      prefix: chore(deps)

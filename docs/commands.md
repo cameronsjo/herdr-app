@@ -19,7 +19,7 @@ Mods can add their own actions, which are not listed here.
 
 ## `space.new`
 
-Make a space: its name (default: none, so it's called after where its first terminal is), the folder its terminals start in (default: the focused terminal's), its first tab's name (default: none, so it's called by its number), optionally an agent (argv) and its first message (task), and the machine it lives on (`hc machine ls`; default this one; its terminals start in that machine's home unless folder).
+Make a space: its name (default: none, so it's called after where its first terminal is), the folder its terminals start in (default: the focused terminal's), its first tab's name (default: none, so it's called by its number), optionally an agent (argv) and its first message (task), and the machine it lives on (`hc machine ls`; default the focused space's machine for keys and clicks, this computer for scripts; empty string: this computer; its terminals start in that machine's home unless folder). It is shown at once; focus false keeps the shown space and tab (with no space shown, the new space is shown).
 
 | Argument | Required |
 |---|---|
@@ -29,6 +29,7 @@ Make a space: its name (default: none, so it's called after where its first term
 | `argv` | no |
 | `task` | no |
 | `machine` | no |
+| `focus` | no |
 
 ## `space.close`
 
@@ -59,7 +60,7 @@ Move a space to a position (1 = first).
 
 ## `tab.new`
 
-Make a tab in a space (default: the selected one; name default: none, so it's called by its number) with a terminal in folder (default: the focused terminal's), optionally an agent (argv) and its first message (task); or with a mod as its only pane (`mod`, its `props`: a file, a board).
+Make a tab in a space (default: the selected one; name default: none, so it's called by its number) with a terminal in folder (default: the focused terminal's), optionally an agent (argv) and its first message (task); or with a mod as its only pane (`mod`, its `props`: a file, a board). It is shown at once; focus false adds it last in its space and keeps the shown space and the target space's selected tab. With no space open, a person's new tab starts a space (as space.new).
 
 | Argument | Required |
 |---|---|
@@ -70,6 +71,7 @@ Make a tab in a space (default: the selected one; name default: none, so it's ca
 | `task` | no |
 | `mod` | no |
 | `props` | no |
+| `focus` | no |
 
 ## `tab.close`
 
@@ -91,12 +93,13 @@ Rename a tab (asks the person when no name; an empty name: called by its number 
 
 ## `tab.move`
 
-Move a tab to a position in its space (1 = first).
+Move a tab (the active one if no id) to a position in its space (1 = first), or `by` places left (-) or right (+), wrapping.
 
 | Argument | Required |
 |---|---|
-| `id` | yes |
-| `index` | yes |
+| `id` | no |
+| `index` | no |
+| `by` | no |
 
 ## `pane.split`
 
@@ -155,6 +158,15 @@ Where right-clicks in a terminal (default: the focused one) go when its program 
 | `to` | yes |
 | `terminal` | no |
 
+## `terminal.pin`
+
+Pin an agent to the top of the agent lists (pinned true) or unpin it (false). Pins are kept with the terminal, so every Herdr client shows them, and end with it.
+
+| Argument | Required |
+|---|---|
+| `terminal` | yes |
+| `pinned` | yes |
+
 ## `terminal.kill`
 
 End a terminal and its sub-agents.
@@ -162,6 +174,112 @@ End a terminal and its sub-agents.
 | Argument | Required |
 |---|---|
 | `terminal` | yes |
+
+## `browser.open`
+
+Open a web page (http, https or about:blank) in a browser pane (macOS builds with the browser feature): "right" (default) or "down" of a pane (default: the focused one), or as a new "tab" in its space. profile "agent": a separate test profile, the only kind an agent can drive once the person allows it. Says its browser id and pane.
+
+| Argument | Required |
+|---|---|
+| `url` | yes |
+| `place` | no |
+| `pane` | no |
+| `profile` | no |
+
+## `browser.navigate`
+
+Show another page in a browser (an id from `herdr-app ls`).
+
+| Argument | Required |
+|---|---|
+| `browser` | yes |
+| `url` | yes |
+
+## `browser.back`
+
+Go back a page in a browser.
+
+| Argument | Required |
+|---|---|
+| `browser` | yes |
+
+## `browser.forward`
+
+Go forward a page in a browser.
+
+| Argument | Required |
+|---|---|
+| `browser` | yes |
+
+## `browser.reload`
+
+Reload a browser's page.
+
+| Argument | Required |
+|---|---|
+| `browser` | yes |
+
+## `browser.close`
+
+Close a browser and its pane.
+
+| Argument | Required |
+|---|---|
+| `browser` | yes |
+
+## `browser.agent_browser_setup`
+
+Add Herdr's provider to agent-browser's user config (~/.agent-browser/config.json), so a terminal that started before this Herdr can drive a browser pane with: agent-browser -p herdr --session herdr-$HC_TERMINAL_ID. Other plugins and settings in the file are kept.
+
+No arguments.
+
+## `browser.open_external`
+
+Open a browser's page (default: the focused browser) in the default web browser: the page's own address, http or https only. For sign-ins Herdr's browser can't do, such as passkeys.
+
+| Argument | Required |
+|---|---|
+| `browser` | no |
+
+## `browser.devtools`
+
+Open or close a browser's web inspector (no open: toggle): Chromium's DevTools window on the CEF engine; on the WebKit engine the page becomes inspectable from Safari's Develop menu.
+
+| Argument | Required |
+|---|---|
+| `browser` | yes |
+| `open` | no |
+
+## `browser.zoom`
+
+Zoom a browser's page (default: the focused browser): step "in" or "out" along Chromium's steps (25% to 500%), "reset" to 100%, or level, a percent from 25 to 500. The CEF engine keeps one zoom per host name (all its ports) in each profile, saved across restarts, so other pages on that host follow; the WebKit engine keeps it per pane. A number alone (browser.zoom:125) is a level. Says the zoom now, in percent.
+
+| Argument | Required |
+|---|---|
+| `step` | no |
+| `browser` | no |
+| `level` | no |
+
+## `browser.viewport`
+
+Lay a browser's page out at another screen size (default: the focused browser): preset "phone" (390x844), "tablet" (820x1180), both mobile with touch, or "fit" (the pane's own size again); or width and height in pixels, with mobile true or false. A size bigger than the pane is shrunk to fit it. The WebKit engine sets the size only: no mobile, touch or pixel ratio.
+
+| Argument | Required |
+|---|---|
+| `preset` | no |
+| `browser` | no |
+| `width` | no |
+| `height` | no |
+| `mobile` | no |
+
+## `browser.agent_access`
+
+Turn agent access off for a browser (on: false): its agent's connection ends and the page reopens. Turning it on is only for the person: "Allow agent…" in an agent-profile browser's header opens a macOS dialog, and only its Allow turns it on; this command refuses on: true.
+
+| Argument | Required |
+|---|---|
+| `browser` | yes |
+| `on` | yes |
 
 ## `space.select`
 
@@ -240,7 +358,7 @@ Focus a pane (or the pane showing a terminal).
 
 ## `pane.go`
 
-Focus the pane to the "left", "right", "up" or "down".
+Focus the pane or focusable mod to the "left", "right", "up" or "down".
 
 | Argument | Required |
 |---|---|
@@ -248,11 +366,13 @@ Focus the pane to the "left", "right", "up" or "down".
 
 ## `pane.swap`
 
-Swap the focused pane with its neighbor in a direction.
+Swap a pane (default: the focused one) with its neighbor in a direction, or with another pane of its tab (target). Give exactly one of direction or target.
 
 | Argument | Required |
 |---|---|
-| `direction` | yes |
+| `direction` | no |
+| `pane` | no |
+| `target` | no |
 
 ## `terminal.peek`
 
@@ -271,21 +391,73 @@ Show a terminal in a pane for now, in place of its own (no terminal: back).
 | `terminal` | no |
 | `pane` | no |
 
+## `terminal.select_all`
+
+Select a terminal's whole screen and scrollback (default: the focused one), ready to copy. On the alternate screen, select only that screen.
+
+| Argument | Required |
+|---|---|
+| `terminal` | no |
+
+## `terminal.select`
+
+Start a terminal selection (default: the focused one), replacing the old selection. at defaults to "cursor" or takes {row, col}: zero-based cells, rows from the top of the history including the active screen. mode is "cell" (default), "word" or "line" (like double/triple click). Mods read the inclusive endpoints from focused().selection or terminals(); selection.end is the moving end.
+
+| Argument | Required |
+|---|---|
+| `terminal` | no |
+| `at` | no |
+| `mode` | no |
+
+## `terminal.adjust_selection`
+
+Move the selection's moving end: left, right, up, down, page_up, page_down, home, end, line_start or line_end. The view follows the moving end. Fails if there is no selection. Defaults to the focused terminal.
+
+| Argument | Required |
+|---|---|
+| `terminal` | no |
+| `direction` | yes |
+
+## `terminal.clear_selection`
+
+Clear a terminal's selection (default: the focused one).
+
+| Argument | Required |
+|---|---|
+| `terminal` | no |
+
 ## `terminal.copy`
 
-Copy the focused terminal's selection.
+Copy the focused terminal's selection. With nothing selected, that key goes to the program.
 
 No arguments.
 
+## `terminal.scroll`
+
+Scroll a terminal's view of its history (default: the focused one). Give exactly one of: lines (a whole number; negative goes up, toward history), pages (a number, fractions allowed; one page is the terminal's rows), to: "top" (oldest history) or "bottom" (the live screen). This scrolls Herdr's view, not the program.
+
+| Argument | Required |
+|---|---|
+| `lines` | no |
+| `pages` | no |
+| `to` | no |
+| `terminal` | no |
+
 ## `terminal.paste`
 
-Paste into the focused terminal (an image alone, into one on another machine, as a file there).
+Paste into the focused terminal (copied files as if dropped; an image alone as terminal.paste_image pastes it).
 
 No arguments.
 
 ## `terminal.paste_image`
 
-Ctrl+V: the clipboard's image as a file on the focused terminal's machine, when that's another one; otherwise Ctrl+V goes to the terminal.
+Ctrl+V: the clipboard's image as a file on the focused terminal's machine, when that's another one; on Windows, paste clipboard text; otherwise Ctrl+V goes to the terminal.
+
+No arguments.
+
+## `terminal.search`
+
+Search the focused terminal's screen and scrollback; the find bar and query stay with that terminal.
 
 No arguments.
 
@@ -396,7 +568,7 @@ Reset a shipped layout and its clicks (the old file is kept aside).
 
 ## `mod.open`
 
-Open a mod as the overlay its mod.json describes.
+Toggle a mod as the overlay its mod.json describes; calling again closes it.
 
 | Argument | Required |
 |---|---|
@@ -412,7 +584,7 @@ Close an overlay (default: the top dialog or popup).
 
 ## `app.help`
 
-Show the keys.
+Toggle the keys dialog.
 
 No arguments.
 
@@ -439,7 +611,7 @@ Draft feedback for the person to review and send (from: person or agent).
 
 ## `app.palette`
 
-Open the command palette: every command by name, with its key.
+Toggle the command palette: every command by name, with its key; calling again closes it.
 
 No arguments.
 

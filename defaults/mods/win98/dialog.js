@@ -194,7 +194,7 @@ export default class Dialog {
         const name = this.text.trim();
         if (!name) return;
         this.close();
-        run(p.command.name, { ...(p.command.args ?? {}), name, ...(this.machine ? { machine: this.machine } : {}) });
+        run(p.command.name, { ...(p.command.args ?? {}), name, ...(p.machines ? { machine: this.machine ?? "" } : {}) });
         return;
       }
       case "run":
@@ -685,6 +685,10 @@ export default class Dialog {
       );
     const month = d.toLocaleDateString("en-US", { month: "long" });
     const time = d.toLocaleTimeString("en-US");
+    const offset = -d.getTimezoneOffset();
+    const offsetHours = String(Math.floor(Math.abs(offset) / 60)).padStart(2, "0");
+    const offsetMinutes = String(Math.abs(offset) % 60).padStart(2, "0");
+    const timeZone = `UTC${offset < 0 ? "-" : "+"}${offsetHours}:${offsetMinutes}`;
     return v_flex()
       .p(u(10))
       .gap(u(10))
@@ -700,7 +704,7 @@ export default class Dialog {
           )
           .child(v_flex().gap(u(6)).items_center().child(clockFace(u, d)).child(field(u, div().w(u(90)).flex().justify_center().child(time)))),
       )
-      .child(div().child(`Time zone: ${Intl.DateTimeFormat().resolvedOptions().timeZone}`))
+      .child(div().child(`Time zone: ${timeZone}`))
       .child(this.buttons(u, [this.btn(u, "ok", "OK", () => this.close(), { default: true }), this.btn(u, "cancel", "Cancel", () => this.close())], "end"));
   }
 
@@ -765,7 +769,7 @@ export default class Dialog {
   renderNetwork(u) {
     const items = [
       { label: "Entire Network", icon: "network", act: null },
-      { label: "This computer", icon: "computer", act: { dialog: { kind: "prompt", title: "New Space", text: "Type a name for the new space:", icon: "folder", command: { name: "space.new", args: {} } } } },
+      { label: "This computer", icon: "computer", act: { dialog: { kind: "prompt", title: "New Space", text: "Type a name for the new space:", icon: "folder", command: { name: "space.new", args: { machine: "" } } } } },
       ...this.machines.map((m) => ({
         label: m.name,
         icon: "computer",

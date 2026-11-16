@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+# Merges herdrdev/herdr-app master into a sync branch cut from fork/master,
+# in its own worktree. Automates the mechanical part: fetch, worktree, merge,
+# regenerating the generated files, and restoring FORK_OWNED files. Stops for
+# hand resolution of anything else; re-run to finish (it resumes, from any
+# checkout of the repo, the sync worktree included).
+#
+# Ported from cameronsjo/herdr scripts/sync-upstream.sh (the archived TUI fork),
+# keeping its fixes: resume across midnight, MERGE_HEAD-based resume, every
+# unmerged porcelain state, physical paths.
+#
+# Usage: scripts/fork/sync-upstream
+# Env:   ORIGIN_REMOTE (default origin), FORK_REMOTE (default fork),
+#        BASE_BRANCH (default master, the fork branch to sync)
+# Exit:  0 merged or already current; 1 conflicts (or conflict markers) remain:
+#        resolve, re-run; 2 any other failure (setup, a git or regeneration step).
+set -Eeuo pipefail
+# shellcheck disable=SC2154  # trap_rc is assigned inside the trap string
+trap 'trap_rc=$?; echo "error: line $LINENO: \`$BASH_COMMAND\` exited $trap_rc" >&2; exit 2' ERR
+
+# Files upstream also has where the fork's copy always wins. Keep short: each
+# entry silently discards upstream's edits to that file.
+FORK_OWNED=()
+
+# Generated files: take upstream's, then regenerate on top of the merge.
+REGENERATED=("Cargo.lock" "THIRD-PARTY-NOTICES")
+
+ORIGIN_REPO="herdrdev/herdr-app"
+FORK_REPO="cameronsjo/herdr-app"
+
+# The primary checkout, from whichever worktree this copy of the script is in
+# (a relative dirname would nest worktrees when run from a sync worktree).
+SCRIPT_DIR=$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+COMMON_DIR=$(git -C "$SCRIPT_DIR" rev-parse --path-format=absolute --git-common-dir)
+ROOT_DIR=$(cd -P -- "$COMMON_DIR/.." && pwd -P)
+ORIGIN_REMOTE=${ORIGIN_REMOTE:-origin}
+FORK_REMOTE=${FORK_REMOTE:-fork}
+BASE_BRANCH=${BASE_BRANCH:-master}
+BRANCH="sync/upstream-$(date +%Y%m%d)"
+WORKTREES_DIR="$(cd -P -- "$ROOT_DIR/.." && pwd -P)/herdr-app-worktrees"
+WORKTREE_DIR="$WORKTREES_DIR/${BRANCH//\//-}"
+
+cd "$ROOT_DIR"
+# The remotes must point where the fork's rules say: merging the fork into
+# itself would report "already current" forever, and upstream is fetch-only.
+origin_url=$(git remote get-url "$ORIGIN_REMOTE" 2>/dev/null) || { echo "error: remote '$ORIGIN_REMOTE' is not configured (expected $ORIGIN_REPO)" >&2; exit 2; }
+fork_push=$(git remote get-url --push "$FORK_REMOTE" 2>/dev/null) || { echo "error: remote '$FORK_REMOTE' is not configured (expected $FORK_REPO)" >&2; exit 2; }
+case "$origin_url" in *"$ORIGIN_REPO"|*"$ORIGIN_REPO.git") ;; *) echo "error: $ORIGIN_REMOTE is $origin_url, expected $ORIGIN_REPO" >&2; exit 2 ;; esac
+case "$fork_push" in *"$FORK_REPO"|*"$FORK_REPO.git") ;; *) echo "error: $FORK_REMOTE pushes to $fork_push, expected $FORK_REPO" >&2; exit 2 ;; esac
+if [[ "$(git remote get-url --push "$ORIGIN_REMOTE")" == *"$ORIGIN_REPO"* ]]; then
+  git remote set-url --push "$ORIGIN_REMOTE" DISABLED
+  echo "==> disabled pushes to $ORIGIN_REMOTE ($ORIGIN_REPO is fetch-only)"
+fi
+
+echo "==> fetching $ORIGIN_REMOTE and $FORK_REMOTE"
+git fetch "$ORIGIN_REMOTE" --prune --no-tags
+git fetch "$FORK_REMOTE" --prune --no-tags
+
+# Capture first: `grep -q` under pipefail can SIGPIPE the producer.
+worktree_list=$(git worktree list --porcelain)
+
+# Resume any sync worktree with a merge in progress, whatever day it is named for.
+resume_dir=""
+while IFS= read -r line; do
+  case "$line" in "worktree $WORKTREES_DIR/sync-upstream-"*) ;; *) continue ;; esac
+  dir=${line#worktree }
+  git_dir=$(git -C "$dir" rev-parse --absolute-git-dir 2>/dev/null) || continue
+  [[ -f "$git_dir/MERGE_HEAD" ]] || continue
+  if [[ -n "$resume_dir" ]]; then
+    echo "error: more than one sync worktree has a merge in progress: $resume_dir and $dir; finish or abort all but one" >&2
+    exit 2
+  fi
+  resume_dir=$dir
+done <<<"$worktree_list"
+if [[ -n "$resume_dir" && "$resume_dir" != "$WORKTREE_DIR" ]]; then
+  WORKTREE_DIR=$resume_dir
+  BRANCH=$(git -C "$WORKTREE_DIR" symbolic-ref --short HEAD)
+  echo "==> resuming the earlier sync on $BRANCH"
+fi
+
+if command grep -qxF "worktree $WORKTREE_DIR" <<<"$worktree_list"; then
+  echo "==> reusing worktree $WORKTREE_DIR"
+elif git show-ref --verify --quiet "refs/heads/$BRANCH"; then
+  echo "error: branch $BRANCH exists without its worktree $WORKTREE_DIR; delete the branch or add the worktree back" >&2
+  exit 2
+else
+  echo "==> creating worktree $WORKTREE_DIR (branch $BRANCH from $FORK_REMOTE/$BASE_BRANCH)"
+  git worktree add "$WORKTREE_DIR" -b "$BRANCH" "$FORK_REMOTE/$BASE_BRANCH"
+fi
+cd "$WORKTREE_DIR"
+# The build and THIRD-PARTY-NOTICES (its license) need it; a new worktree has none.
+git submodule update --init --depth 1 vendor/ghostty
+
+merge_in_progress=false
+[[ -f "$(git rev-parse --git-dir)/MERGE_HEAD" ]] && merge_in_progress=true
+if [[ -n "$(git status --porcelain)" ]] && ! "$merge_in_progress"; then
+  echo "error: $WORKTREE_DIR has uncommitted changes unrelated to a merge; clean it first" >&2
+  exit 2
+fi
+
+base_before=$(git rev-parse HEAD)
+merge_rc=0
+if "$merge_in_progress"; then
+  echo "==> resuming the in-progress merge"
+  merge_rc=1
+else
+  echo "==> merging $ORIGIN_REMOTE/master ($(git rev-list --count "HEAD..$ORIGIN_REMOTE/master") commits)"
+  git merge "$ORIGIN_REMOTE/master" --no-commit --no-ff || merge_rc=$?
+fi
+
+if [[ ! -f "$(git rev-parse --git-dir)/MERGE_HEAD" ]]; then
+  [[ "$merge_rc" -ne 0 ]] && { echo "error: git merge failed before starting (exit $merge_rc)" >&2; exit 2; }
+  echo "==> already current with $ORIGIN_REMOTE/master"
+  exit 0
+fi
+upstream_base=$(git merge-base HEAD MERGE_HEAD)
+
+# Restore fork-owned files unconditionally: a clean merge can still land
+# upstream's content in a file the fork owns.
+for owned in "${FORK_OWNED[@]+"${FORK_OWNED[@]}"}"; do
+  git cat-file -e "HEAD:$owned" 2>/dev/null || continue
+  git checkout HEAD -- "$owned" && git add -- "$owned"
+  echo "==> kept the fork's $owned"
+done
+
+# Generated files: upstream's copy, regenerated after the tree is resolved.
+for gen in "${REGENERATED[@]}"; do
+  git cat-file -e "MERGE_HEAD:$gen" 2>/dev/null || continue
+  git checkout MERGE_HEAD -- "$gen" && git add -- "$gen"
+done
+
+remaining=$(command grep -E '^(DD|AU|UD|UA|DU|AA|UU)' <<<"$(git status --porcelain)" || true)
+if [[ -n "$remaining" ]]; then
+  echo
+  echo "Conflicts remain. Before resolving, see CLAUDE.md § Syncing upstream (rename check, re-applying the fork's lines)."
+  echo "$remaining"
+  echo
+  echo "The fork's own lines in a conflicted file (re-apply all of them, marked or not):"
+  echo "  git diff $upstream_base $base_before -- <file>"
+  echo "Worktree: $WORKTREE_DIR   Re-run this script when resolved."
+  exit 1
+fi
+
+# A file marked resolved can still hold conflict markers.
+marked=$(git diff --cached --name-only -z --diff-filter=AM | xargs -0 -r command grep -lE '^(<<<<<<<|>>>>>>>) ' -- 2>/dev/null || true)
+if [[ -n "$marked" ]]; then
+  echo
+  echo "Conflict markers remain in staged files; resolve them, then re-run:"
+  echo "$marked"
+  exit 1
+fi
+
+echo "==> regenerating ${REGENERATED[*]}"
+command -v bun >/dev/null 2>&1 || { echo "error: bun not found: THIRD-PARTY-NOTICES can't be regenerated (bun scripts/notices.ts, cargo-about 0.9.3 built with --features cli)" >&2; exit 2; }
+cargo metadata --format-version 1 >/dev/null
+bun scripts/notices.ts
+git add -- "${REGENERATED[@]}"
+git commit --no-edit
+
+echo
+echo "Next:"
+echo "  1. (cd $WORKTREE_DIR && just test)   then on macOS: cargo test --locked --features browser-webkit"
+echo "     Compare compiler warnings with the pre-sync tip ($base_before); a rise is a finding."
+echo "  2. (cd $WORKTREE_DIR && scripts/fork/seams origin/master)   (paste into the PR body and the ledger's footprint table)"
+echo "  3. record conflict decisions in docs/fork/CHANGES.md, commit"
+echo "  4. git -C $WORKTREE_DIR push --no-follow-tags -u $FORK_REMOTE $BRANCH"
+echo "  5. gh pr create -R $FORK_REPO --base $BASE_BRANCH --head $BRANCH --draft ..."
+echo "     -R is required: in a fork, gh targets the parent herdrdev repo by default."

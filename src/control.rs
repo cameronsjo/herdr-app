@@ -24,7 +24,7 @@ pub fn listen(tx: async_channel::Sender<Request>) {
         return;
     }
     let _ = std::fs::remove_file(&path);
-    let listener = match UnixListener::bind(&path) {
+    let listener = match crate::browser::socket::bind_private(&path, |p| UnixListener::bind(p)) { // FORK(browser): owner-only socket
         Ok(l) => l,
         Err(e) => return tracing::warn!("cannot serve {}: {e}", path.display()),
     };
@@ -37,6 +37,7 @@ pub fn listen(tx: async_channel::Sender<Request>) {
 }
 
 fn serve(stream: UnixStream, tx: async_channel::Sender<Request>) {
+    if !crate::browser::socket::same_user(&stream) { return tracing::warn!("control socket: dropped a connection from another user"); } // FORK(browser)
     let mut line = String::new();
     if BufReader::new(&stream).read_line(&mut line).is_err() {
         return;
@@ -146,8 +147,12 @@ fn parse_args(rest: &[String]) -> Result<Value, String> {
 }
 
 /// Encode before opening the destination: GPU errors must not truncate a good shot.
-pub fn save_shot(window: &gpui::Window, path: &std::path::Path) -> anyhow::Result<()> {
-    let image = window.render_to_image()?;
+pub fn save_shot<C: gpui::AppContext>(
+    window: gpui::AnyWindowHandle,
+    cx: &mut C,
+    path: &std::path::Path,
+) -> anyhow::Result<()> {
+    let image = window.render_current_to_image(cx)?;
     let mut bytes = Vec::new();
     {
         let mut encoder = png::Encoder::new(&mut bytes, image.width(), image.height());
@@ -180,6 +185,12 @@ fn fail(message: &str) -> i32 {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn flag_values_that_parse_as_json_are_json() {
+        let args: Vec<String> = ["--name", "eng-123", "--focus", "false", "--argv", r#"["claude"]"#].map(String::from).into();
+        assert_eq!(parse_args(&args).unwrap(), json!({ "name": "eng-123", "focus": false, "argv": ["claude"] }));
+    }
 
     #[test]
     fn a_second_launch_raises_the_running_window() {
