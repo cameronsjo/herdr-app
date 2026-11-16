@@ -59,6 +59,14 @@ Built 2026-10-30 to 2026-11-01 on `browser-prototype`. Design and security model
 - Seams (upstream-owned files touched): see the footprint table. The window's browser code is in `src/window/fork_browser.rs`, the saved form of a browser block in `src/layout/fork_browser.rs`, and the control socket's owner-only checks in `src/browser/socket.rs`; `src/window.rs` (33 lines), `src/layout.rs` (6) and `src/control.rs` (2) keep only `FORK(browser)` call lines.
 - `Content::Browser` still widens upstream's `Content` enum, and `Content` (de)serializes through the fork's `Saved`, which must mirror upstream's serde attributes. cameronsjo/herdr-app#18 tracks removing the variant.
 
+## Markdown viewer
+
+Added 2026-11-16, as a mod (no Rust).
+
+- `defaults/mods/markdown/` (fork-only): a pane that renders a markdown file with `TextView.markdown`, follows its saves (a folder watch on this computer, a 5-second poll on another machine) and toggles to the raw source. Open it with `pane.split {direction, mod: "markdown", props: {file, on?}}`; `file` must be absolute.
+- `defaults/mods/files/main.js`: `.md` and `.markdown` previews render instead of showing raw text, with an **Open** button that splits the markdown pane beside the focused terminal (`FORK(markdown)` lines).
+- `defaults/AGENTS.md`: one `FORK(markdown)` sentence naming the mod in the list of shipped mods.
+
 ## Updates and automation
 
 Added 2026-11-15; setup order and the routine's prompt: `docs/fork/weekly-sync.md`.
