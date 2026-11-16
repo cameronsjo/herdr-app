@@ -15,7 +15,7 @@ Make `cameronsjo/herdr-app` Cameron's everyday Herdr build: upstream plus the br
 ## Decisions (operator, 2026-11-15)
 
 - Server-side TUI features go to app mods first; fork `herdrdev/herdr-core` only for a feature a mod cannot do.
-- The weekly sync is a Claude cloud routine owned by the alt account.
+- The weekly sync is a Claude cloud routine owned by Cameron's main account, in the Cadence claude.ai project (changed 2026-11-16 from the alt account, Cameron's choice).
 - The fork must be designed and built so upstream merges stay as simple as possible (rules: `CLAUDE.md` § Merge-friendly by construction).
 
 ## Tasks
@@ -26,7 +26,7 @@ Make `cameronsjo/herdr-app` Cameron's everyday Herdr build: upstream plus the br
 - [x] 4. (done: cameronsjo/herdr-app#8 to #15; drops in the ledger) Gap-check each TUI-fork feature (its `docs/fork/CHANGES.md`) against upstream app and `herdr-core`; file one `cameronsjo/herdr-app` issue per missing feature, marked mod or core.
 - [ ] 5. Port features in issue order, mod first.
 - [x] 6. Grep the estate for consumers of the TUI `herdr` binary, deprecate `herdr.rb` in `cameronsjo/homebrew-tap`, archive `cameronsjo/herdr`. (Archived 2026-11-15 with a README notice; open issues #156/#157 transferred to cameronsjo/herdr-app#16/#17, three TUI-only issues closed. Tap deprecation held: see Deviations.)
-- [ ] 7. Create the weekly sync routine on the alt account: runs `scripts/fork/sync-upstream`, resolves per `CLAUDE.md`, runs the Linux gate, opens a PR with the seams table. Never pushes `master`.
+- [x] 7. Create the weekly sync routine (created 2026-11-16 on the main account, Cadence project; `docs/fork/weekly-sync.md` § Setting it up): runs `scripts/fork/sync-upstream`, resolves per `CLAUDE.md`, runs the Linux gate, opens a PR with the seams table. Never pushes `master`.
 
 ## Loop
 
