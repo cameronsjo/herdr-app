@@ -175,6 +175,9 @@ fn need(id: &str) -> Result<Retained<WKWebView>, String> {
     web(id).ok_or_else(|| format!("browser {id} is still opening"))
 }
 
+/// WebKit applies a viewport's size only (`emulate::size_only`).
+pub const VIEWPORT_SIZE_ONLY: bool = true;
+
 /// The view of `id`'s page, if it is open and still `generation`.
 fn current(id: &str, generation: u64) -> Option<Retained<WKWebView>> {
     STATE.with_borrow(|s| s.pages.get(id).filter(|p| p.generation == generation).map(|p| p.web.clone()))
@@ -433,9 +436,7 @@ pub fn set_zoom(id: &str, percent: f64) -> Result<f64, String> {
 /// pixel-ratio, mobile or touch emulation.
 pub fn set_viewport(id: &str, viewport: Option<Viewport>) -> Result<(), String> {
     need(id)?;
-    // What `ls` reports is what WebKit applies: the size (and the preset it
-    // came from), never mobile or a pixel ratio.
-    let viewport = viewport.map(|v| Viewport { mobile: false, scale_factor: 0.0, ..v });
+    let viewport = viewport.map(super::emulate::size_only);
     let size = viewport.as_ref().map(|v| (f64::from(v.width), f64::from(v.height)));
     STATE.with_borrow_mut(|s| {
         if let Some(p) = s.pages.get_mut(id) {
@@ -585,6 +586,9 @@ fn run(id: &str, generation: u64, web: &WKWebView, pid: i64, step: Step, params:
         Step::Reply(v) => done(Ok(v)),
         Step::Fail(e) => done(Err(e)),
         Step::World(op @ ("evaluate" | "callFunctionOn")) => world_code(web, op, params, move |r| done(same_document(r))),
+        // Actions that answer `{}` (and releases) keep their answer: only a
+        // value read from the old document is stale.
+        Step::World(op @ ("wheel" | "focus" | "scrollIntoViewIfNeeded" | "releaseObject" | "releaseObjectGroup")) => in_world(web, op, params, done),
         Step::World(op) => in_world(web, op, params, move |r| done(same_document(r))),
         Step::AxTree => in_world(web, "getFullAXTree", params, move |r| done(same_document(r).and_then(|raw| translate::ax_tree(&raw)))),
         Step::PageEval => page_eval(web, params, move |r| done(same_document(r))),
