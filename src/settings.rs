@@ -14,6 +14,8 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Mutex;
 
+mod fork_artificer; // FORK(artificer)
+
 /// A terminal palette, as herdr-app shipped them.
 #[derive(Clone)]
 struct Palette {
@@ -185,9 +187,7 @@ fn palette(name: &str) -> Result<(Palette, BTreeMap<String, String>), String> {
         return Ok((p.clone(), BTreeMap::new()));
     }
     let path = theme_path(name);
-    let text = std::fs::read_to_string(&path)
-        // FORK(artificer): a shipped theme whose file is missing still resolves, since the default pair is file themes.
-        .or_else(|e| THEMES.iter().find(|(n, _)| *n == name).map(|(_, t)| t.to_string()).ok_or(e))
+    let text = fork_artificer::theme_text(&path, name) // FORK(artificer): a missing shipped theme file resolves from its embedded copy
         .map_err(|_| format!("theme {name:?} is not one of {} and there is no themes/{name}.json", PRESETS.join(", ")))?;
     parse_theme_file(name, &text)
 }
@@ -238,16 +238,6 @@ fn shipped_theme_upgrades_preserve_personal_edits() {
         std::fs::remove_file(&path).unwrap();
     }
     std::fs::remove_dir(root).unwrap();
-}
-
-// FORK(artificer): the default pair resolves from the embedded copy with no themes/ folder.
-#[test]
-fn default_themes_resolve_without_their_files() {
-    for name in [DEFAULT_DARK, DEFAULT_LIGHT] {
-        assert!(palette(name).is_ok(), "{name}");
-    }
-    assert!(theme_is_light(DEFAULT_LIGHT));
-    assert!(!theme_is_light(DEFAULT_DARK));
 }
 
 #[test]

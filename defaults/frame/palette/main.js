@@ -60,6 +60,7 @@ const NAMED = [
   ["app.zoom_reset", {}, "App", "Reset zoom", "font size"],
   ["app.quit", {}, "App", "Quit Herdr", "exit"],
   ...["graphite", "ink", "moss", "atom-one-dark"].map((n) => ["app.theme", { name: n }, "App", `Theme: ${n.replace(/-/g, " ")}`, "colors look"]),
+  ...["artificer-dark", "artificer-light"].map((n) => ["app.theme", { name: n }, "App", `Theme: ${n.replace(/-/g, " ")}`, "colors look"]), // FORK(artificer)
 ];
 
 // Commands that act on something you point at (ids, terminals): not for a list.
