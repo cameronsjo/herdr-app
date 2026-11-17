@@ -50,7 +50,9 @@ export default class Decisions extends View {
     ]) {
       field.on("change", (_e, cx) => {
         const s = this.slate;
-        if (!s || this.loadingFields || this.saving) return;
+        if (!s || this.loadingFields) return;
+        // While the answers are being saved, an edit would miss the write: put the saved text back.
+        if (this.saving) { this.loadFields(); cx.notify(); return; }
         const d = s.card();
         if (field !== this.extra && !d) return;
         write(s, d, field.value());
@@ -95,6 +97,7 @@ export default class Decisions extends View {
   }
 
   fail(message) {
+    if (this.closing) return; // the pane is going away; close() has already written its marker
     this.phase = "error";
     this.error = clean(message, 400);
     // Tell the waiting script, so it opens the browser instead of waiting out its timeout.

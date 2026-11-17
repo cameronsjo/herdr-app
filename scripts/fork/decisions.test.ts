@@ -107,7 +107,7 @@ function field() {
     fire(ev: string, cx: any) { handlers[ev]?.({}, cx); }, node: element() };
 }
 
-async function harness(dir: unknown, files: Record<string, string | null>, opts: { holdRead?: boolean } = {}) {
+async function harness(dir: unknown, files: Record<string, string | null>, opts: { holdRead?: boolean; failRead?: boolean } = {}) {
   let release = () => {};
   const gate = opts.holdRead ? new Promise<void>((r) => { release = r; }) : Promise.resolve();
   const reads: string[] = [];
@@ -117,7 +117,7 @@ async function harness(dir: unknown, files: Record<string, string | null>, opts:
   const pending: Promise<unknown>[] = [];
   const herdr = {
     props: () => (dir === undefined ? { pane: "p1" } : { dir, run: "run-1" }),
-    readTextFile: async (p: string) => { reads.push(p); await gate; return files[p] ?? null; },
+    readTextFile: async (p: string) => { reads.push(p); await gate; if (opts.failRead) throw new Error("read failed"); return files[p] ?? null; },
     writeTextFile: async (p: string, text: string, expected: string | null) => {
       if (expected === null && files[p] != null) throw new Error("exists");
       files[p] = text; writes.push([p, text, expected]); return null;
@@ -286,4 +286,24 @@ test("a response from another run does not show as sent", async () => {
   f[`${DIR}/response.json`] = JSON.stringify({ run: "older" });
   const h = await harness(DIR, f);
   expect(textOf(h.draw())).toContain("Which database?");
+});
+
+test("text typed while saving goes back to what is being saved", async () => {
+  const h = await harness(DIR, files());
+  h.view.slate.goTo(3);
+  h.view.loadFields();
+  h.view.saving = true;
+  const extra = h.fields[2];
+  extra.type("typed too late", h.cx);
+  expect(extra.value()).toBe("");
+  expect(h.view.slate.notes).toBe("");
+});
+
+test("a read that fails after the pane closed leaves only the close marker", async () => {
+  const h = await harness(DIR, files(), { holdRead: true, failRead: true });
+  await h.view.close();
+  h.release();
+  await new Promise((r) => setTimeout(r, 0));
+  expect(JSON.parse(h.files[`${DIR}/closed.json`] ?? "{}").reason).toBe("pane closed");
+  expect(h.view.phase).toBe("loading");
 });
