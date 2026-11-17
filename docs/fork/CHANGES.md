@@ -57,6 +57,13 @@ Added 2026-11-17 (cameronsjo/herdr-app#16, Linear CAM-921). What it does: `docs/
 - The label is `herdr.attention`, in Herdr's shared label namespace on purpose, so other clients can learn it. If upstream ever gives that label another meaning, rename the fork's.
 - `stall_minutes` lives in `<app home>/fork.json`, not `settings.json`, so upstream's settings struct stays as it is.
 
+## Answering approvals
+
+Added 2026-11-17 (cameronsjo/herdr-app#17, Linear CAM-921). What it does: `docs/fork/approval.md`. All of it is in `src/fork/approval.rs`.
+
+- Seam: `src/main.rs` routes `herdr-app approval ...` to `fork::approval::main` before the shell commands (`FORK(approval)`). It is not listed in upstream's `HELP`, so that text stays upstream's.
+- It talks to the core directly (`terminal.get`, `terminal.read`, `terminal.keys`), not to the window, so it works with the app closed.
+
 ## Browser pane
 
 Built 2026-10-30 to 2026-11-01 on `browser-prototype`. Design and security model: `docs/browser-prototype.md`; dev loop: `docs/browser-dev.md`; moving to upstream's official browser mod when it ships: `docs/browser-transition.md`.

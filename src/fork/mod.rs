@@ -2,4 +2,5 @@
 //! its own module here and reaches upstream code through `FORK(<feature>)`
 //! seams only (`CLAUDE.md` § Merge-friendly by construction).
 
+pub mod approval;
 pub mod attention;
