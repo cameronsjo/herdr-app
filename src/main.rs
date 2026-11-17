@@ -109,6 +109,10 @@ fn main() {
         gpui_shell::host::main_with_components(gpui_shell::FrozenComponentRegistry::default());
         return;
     }
+    // FORK(approval): `herdr-app approval show|answer` answers a blocked agent's prompt from outside its pane.
+    if args.get(1).map(String::as_str) == Some("approval") {
+        std::process::exit(fork::approval::main(&args[2..]));
+    }
     if matches!(args.get(1).map(String::as_str), Some("do" | "status" | "ls" | "commands" | "feedback" | "shot")) {
         std::process::exit(control::client(&args[1..]));
     }
