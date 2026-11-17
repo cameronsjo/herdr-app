@@ -118,6 +118,15 @@ pub fn merge(m: &mut Model, from: &str, into: &str) -> Result<Moved, String> {
     })
 }
 
+/// Where a terminal labeled for `space` and tab `tab` is put back: the space
+/// that holds the tab now (a move keeps its id), else the labeled one. Labels
+/// are rewritten after a move, but a write that failed, or one a quit cut off,
+/// would otherwise make a second tab with that id in a new copy of the old space.
+pub fn space_for_adoption(m: &Model, space: &str, tab: Option<&str>) -> String {
+    tab.and_then(|t| m.spaces.iter().find(|s| s.tab(t).is_some()))
+        .map_or_else(|| space.to_owned(), |s| s.id.clone())
+}
+
 /// Takes an emptied space out. Not `remove_space`: nothing in it closed, so it
 /// isn't a recent space to open again.
 fn drop_space(m: &mut Model, at: usize) {
@@ -217,6 +226,16 @@ mod tests {
         assert_eq!(m.active_tab().map(|c| c.id.as_str()), Some("c2"));
         assert!(merge(&mut m, "p2", "p2").is_err());
         assert!(m.recent.is_empty());
+    }
+
+    #[test]
+    fn a_terminal_labeled_for_a_moved_tab_goes_where_the_tab_is() {
+        let mut m = three();
+        move_tab(&mut m, "c2", "p2", None).unwrap();
+        move_tab(&mut m, "c1", "p2", None).unwrap();
+        assert_eq!(space_for_adoption(&m, "p1", Some("c1")), "p2");
+        assert_eq!(space_for_adoption(&m, "p1", Some("gone")), "p1");
+        assert_eq!(space_for_adoption(&m, "p9", None), "p9");
     }
 
     #[test]

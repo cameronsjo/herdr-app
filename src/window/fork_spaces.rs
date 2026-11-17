@@ -244,6 +244,11 @@ mod tests {
         view.update_in(cx, |this, window, cx| {
             // The labels are written (here the offline core refuses; nothing waits).
             assert!(this.changing_terminals.is_empty());
+            // Even when a label write failed (as here), a terminal still labeled for
+            // t2 in the closed s1 joins t2 where it is, not a new copy of s1.
+            this.adopt("term-e", "s1", Some("t2"));
+            assert_eq!(tabs(this, "s1"), None);
+            assert_eq!(this.model.tab("t2").map(|c| c.root.panes().len()), Some(2));
             let out = this.run_as(
                 "space.merge",
                 json!({ "id": "s2", "into": "s3" }),

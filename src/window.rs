@@ -2347,6 +2347,9 @@ impl AppWindow {
     /// shown. A space or tab the app doesn't know is made under the label's
     /// id, unnamed (called Herdr's way).
     fn adopt(&mut self, addr: &str, space: &str, ctx: Option<&str>) {
+        // FORK(spaces): a labeled tab that moved to another space is joined where it is now.
+        let space = crate::fork::spaces::space_for_adoption(&self.model, space, ctx);
+        let space = space.as_str();
         let machine = addr.split_once('/').map(|(m, _)| m.to_owned());
         let pane = self.model.fresh_id_on("p", machine.as_deref());
         let ctx_id = ctx.map(str::to_owned).unwrap_or_else(|| self.model.fresh_id_on("tb", machine.as_deref()));
