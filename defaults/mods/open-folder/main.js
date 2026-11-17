@@ -12,16 +12,18 @@
 import { View, div } from "gpui-kit";
 import { spaces, panes, run, pickFolder, home, notify, nextCommand, checking } from "herdr";
 
-// The folder as spaces() and panes() report it: ~ expanded, no trailing slash.
+// The folder as spaces() and panes() report it: ~ expanded, no trailing slash
+// (a root such as / or C:\ keeps its own).
 function normal(path, homeDir) {
   let p = String(path ?? "").trim();
-  if (p === "~" || p.startsWith("~/")) p = homeDir.replace(/\/+$/, "") + p.slice(1);
-  if (p.length > 1) p = p.replace(/\/+$/, "");
+  if (p === "~" || p.startsWith("~/") || p.startsWith("~\\")) p = homeDir.replace(/[\\/]+$/, "") + p.slice(1);
+  if (!/^([A-Za-z]:)?[\\/]$/.test(p)) p = p.replace(/[\\/]+$/, "");
   return p;
 }
 
 // A relative folder would resolve against the app's own working directory.
-const absolute = (p) => p.startsWith("/");
+// Absolute: /x, C:\x or C:/x, or a \\server\share path (Windows).
+const absolute = (p) => /^(\/|[A-Za-z]:[\\/]|\\\\)/.test(p);
 
 // The first of this computer's spaces in `folder` (made there, else its first
 // terminal is there now), or null.
@@ -64,7 +66,7 @@ export default class OpenFolder extends View {
           const folder = asked.pick ? await pickFolder({ prompt: "Open" }) : asked.open;
           if (!folder) continue;
           if (!absolute(normal(folder, home()))) {
-            notify({ title: "open-folder", body: `Give a whole path (/... or ~/...), not ${JSON.stringify(folder)}.`, level: "error" });
+            notify({ title: "open-folder", body: `Give a whole path (/..., ~/... or C:\\...), not ${JSON.stringify(folder)}.`, level: "error" });
             continue;
           }
           this.open(folder);

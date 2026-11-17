@@ -31,6 +31,15 @@ test("open-folder reads open:<folder> and pick", async () => {
   const { parse, absolute, normal } = await load("open-folder", ["parse", "absolute", "normal"]);
   expect(absolute(normal("~/x", "/home/me"))).toBe(true);
   expect(absolute(normal("code/x", "/home/me"))).toBe(false);
+  // Windows: drive and UNC paths count, a bare drive or a relative path doesn't.
+  expect(absolute(normal("C:\\Users\\me\\repo\\", "C:\\Users\\me"))).toBe(true);
+  expect(normal("C:\\Users\\me\\repo\\", "C:\\Users\\me")).toBe("C:\\Users\\me\\repo");
+  expect(normal("C:\\", "C:\\Users\\me")).toBe("C:\\");
+  expect(normal("~\\repo", "C:\\Users\\me\\")).toBe("C:\\Users\\me\\repo");
+  expect(absolute("C:/Users/me")).toBe(true);
+  expect(absolute("\\\\server\\share\\repo")).toBe(true);
+  expect(absolute("C:repo")).toBe(false);
+  expect(absolute("repo\\x")).toBe(false);
   expect(parse("open:/a/b:c")).toEqual({ open: "/a/b:c" });
   expect(parse("pick")).toEqual({ pick: true });
   expect(parse("open:")).toBeNull();
