@@ -107,7 +107,9 @@ function field() {
     fire(ev: string, cx: any) { handlers[ev]?.({}, cx); }, node: element() };
 }
 
-async function harness(dir: unknown, files: Record<string, string | null>) {
+async function harness(dir: unknown, files: Record<string, string | null>, opts: { holdRead?: boolean } = {}) {
+  let release = () => {};
+  const gate = opts.holdRead ? new Promise<void>((r) => { release = r; }) : Promise.resolve();
   const reads: string[] = [];
   const writes: [string, string, string | null][] = [];
   const store = new Map<string, string>();
@@ -115,7 +117,7 @@ async function harness(dir: unknown, files: Record<string, string | null>) {
   const pending: Promise<unknown>[] = [];
   const herdr = {
     props: () => (dir === undefined ? { pane: "p1" } : { dir, run: "run-1" }),
-    readTextFile: async (p: string) => { reads.push(p); return files[p] ?? null; },
+    readTextFile: async (p: string) => { reads.push(p); await gate; return files[p] ?? null; },
     writeTextFile: async (p: string, text: string, expected: string | null) => {
       if (expected === null && files[p] != null) throw new Error("exists");
       files[p] = text; writes.push([p, text, expected]); return null;
@@ -134,7 +136,7 @@ async function harness(dir: unknown, files: Record<string, string | null>) {
   const localStorage = { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => store.set(k, v), removeItem: (k: string) => store.delete(k) };
   const scope = { ...herdr, ...gpui, ...slate, localStorage };
   const Decisions = new Function(...Object.keys(scope), `${source}\nreturn Decisions;`)(...Object.values(scope));
-  const cx: any = { focus_handle: () => ({ focus() {} }), spawn: (fn: Function) => { pending.push(fn(cx)); }, notify() {}, stop_propagation() {} };
+  const cx: any = { timer: { after: (ms: number, fn: Function) => setTimeout(fn, 0) }, focus_handle: () => ({ focus() {} }), spawn: (fn: Function) => { pending.push(fn(cx)); }, notify() {}, stop_propagation() {} };
   const view = new Decisions();
   view.init({}, cx);
   await new Promise((r) => setTimeout(r, 0)); // the slate read; the focus loop never ends
@@ -145,7 +147,7 @@ async function harness(dir: unknown, files: Record<string, string | null>) {
     await n.click({}, cx);
   };
   const press = (key: string) => draw().key?.({ key, modifiers: {} }, cx);
-  return { view, cx, draw, click, press, reads, writes, store, fields, files };
+  return { view, cx, draw, click, press, reads, writes, store, fields, files, release: () => release() };
 }
 
 const files = () => ({ [`${DIR}/slate.json`]: JSON.stringify(SPEC), [`${DIR}/response.json`]: null as string | null });
@@ -197,7 +199,7 @@ test("letters typed into a field never pick options", async () => {
 
 test("an answer already saved shows as sent and is never replaced", async () => {
   const f = files();
-  f[`${DIR}/response.json`] = "{}";
+  f[`${DIR}/response.json`] = JSON.stringify({ run: "run-1" });
   const h = await harness(DIR, f);
   expect(textOf(h.draw())).toContain("Sent");
   expect(find(h.draw(), "send")).toBeUndefined();
@@ -246,4 +248,42 @@ test("a draft belongs to its run", async () => {
   const h = await harness(DIR, files());
   h.press("b");
   expect([...h.store.keys()]).toEqual([`draft:${DIR}:run-1`]);
+});
+
+test("a failed close marker keeps the pane open with a way to retry", async () => {
+  const f = files();
+  f[`${DIR}/closed.json`] = "{}"; // an older run's marker the script has not moved aside yet
+  const h = await harness(DIR, f);
+  h.view.slate.goTo(3);
+  await h.click("set-aside");
+  expect(textOf(h.draw())).toContain("Couldn't tell Claude");
+  delete f[`${DIR}/closed.json`];
+  h.files[`${DIR}/closed.json`] = null;
+  await h.click("set-aside");
+  expect(textOf(h.draw())).toContain("Closed without sending");
+});
+
+test("nothing changes while the answers are being saved", async () => {
+  const h = await harness(DIR, files());
+  h.view.saving = true;
+  h.press("b");
+  h.fields[0].type("late note", h.cx);
+  expect(h.view.slate.pick("db").choice).toBeNull();
+  expect(h.view.slate.pick("db").notes).toBe("");
+});
+
+test("closing while the slate loads records it, and the load does not reopen the pane", async () => {
+  const h = await harness(DIR, files(), { holdRead: true });
+  await h.view.close();
+  h.release();
+  await new Promise((r) => setTimeout(r, 0));
+  expect(JSON.parse(h.files[`${DIR}/closed.json`] ?? "{}").reason).toBe("pane closed");
+  expect(h.view.phase).toBe("loading");
+});
+
+test("a response from another run does not show as sent", async () => {
+  const f = files();
+  f[`${DIR}/response.json`] = JSON.stringify({ run: "older" });
+  const h = await harness(DIR, f);
+  expect(textOf(h.draw())).toContain("Which database?");
 });
