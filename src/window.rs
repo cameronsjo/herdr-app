@@ -3381,7 +3381,7 @@ impl AppWindow {
                 return;
             }
             n if n.starts_with("browser.") => if self.fork_dispatch(n, a, person, window, cx) { return }, // FORK(browser)
-            "tab.move_to_space" | "space.merge" => return self.fork_spaces(name, a, active_ctx, cx), // FORK(spaces)
+            "tab.move_to_space" | "space.merge" => self.fork_spaces(name, a, active_ctx, cx), // FORK(spaces)
             "terminal.select_all" => {
                 let view = match Self::owned(a, "terminal") {
                     Some(address) => self.shown_terminal_view(&address, window, cx),

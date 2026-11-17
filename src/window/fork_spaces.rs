@@ -45,15 +45,25 @@ impl AppWindow {
         if let Err(error) = self.require_document(source.machine.as_deref()) {
             return self.fail(error);
         }
-        // A terminal getting or losing its pane is labeled for its old place when
-        // that ends: wait for it.
-        let moving = source
+        // The moving tabs' terminals, and the ones labeled for those tabs that
+        // have no pane yet (started by a script, or waiting for their layout):
+        // all of them get the new space's label.
+        let moving: Vec<_> = source
             .tabs
             .iter()
-            .filter(|c| tab.as_ref().is_none_or(|t| c.id == *t));
-        if moving
+            .filter(|c| tab.as_ref().is_none_or(|t| c.id == *t))
+            .collect();
+        let ids: Vec<String> = moving.iter().map(|c| c.id.clone()).collect();
+        let mut terminals: Vec<String> = moving
+            .iter()
             .flat_map(|c| model::addresses(&c.root))
-            .any(|t| self.changing_terminals.contains(&t))
+            .collect();
+        terminals.extend(self.labeled_for(&ids));
+        // A terminal getting or losing its pane, or whose last move is still being
+        // labeled, is labeled for its old place when that ends: wait for it.
+        if terminals
+            .iter()
+            .any(|t| self.changing_terminals.contains(t))
         {
             return self.fail(
                 "a terminal here is still getting or losing its pane; try again in a moment",
@@ -70,7 +80,7 @@ impl AppWindow {
         };
         match moved {
             Ok(m) => {
-                self.relabel_space(&m.terminals, &into, cx);
+                self.relabel_space(terminals, &into, cx);
                 self.answer(Ok(
                     json!({ "ok": true, "space": into, "closed": m.closed.then_some(m.from) }),
                 ));
@@ -79,24 +89,41 @@ impl AppWindow {
         }
     }
 
+    /// Live terminals with no pane whose `herdr.tab` label names one of `tabs`.
+    fn labeled_for(&self, tabs: &[String]) -> Vec<String> {
+        self.live
+            .iter()
+            .filter(|(a, _)| self.model.pane_of(a).is_none())
+            .filter(|(a, r)| {
+                let machine = a.split_once('/').map(|(m, _)| m);
+                let label = r.pointer("/labels/herdr.tab").and_then(Value::as_str);
+                tabs.iter()
+                    .any(|t| label == Some(crate::mirror::local(t, machine)))
+            })
+            .map(|(a, _)| a.clone())
+            .collect()
+    }
+
     /// Points the moved terminals' `herdr.space` label at their new space, so a
     /// terminal that loses its pane (a lost layout) is put back there, not in the
-    /// old space. The tab keeps its id, so `herdr.tab` stays. Best effort.
-    fn relabel_space(&self, terminals: &[String], space: &str, cx: &mut Context<Self>) {
+    /// old space. The tab keeps its id, so `herdr.tab` stays. Each terminal counts
+    /// as changing until its label is written, as for `terminal.park`: no park,
+    /// move or adoption overtakes it. A failed write is logged.
+    fn relabel_space(&mut self, terminals: Vec<String>, space: &str, cx: &mut Context<Self>) {
         for addr in terminals {
             let machine = addr.split_once('/').map(|(m, _)| m);
             let params = json!({ "terminal": addr, "labels": { "herdr.space": crate::mirror::local(space, machine) } });
             let core = self.core.clone();
-            let addr = addr.clone();
-            cx.spawn(async move |_, cx| {
-                let Err(e) = cx
+            self.changing_terminals.insert(addr.clone());
+            cx.spawn(async move |this, cx| {
+                let result = cx
                     .background_executor()
                     .spawn(async move { core.call("terminal.label", params) })
-                    .await
-                else {
-                    return;
-                };
-                tracing::warn!("herdr.space label for {addr}: {e:#}");
+                    .await;
+                if let Err(e) = result {
+                    tracing::warn!("herdr.space label for {addr}: {e:#}");
+                }
+                let _ = this.update(cx, |this, _| this.changing_terminals.remove(&addr));
             })
             .detach();
         }
@@ -159,10 +186,19 @@ mod tests {
                 .add_space("s2", "two", "/", super::Tab::new("t3", "", "c", "term-c"));
             this.model
                 .add_space("s3", "three", "/", super::Tab::new("t4", "", "d", "term-d"));
+            // term-e has no pane yet but is labeled for t2: it follows t2's moves.
+            for t in ["term-a", "term-b", "term-c", "term-d", "term-e"] {
+                this.live.insert(t.into(), json!({ "state": "live" }));
+            }
+            this.live.insert(
+                "term-e".into(),
+                json!({ "state": "live", "labels": { "herdr.space": "s1", "herdr.tab": "t2" } }),
+            );
             this.model.select_tab("t1");
             this.documents.entry(String::new()).or_default().available = true;
             this.sync(window, cx);
-            // The shown tab, by default, to the front of s2: it stays shown.
+            // The shown tab, by default, to the front of s2: it stays shown, and the
+            // window shows it there (the `where` label follows).
             let out = this.run_as(
                 "tab.move_to_space",
                 json!({ "space": "s2", "index": 1 }),
@@ -177,7 +213,21 @@ mod tests {
                 this.model.active_tab().map(|c| c.id.clone()),
                 Some("t1".into())
             );
-            // The last tab of s1 takes s1 with it.
+            assert_eq!(
+                this.written_where.get("term-a").map(String::as_str),
+                Some("two / 1")
+            );
+            // Its label is still being written: a second move of it waits.
+            assert!(this.changing_terminals.contains("term-a"));
+            let out = this.run_as(
+                "tab.move_to_space",
+                json!({ "id": "t1", "space": "s3" }),
+                false,
+                window,
+                cx,
+            );
+            assert!(out.get("error").is_some(), "{out}");
+            // The last tab of s1 takes s1 with it; term-e, labeled for t2, is relabeled too.
             let out = this.run_as(
                 "tab.move_to_space",
                 json!({ "id": "t2", "space": "s3" }),
@@ -188,7 +238,12 @@ mod tests {
             assert_eq!(out["closed"], json!("s1"));
             assert_eq!(tabs(this, "s1"), None);
             assert_eq!(tabs(this, "s3"), Some(vec!["t4".into(), "t2".into()]));
-            // s2 into s3, in order.
+            assert!(this.changing_terminals.contains("term-e"));
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |this, window, cx| {
+            // The labels are written (here the offline core refuses; nothing waits).
+            assert!(this.changing_terminals.is_empty());
             let out = this.run_as(
                 "space.merge",
                 json!({ "id": "s2", "into": "s3" }),
