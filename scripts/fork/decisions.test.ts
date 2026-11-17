@@ -107,8 +107,10 @@ function field() {
     fire(ev: string, cx: any) { handlers[ev]?.({}, cx); }, node: element() };
 }
 
-async function harness(dir: unknown, files: Record<string, string | null>, opts: { holdRead?: boolean; failRead?: boolean } = {}) {
+async function harness(dir: unknown, files: Record<string, string | null>, opts: { holdRead?: boolean; failRead?: boolean; holdWrite?: boolean; failWrite?: boolean } = {}) {
   let release = () => {};
+  let releaseWrite = () => {};
+  const writeGate = opts.holdWrite ? new Promise<void>((r) => { releaseWrite = r; }) : Promise.resolve();
   const gate = opts.holdRead ? new Promise<void>((r) => { release = r; }) : Promise.resolve();
   const reads: string[] = [];
   const writes: [string, string, string | null][] = [];
@@ -119,6 +121,8 @@ async function harness(dir: unknown, files: Record<string, string | null>, opts:
     props: () => (dir === undefined ? { pane: "p1" } : { dir, run: "run-1" }),
     readTextFile: async (p: string) => { reads.push(p); await gate; if (opts.failRead) throw new Error("read failed"); return files[p] ?? null; },
     writeTextFile: async (p: string, text: string, expected: string | null) => {
+      await writeGate;
+      if (opts.failWrite) throw new Error("disk full");
       if (expected === null && files[p] != null) throw new Error("exists");
       files[p] = text; writes.push([p, text, expected]); return null;
     },
@@ -147,7 +151,7 @@ async function harness(dir: unknown, files: Record<string, string | null>, opts:
     await n.click({}, cx);
   };
   const press = (key: string) => draw().key?.({ key, modifiers: {} }, cx);
-  return { view, cx, draw, click, press, reads, writes, store, fields, files, release: () => release() };
+  return { view, cx, draw, click, press, reads, writes, store, fields, files, release: () => release(), releaseWrite: () => releaseWrite() };
 }
 
 const files = () => ({ [`${DIR}/slate.json`]: JSON.stringify(SPEC), [`${DIR}/response.json`]: null as string | null });
@@ -298,6 +302,33 @@ test("text typed while saving goes back to what is being saved", async () => {
   expect(extra.value()).toBe("");
   expect(h.view.slate.notes).toBe("");
 });
+
+for (const fails of [false, true]) {
+  test(`text typed during a send that ${fails ? "fails" : "succeeds"} goes back to what is being saved`, async () => {
+    const h = await harness(DIR, files(), { holdWrite: true, failWrite: fails });
+    h.view.slate.goTo(3);
+    h.view.loadFields();
+    const sending = h.click("send");
+    expect(h.view.saving).toBe(true);
+    const extra = h.fields[2];
+    extra.type("typed too late", h.cx);
+    expect(extra.value()).toBe("");
+    h.releaseWrite();
+    await sending;
+    expect(h.view.saving).toBe(false);
+    expect(h.view.slate.notes).toBe("");
+    if (fails) {
+      expect(h.view.phase).toBe("open");
+      expect(h.files[`${DIR}/response.json`]).toBeNull();
+      expect(textOf(h.draw())).toContain("Nothing was sent");
+      extra.type("after the failure", h.cx);
+      expect(h.view.slate.notes).toBe("after the failure");
+    } else {
+      expect(h.view.phase).toBe("sent");
+      expect(JSON.parse(h.files[`${DIR}/response.json`] ?? "{}").notes ?? "").toBe("");
+    }
+  });
+}
 
 test("a read that fails after the pane closed leaves only the close marker", async () => {
   const h = await harness(DIR, files(), { holdRead: true, failRead: true });
