@@ -314,11 +314,12 @@ the socket and its folder are this user's and nobody else may write to the
 folder. Then it tries the socket pinned in the terminal's
 `AGENT_BROWSER_PLUGINS` when it started, then the default app home's. It
 skips a socket whose listener runs as another user (`getpeereid`, which a
-swapped symlink can't fake), and when an app answers that it doesn't hold
-the terminal, it asks the next one; the first app's error stands if none
-does. So a
-terminal started by one build keeps working after you switch to another
-build on another app home (cameronsjo/herdr-app#6).
+swapped symlink can't fake). An app that doesn't hold the terminal (it
+doesn't know it, has it parked, or is on another core) passes it on; the
+first app that holds it answers, and its refusal (agent access off, no
+browser, two browsers) is the answer. So a terminal started by one build
+keeps working after you switch to another build on another app home
+(cameronsjo/herdr-app#6).
 
 How it works: Herdr gives its local terminals `AGENT_BROWSER_PROVIDER=herdr`,
 `AGENT_BROWSER_PLUGINS` (Herdr's own provider, `herdr-app

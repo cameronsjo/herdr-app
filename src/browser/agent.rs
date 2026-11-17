@@ -887,18 +887,67 @@ fn caller_facts(terminal: Option<&str>) -> (Option<String>, Option<String>) {
     facts(lines)
 }
 
-/// One attach request to one app: its reply, or the error it gave.
+/// One app's answer to an attach request.
+#[derive(Debug, PartialEq)]
+pub enum Asked {
+    /// It holds the terminal: the reply goes to agent-browser.
+    Answer(Value),
+    /// It doesn't hold the terminal ([`not_here`]): ask the next app.
+    NotHere(String),
+    /// It holds the terminal and refused (access off, no browser, two
+    /// browsers): that refusal is the answer.
+    Refused(String),
+    /// No app answered here (no listener, another user's, a broken reply):
+    /// ask the next app.
+    Unreachable(Option<String>),
+}
+
+/// Whether an app's error means it doesn't hold the terminal: it doesn't
+/// know it, has it parked, or is on another core.
+pub fn not_here(terminal: &str, error: &str) -> bool {
+    error == format!("no terminal {terminal} in Herdr") || error == crate::browser::parked(terminal) || error == crate::browser::other_core(terminal)
+}
+
+/// Asks each app in turn ([`provider_sockets`] order). The first answer or
+/// refusal from an app that holds the terminal ends it. Otherwise the first
+/// app's "not here" beats a socket that couldn't be asked; None if no app
+/// said anything (the caller's "Herdr is not running").
+pub fn ask_in_turn<S>(sockets: &[S], mut ask: impl FnMut(&S) -> Asked) -> Result<Value, Option<String>> {
+    let (mut not_held, mut unreachable) = (None, None);
+    for s in sockets {
+        match ask(s) {
+            Asked::Answer(v) => return Ok(v),
+            Asked::Refused(e) => return Err(Some(e)),
+            Asked::NotHere(e) => {
+                not_held.get_or_insert(e);
+            }
+            Asked::Unreachable(e) => {
+                if unreachable.is_none() {
+                    unreachable = e;
+                }
+            }
+        }
+    }
+    Err(not_held.or(unreachable))
+}
+
+/// One attach request to one app over a connected socket.
 #[cfg(unix)]
-fn ask_app(mut stream: &std::os::unix::net::UnixStream, attach: &Value) -> Result<Value, String> {
+fn ask_app(mut stream: &std::os::unix::net::UnixStream, attach: &Value, terminal: &str) -> Asked {
     use std::io::{BufRead, BufReader, Read, Write};
     let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
-    stream.write_all(format!("{}\n", json!({ "attach": attach })).as_bytes()).map_err(|e| format!("Herdr did not take the request: {e}"))?;
+    if let Err(e) = stream.write_all(format!("{}\n", json!({ "attach": attach })).as_bytes()) {
+        return Asked::Unreachable(Some(format!("Herdr did not take the request: {e}")));
+    }
     let mut line = String::new();
-    BufReader::new(stream).take(MAX_FRAME as u64).read_line(&mut line).map_err(|e| format!("Herdr did not answer: {e}"))?;
-    let reply: Value = serde_json::from_str(&line).map_err(|_| "Herdr's answer is not JSON".to_owned())?;
+    if let Err(e) = BufReader::new(stream).take(MAX_FRAME as u64).read_line(&mut line) {
+        return Asked::Unreachable(Some(format!("Herdr did not answer: {e}")));
+    }
+    let Ok(reply) = serde_json::from_str::<Value>(&line) else { return Asked::Unreachable(Some("Herdr's answer is not JSON".to_owned())) };
     match reply.get("error").and_then(Value::as_str) {
-        Some(e) => Err(e.to_owned()),
-        None => Ok(reply),
+        Some(e) if not_here(terminal, e) => Asked::NotHere(e.to_owned()),
+        Some(e) => Asked::Refused(e.to_owned()),
+        None => Asked::Answer(reply),
     }
 }
 
@@ -932,24 +981,18 @@ pub fn provider_main(args: &[String]) -> i32 {
             attach["core"] = core.map_or(Value::Null, Value::String);
             let labeled = labeled.filter(|s| private_socket(std::path::Path::new(s)));
             let sockets = provider_sockets(labeled.as_deref(), pinned.as_deref(), &default);
-            // Each app in turn: a socket that isn't this user's listener is
-            // skipped (the path checks above can race a swapped symlink; the
-            // peer's uid can't), and an app that doesn't hold the terminal
-            // passes it on. The first app's error stands if none takes it.
-            let mut first_error = None;
-            for s in &sockets {
-                let Ok(stream) = std::os::unix::net::UnixStream::connect(s) else { continue };
+            // A socket that isn't this user's listener is skipped: the path
+            // checks above can race a swapped symlink, the peer's uid can't.
+            let terminal = attach["terminal"].as_str().unwrap_or_default().to_owned();
+            ask_in_turn(&sockets, |s| {
+                let Ok(stream) = std::os::unix::net::UnixStream::connect(s) else { return Asked::Unreachable(None) };
                 if !crate::browser::socket::same_user(&stream) {
-                    continue;
+                    tracing::warn!("browser: skipping {}: its listener runs as another user", crate::browser::log_safe(s));
+                    return Asked::Unreachable(Some(format!("the socket at {s} is not this user's")));
                 }
-                match ask_app(&stream, &attach) {
-                    Ok(reply) => return Ok(reply),
-                    Err(e) => {
-                        first_error.get_or_insert(e);
-                    }
-                }
-            }
-            Err(first_error.unwrap_or_else(|| no_app(&sockets.join(", "))))
+                ask_app(&stream, &attach, &terminal)
+            })
+            .map_err(|e| e.unwrap_or_else(|| no_app(&sockets.join(", "))))
         }),
         Err(e) => json!({ "protocol": PROTOCOL, "success": false, "error": e }),
     };
@@ -1039,6 +1082,34 @@ mod tests {
         std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o777)).unwrap();
         assert!(!private_socket(&sock));
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn the_provider_stops_at_the_app_holding_the_terminal() {
+        use crate::browser::{other_core, parked};
+        let t = "t3";
+        assert!(not_here(t, &format!("no terminal {t} in Herdr")) && not_here(t, &parked(t)) && not_here(t, &other_core(t)));
+        assert!(!not_here(t, &access_off("b1")) && !not_here(t, &no_browser()) && !not_here(t, &parked("t4")));
+        let ok = json!({ "cdpUrl": "ws://x" });
+        let run = |answers: Vec<Asked>| {
+            let mut answers = answers.into_iter();
+            let mut asked = 0;
+            let r = ask_in_turn(&["a", "b", "c"], |_| {
+                asked += 1;
+                answers.next().unwrap_or(Asked::Unreachable(None))
+            });
+            (r, asked)
+        };
+        // An answer, or the holder's refusal, ends it.
+        assert_eq!(run(vec![Asked::Unreachable(None), Asked::Answer(ok.clone())]), (Ok(ok.clone()), 2));
+        assert_eq!(run(vec![Asked::Refused(access_off("b1")), Asked::Answer(ok.clone())]), (Err(Some(access_off("b1"))), 1));
+        // Not here passes it on, and beats a socket that couldn't be asked.
+        assert_eq!(run(vec![Asked::NotHere(parked(t)), Asked::Answer(ok.clone())]), (Ok(ok.clone()), 2));
+        assert_eq!(run(vec![Asked::Unreachable(Some("Herdr did not answer".into())), Asked::NotHere(parked(t))]), (Err(Some(parked(t))), 3));
+        assert_eq!(run(vec![Asked::NotHere(parked(t)), Asked::Refused(no_browser())]), (Err(Some(no_browser())), 2));
+        assert_eq!(run(vec![Asked::Unreachable(None), Asked::Unreachable(Some("Herdr did not answer".into()))]), (Err(Some("Herdr did not answer".into())), 3));
+        // Nobody there: the caller says Herdr isn't running.
+        assert_eq!(run(vec![]), (Err(None), 3));
     }
 
     // The provider runs only on unix, and its paths are unix paths.
