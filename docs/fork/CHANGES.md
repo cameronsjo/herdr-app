@@ -49,6 +49,13 @@ No upstream renames or deletions of fork-touched files. 18 conflict hunks in 10 
 | `Cargo.lock` | | | upstream's, then `cargo metadata` |
 | `THIRD-PARTY-NOTICES` | | | upstream's, then `bun scripts/notices.ts` (cargo-about 0.9.3 needs `--features cli` to install the binary) |
 
+## Font picker
+
+Added 2026-11-17 (Linear CAM-923). Upstream's settings font picker lists only the first 200 font families (`.slice(0, 200)`), so on a Mac with more families than that, fonts late in the alphabet never show unless you search for them. The fork lists every family through a `uniform_list`, which draws only the rows on screen; each row is drawn in its own font, which is why a plain scroll area of every font would be slow to open. Rows live in the fork-only `defaults/frame/settings/fork-font-list.js`.
+
+- Seams: `defaults/frame/settings/main.js` the `fontRows` import, the `matches` line (no cap) and the `fontRows(...)` call that replaces upstream's scroll area (upstream's `item` helper, used only there, is removed); `src/mods/render_tests.rs` `font_pickers_contain_scroll_on_the_wrapper` expects `uniform_list` in place of `overflow_y_scrollbar`, plus the fork test `font_picker_lists_every_installed_font`. All marked `FORK(font-picker)`.
+- If upstream lifts the cap or virtualizes its list, drop the fork file and take upstream's.
+
 ## Attention queue
 
 Added 2026-11-17 (cameronsjo/herdr-app#16, Linear CAM-921). What it does: `docs/fork/attention.md`. Rules in `src/fork/attention.rs`, the window's part in `src/window/fork_attention.rs`.

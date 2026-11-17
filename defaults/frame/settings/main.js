@@ -3,6 +3,7 @@
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, InputState, Input, Popup } from "gpui-base";
 import { hc, run, theme, themes, fonts, updates, telemetry, settings, layouts, shared, appHome, readTextFile, writeTextFile, playSound, props, closeOverlay, notify, window } from "herdr";
+import { fontRows } from "./fork-font-list.js"; // FORK(font-picker)
 
 const I = (name) => `frame/settings/${name}.svg`;
 
@@ -435,7 +436,7 @@ export default class Settings extends View {
 
   fontList(t, which, def) {
     const q = this.filter.toLowerCase();
-    const matches = fonts().filter((f) => f.toLowerCase().includes(q)).slice(0, 200);
+    const matches = fonts().filter((f) => f.toLowerCase().includes(q)); // FORK(font-picker): no 200 cap
     const choose = (name, cx) => {
       this.change((p) => {
         if (name === null) delete p[which];
@@ -445,16 +446,6 @@ export default class Settings extends View {
       this.handle.focus();
       cx.notify();
     };
-    const item = (id, label, family, onClick) =>
-      div()
-        .id(id)
-        .px(10)
-        .py(5)
-        .rounded(6)
-        .cursor_pointer()
-        .hover((s) => s.bg(t.hover))
-        .on_click(onClick)
-        .child(div().font_family(family).text_size(13.5).text_color(t.foreground).child(label));
     return v_flex()
       .id(`st-font-list-${which}`)
       .w(360)
@@ -478,15 +469,7 @@ export default class Settings extends View {
           .text_size(13)
           .child(Input.new(this.fontInput).h(28).text_color(t.foreground)),
       )
-      .child(
-        div()
-          .id(`st-fl-${which}`)
-          .h(200)
-          .p(4)
-          .overflow_y_scrollbar()
-          .when(!q, (el) => el.child(item(`st-fd-${which}`, `Default (${def})`, def, (_e, cx) => choose(null, cx))))
-          .children(matches.map((f, i) => item(`st-fi-${which}-${i}`, f, f, (_e, cx) => choose(f, cx)))),
-      );
+      .child(fontRows(t, which, def, q ? matches : [null, ...matches], choose)); // FORK(font-picker)
   }
 
   look(t, cx) {
