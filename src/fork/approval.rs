@@ -16,6 +16,10 @@ use sha2::{Digest, Sha256};
 /// A numbered menu at the bottom of a blocked agent's screen.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Prompt {
+    /// What is being asked about: the lines above the question, up to a
+    /// box's or rule's top edge (at most [`CONTEXT`]). Claude Code shows the
+    /// Bash command here, so it is part of the token.
+    pub context: Vec<String>,
     /// The line above the options (often the question), "" if none.
     pub question: String,
     /// The options, numbered from 1, in order.
@@ -26,10 +30,35 @@ pub struct Prompt {
 /// a box's bottom edge, the input line).
 const BELOW: usize = 6;
 
+/// How many lines above the question are read as its context.
+const CONTEXT: usize = 12;
+
+/// The most options a menu may have: answers are one digit.
+const MAX_OPTIONS: usize = 9;
+
+/// Screen text as shown to a caller: no control characters and no bidi
+/// formatting, which could make a label read as something else.
+fn clean(s: &str) -> String {
+    s.chars().filter(|c| !c.is_control() && !matches!(*c, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')).collect()
+}
+
+/// A line drawn only of box or rule characters: a prompt panel's top edge.
+fn edge(line: &str) -> bool {
+    let t = line.trim();
+    !t.is_empty() && t.chars().all(|c| matches!(c, '─' | '━' | '═' | '╭' | '╮' | '╰' | '╯' | '┌' | '┐' | '└' | '┘' | '│' | '┃' | '║' | '-' | '='))
+}
+
 /// One screen line without a box's edges and the padding inside them.
 fn unboxed(line: &str) -> &str {
-    let edges: &[char] = &['│', '┃', '║', '|', '╭', '╮', '╰', '╯', '─', '━', '═', '┌', '┐', '└', '┘'];
-    line.trim().trim_matches(edges).trim()
+    line.trim().trim_matches(EDGES).trim()
+}
+
+const EDGES: &[char] = &['│', '┃', '║', '|', '╭', '╮', '╰', '╯', '─', '━', '═', '┌', '┐', '└', '┘', '├', '┤', '╞', '╡'];
+
+/// How far in a line's text starts, inside a box's left edge.
+fn indent(line: &str) -> usize {
+    let inside = line.trim_start().strip_prefix(EDGES).unwrap_or(line);
+    inside.chars().take_while(|c| !c.is_ascii_digit() && !c.is_alphanumeric()).count()
 }
 
 /// `n` and the label of an option line: `1. Yes`, `❯ 2) No`, `› 3. Skip`.
@@ -71,54 +100,99 @@ pub fn parse(screen: &str) -> Option<Prompt> {
         }
     }
     let last = last?;
+    // Up through the run: option lines, and between them lines indented
+    // deeper than the option below them (a wrapped label, a description),
+    // which join the label above.
     let mut first = last;
-    while first > 0 && option(lines[first - 1]).is_some() {
-        first -= 1;
+    let mut below_indent = indent(lines[last]);
+    let mut i = last;
+    while i > floor {
+        let up = lines[i - 1];
+        if option(up).is_some() {
+            first = i - 1;
+            below_indent = indent(up);
+        } else if unboxed(up).is_empty() || indent(up) <= below_indent {
+            break;
+        }
+        i -= 1;
     }
-    let options: Vec<(usize, String)> = lines[first..=last].iter().filter_map(|l| option(l)).collect();
-    if options.len() < 2 || options.iter().enumerate().any(|(i, (n, _))| *n != i + 1) {
+    let mut options: Vec<(usize, String)> = Vec::new();
+    for l in &lines[first..=last] {
+        match (option(l), options.last_mut()) {
+            (Some(o), _) => options.push(o),
+            (None, Some((_, label))) => {
+                label.push(' ');
+                label.push_str(unboxed(l));
+            }
+            (None, None) => {}
+        }
+    }
+    if options.len() < 2 || options.len() > MAX_OPTIONS || options.iter().enumerate().any(|(i, (n, _))| *n != i + 1) {
         return None;
     }
-    let question = lines[..first].iter().rev().map(|l| unboxed(l)).find(|l| !l.is_empty()).unwrap_or("").to_owned();
-    Some(Prompt { question, options: options.into_iter().map(|(_, l)| l).collect() })
+    // The question, then its context up to the panel's top edge.
+    let mut above = lines[..first].iter().rev().take_while(|l| !edge(l)).map(|l| clean(unboxed(l))).filter(|l| !l.is_empty());
+    let question = above.next().unwrap_or_default();
+    let mut context: Vec<String> = above.take(CONTEXT).collect();
+    context.reverse();
+    Some(Prompt { context, question, options: options.into_iter().map(|(_, l)| clean(&l)).collect() })
 }
 
-/// The token for one terminal's prompt: the same question and options on the
-/// same terminal give the same token.
-pub fn token(terminal: &str, p: &Prompt) -> String {
+/// The token for one prompt: the terminal, its turn (the core counts one
+/// each time the agent stops working, so the next prompt after an answer is
+/// a new turn), and everything the prompt shows.
+pub fn token(terminal: &str, turn: u64, p: &Prompt) -> String {
     let mut h = Sha256::new();
-    for part in std::iter::once(terminal).chain(std::iter::once(p.question.as_str())).chain(p.options.iter().map(String::as_str)) {
+    let turn = turn.to_string();
+    let head = [terminal, turn.as_str(), "\u{1}"].into_iter();
+    let parts = head.chain(p.context.iter().map(String::as_str)).chain(["\u{1}", p.question.as_str()]).chain(p.options.iter().map(String::as_str));
+    for part in parts {
         h.update(part.as_bytes());
         h.update([0]);
     }
     h.finalize().iter().take(8).map(|b| format!("{b:02x}")).collect()
 }
 
-/// The option an answer means: a number, `approve` (the first option that
-/// starts with yes, allow or approve) or `deny` (the first that starts with
-/// no, deny or reject).
+/// Words that make an option a standing grant, not a one-time answer.
+const STANDING: &[&str] = &["always", "don't ask", "dont ask", "do not ask", "session", "all ", "every", "remember", "bypass", "auto-accept", "auto accept", "without asking"];
+
+/// The option an answer means: a number, `approve` (the one option that
+/// starts with yes, allow or approve and grants nothing beyond this once)
+/// or `deny` (the one that starts with no, deny or reject). More than one
+/// match asks for a number.
 pub fn choose(p: &Prompt, answer: &str) -> Result<usize, String> {
-    let starts = |words: &[&str]| {
-        p.options.iter().position(|o| {
-            let o = o.to_lowercase();
-            words.iter().any(|w| o == *w || o.starts_with(&format!("{w} ")) || o.starts_with(&format!("{w},")))
-        })
+    let one = |words: &[&str], what: &str| -> Result<usize, String> {
+        let found: Vec<usize> = (0..p.options.len())
+            .filter(|&i| {
+                let o = p.options[i].to_lowercase();
+                words.iter().any(|w| o == *w || o.starts_with(&format!("{w} ")) || o.starts_with(&format!("{w},")) || o.starts_with(&format!("{w}.")))
+                    && (what == "denies" || !STANDING.iter().any(|s| o.contains(s)))
+            })
+            .collect();
+        // Several: only a bare "Yes" (or "Yes (y)") is clearly the plain one.
+        let bare = |i: &usize| words.iter().any(|w| p.options[*i].to_lowercase().trim_end_matches("(y)").trim_end_matches("(n)").trim() == *w);
+        let found = if found.len() > 1 { found.iter().copied().filter(bare).collect() } else { found };
+        match found[..] {
+            [i] => Ok(i + 1),
+            [] => Err(format!("no option here {what} once (none starts with {}): answer with its number", words.join(", "))),
+            _ => Err(format!("more than one option here {what}: answer with its number")),
+        }
     };
     let n = match answer {
-        "approve" | "yes" | "allow" => starts(&["yes", "allow", "approve"]).map(|i| i + 1).ok_or("no option here approves (none starts with yes, allow or approve): answer with its number")?,
-        "deny" | "no" | "reject" => starts(&["no", "deny", "reject"]).map(|i| i + 1).ok_or("no option here denies (none starts with no, deny or reject): answer with its number")?,
+        "approve" | "yes" | "allow" => one(&["yes", "allow", "approve"], "approves")?,
+        "deny" | "no" | "reject" => one(&["no", "deny", "reject"], "denies")?,
         n => n.parse::<usize>().map_err(|_| format!("answer {n:?}: give an option's number, approve or deny"))?,
     };
-    if n == 0 || n > p.options.len() || n > 9 {
-        return Err(format!("there is no option {n} here (1 to {})", p.options.len().min(9)));
+    if n == 0 || n > p.options.len() {
+        return Err(format!("there is no option {n} here (1 to {})", p.options.len()));
     }
     Ok(n)
 }
 
 /// What `show` prints for a blocked terminal's prompt.
-pub fn shown(terminal: &str, kind: Option<&str>, p: &Prompt) -> Value {
+pub fn shown(terminal: &str, kind: Option<&str>, turn: u64, p: &Prompt) -> Value {
     let options: Vec<Value> = p.options.iter().enumerate().map(|(i, l)| json!({ "n": i + 1, "label": l })).collect();
-    json!({ "terminal": terminal, "kind": kind, "question": p.question, "options": options, "token": token(terminal, p) })
+    json!({ "terminal": terminal, "kind": kind, "context": p.context, "question": p.question, "options": options, "token": token(terminal, turn, p) })
 }
 
 /// The terminal's word (its program's 7501 state) and blocked kind, from a
@@ -129,48 +203,108 @@ fn state(rec: &Value) -> (Option<&str>, Option<&str>) {
     (word, status.and_then(|s| s.get("kind")).and_then(Value::as_str))
 }
 
-/// The prompt a terminal is blocked on now, with its kind.
-fn current(core: &crate::hc::Core, terminal: &str) -> Result<(Option<String>, Prompt), String> {
-    let rec = core.call("terminal.get", json!({ "terminal": terminal })).map_err(|e| format!("{e:#}"))?;
-    let (word, kind) = state(&rec);
-    if word != Some("blocked") {
-        return Err(format!("terminal {terminal} is not blocked (it is {}): nothing to answer", word.unwrap_or("not an agent")));
-    }
-    let kind = kind.map(str::to_owned);
-    let read = core.call("terminal.read", json!({ "terminal": terminal, "lines": 0 })).map_err(|e| format!("{e:#}"))?;
-    let text = read.get("text").and_then(Value::as_str).unwrap_or_default();
-    let p = parse(text).ok_or_else(|| format!("terminal {terminal} is blocked, but its screen shows no numbered options: answer it in its pane"))?;
-    Ok((kind, p))
+/// Why `approval` stopped: the exit code and the message.
+type Stop = (i32, String);
+
+/// Exit 1: the core or the request failed.
+fn failed(e: impl std::fmt::Display) -> Stop {
+    (1, e.to_string())
 }
 
-/// `herdr-app approval show|answer ...`: prints JSON on stdout, an error on
-/// stderr. 0 on success, 1 when the core or the prompt says no, 2 on usage.
+/// The prompt a terminal is blocked on now, with its kind and turn. Exit 3
+/// when there is nothing to answer.
+fn current(core: &crate::hc::Core, terminal: &str) -> Result<(Option<String>, u64, Prompt), Stop> {
+    let rec = core.call("terminal.get", json!({ "terminal": terminal })).map_err(|e| failed(format!("{e:#}")))?;
+    let (word, kind) = state(&rec);
+    if word != Some("blocked") {
+        return Err((3, format!("terminal {terminal} is not blocked (it is {}): nothing to answer", word.unwrap_or("not an agent"))));
+    }
+    let kind = kind.map(str::to_owned);
+    let turn = rec.get("turn").and_then(Value::as_u64).unwrap_or(0);
+    let read = core.call("terminal.read", json!({ "terminal": terminal, "lines": 0 })).map_err(|e| failed(format!("{e:#}")))?;
+    let text = read.get("text").and_then(Value::as_str).unwrap_or_default();
+    let p = parse(text).ok_or_else(|| (3, format!("terminal {terminal} is blocked, but its screen shows no numbered options: answer it in its pane")))?;
+    Ok((kind, turn, p))
+}
+
+/// How long `answer` waits for the key to go in: the core holds it while a
+/// person types in that pane.
+const KEYS_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// `answer`'s arguments, `--token` anywhere: terminal, answer, token.
+fn answer_args(rest: &[String]) -> Option<(&str, &str, &str)> {
+    let mut token = None;
+    let mut plain = Vec::new();
+    let mut it = rest.iter();
+    while let Some(a) = it.next() {
+        if a == "--token" {
+            token = Some(it.next()?.as_str());
+        } else if let Some(t) = a.strip_prefix("--token=") {
+            token = Some(t);
+        } else {
+            plain.push(a.as_str());
+        }
+    }
+    match (plain.as_slice(), token) {
+        ([terminal, answer], Some(t)) => Some((*terminal, *answer, t)),
+        _ => None,
+    }
+}
+
+fn answer(core: &crate::hc::Core, terminal: &str, answer: &str, want: &str) -> Result<Value, Stop> {
+    let (_, turn, p) = current(core, terminal)?;
+    if token(terminal, turn, &p) != want {
+        return Err((3, format!("terminal {terminal}'s prompt changed since that token: run herdr-app approval show {terminal} again")));
+    }
+    let n = choose(&p, answer).map_err(|e| (2, e))?;
+    // The core holds keys while a person types in the pane, and a person
+    // answering there moves the agent on: its turn then differs, and this
+    // key went to whatever came next.
+    let sent = core.call_timeout("terminal.keys", json!({ "terminal": terminal, "keys": [n.to_string()] }), KEYS_WAIT).map_err(|e| {
+        failed(format!("{e:#} (someone may be typing in terminal {terminal}'s pane; the key may still go in: check the pane before trying again)"))
+    })?;
+    let at = sent.get("turn").and_then(Value::as_u64).unwrap_or(turn);
+    if at != turn {
+        return Err((4, format!("pressed {n} on terminal {terminal}, but it moved on while the key waited for typing in its pane to stop: the key may have answered a later prompt; check the pane")));
+    }
+    Ok(json!({ "terminal": terminal, "answered": n, "label": p.options[n - 1] }))
+}
+
+/// `herdr-app approval show|answer ...`: JSON on stdout, an error on stderr.
+/// Exit 0 on success, 1 when the core fails, 2 on usage or an answer that
+/// names no option, 3 when there is nothing to answer or the token is
+/// stale (run `show` again), 4 when the key may have gone to a later prompt.
 pub fn main(args: &[String]) -> i32 {
     const USAGE: &str = "usage: herdr-app approval show <terminal> | herdr-app approval answer <terminal> <number|approve|deny> --token <token>";
-    let run = |f: &dyn Fn(&crate::hc::Core) -> Result<Value, String>| -> i32 {
-        let out = crate::hc::Core::connect().map_err(|e| format!("{e:#}")).and_then(|core| f(&core));
-        match out {
+    let run = |f: &dyn Fn(&crate::hc::Core) -> Result<Value, Stop>| -> i32 {
+        // The core the window uses: the person's configured one, else the
+        // usual places, as the window finds it.
+        let person = crate::settings::load_person();
+        let Some(bin) = crate::core_bin::find(person.as_ref().ok().and_then(|p| p.core.as_deref())) else {
+            eprintln!("herdr-app: herdr-core is not installed: open Herdr to set it up");
+            return 1;
+        };
+        crate::core_bin::use_core(bin);
+        match crate::hc::Core::connect().map_err(|e| failed(format!("{e:#}"))).and_then(|core| f(&core)) {
             Ok(v) => {
                 println!("{v}");
                 0
             }
-            Err(e) => {
+            Err((code, e)) => {
                 eprintln!("herdr-app: {e}");
-                1
+                code
             }
         }
     };
     match args {
-        [verb, terminal] if verb == "show" => run(&|core| current(core, terminal).map(|(kind, p)| shown(terminal, kind.as_deref(), &p))),
-        [verb, terminal, answer, flag, want] if verb == "answer" && flag == "--token" => run(&|core| {
-            let (_, p) = current(core, terminal)?;
-            if token(terminal, &p) != *want {
-                return Err(format!("terminal {terminal}'s prompt changed since that token: run herdr-app approval show {terminal} again"));
+        [verb, terminal] if verb == "show" => run(&|core| current(core, terminal).map(|(kind, turn, p)| shown(terminal, kind.as_deref(), turn, &p))),
+        [verb, rest @ ..] if verb == "answer" => match answer_args(rest) {
+            Some((terminal, a, t)) => run(&|core| answer(core, terminal, a, t)),
+            None => {
+                eprintln!("herdr-app: {USAGE}");
+                2
             }
-            let n = choose(&p, answer)?;
-            core.call("terminal.keys", json!({ "terminal": terminal, "keys": [n.to_string()] })).map_err(|e| format!("{e:#}"))?;
-            Ok(json!({ "terminal": terminal, "answered": n, "label": p.options[n - 1] }))
-        }),
+        },
         _ => {
             eprintln!("herdr-app: {USAGE}");
             2
@@ -182,31 +316,49 @@ pub fn main(args: &[String]) -> i32 {
 mod tests {
     use super::*;
 
-    const CLAUDE: &str = "\
+    fn claude(command: &str) -> String {
+        format!(
+            "\
  Bash command
 
-   rm -rf build/
+   {command}
 
  Do you want to proceed?
  ❯ 1. Yes
    2. Yes, and don't ask again for rm commands in /src/app
    3. No, and tell Claude what to do differently (esc)
 
-";
+"
+        )
+    }
+
+    fn menu(options: &[&str]) -> Prompt {
+        Prompt { context: vec![], question: String::new(), options: options.iter().map(|o| o.to_string()).collect() }
+    }
 
     #[test]
     fn a_numbered_menu_at_the_bottom_is_the_prompt() {
-        let p = parse(CLAUDE).unwrap();
+        let p = parse(&claude("rm -rf build/")).unwrap();
         assert_eq!(p.question, "Do you want to proceed?");
+        assert_eq!(p.context, ["Bash command", "rm -rf build/"]);
         assert_eq!(p.options.len(), 3);
         assert_eq!(p.options[1], "Yes, and don't ask again for rm commands in /src/app");
-        // In a box, with a hint below.
-        let boxed = "╭────────╮\n│ Allow this edit?        │\n│ › 1. Allow              │\n│   2) Deny               │\n╰────────╯\n  Esc to cancel\n";
-        assert_eq!(parse(boxed), Some(Prompt { question: "Allow this edit?".into(), options: vec!["Allow".into(), "Deny".into()] }));
+        // In a box, with a hint below: the box's top edge ends the context.
+        let boxed = "earlier output\n╭────────╮\n│ Edit src/a.rs           │\n│ Allow this edit?        │\n│ › 1. Allow              │\n│   2) Deny               │\n╰────────╯\n  Esc to cancel\n";
+        assert_eq!(parse(boxed), Some(Prompt { context: vec!["Edit src/a.rs".into()], question: "Allow this edit?".into(), options: vec!["Allow".into(), "Deny".into()] }));
+        // A wrapped label and a description join the option above.
+        let wrapped = "Pick one\n 1. Yes\n      the plain one\n 2. Yes, and don't ask again for git\n    commands in /src/app\n 3. No\n";
+        assert_eq!(parse(wrapped).unwrap().options, ["Yes the plain one", "Yes, and don't ask again for git commands in /src/app", "No"]);
+        let boxed_wrap = "╭──╮\n│ Go?            │\n│ ❯ 1. Yes, and don't ask │\n│      again          │\n│   2. No             │\n╰──╯\n";
+        assert_eq!(parse(boxed_wrap).unwrap().options, ["Yes, and don't ask again", "No"]);
+        // Control and bidi characters never reach a caller.
+        let sly = "Proceed?\n 1. Yes\u{202e}oN\n 2. No\u{9b}2J\n";
+        assert_eq!(parse(sly).unwrap().options, ["YesoN", "No2J"]);
     }
 
     #[test]
     fn a_screen_without_a_whole_menu_has_no_prompt() {
+        let ten = format!("Pick\n{}", (1..=10).map(|n| format!(" {n}. x\n")).collect::<String>());
         for screen in [
             "",
             "just output\n$ ",
@@ -219,40 +371,61 @@ mod tests {
             "Steps:\n 1. build\n 2. test\na\nb\nc\nd\ne\nf\ng\n",
             // Version numbers are no options.
             "1.2 release\n2.0 next\n",
+            // Answers are one key.
+            &ten,
         ] {
             assert_eq!(parse(screen), None, "{screen:?}");
         }
     }
 
     #[test]
-    fn a_token_names_one_prompt_on_one_terminal() {
-        let p = parse(CLAUDE).unwrap();
-        let t = token("t3", &p);
+    fn a_token_names_one_prompt_on_one_terminal_in_one_turn() {
+        let p = parse(&claude("git status")).unwrap();
+        let t = token("t3", 4, &p);
         assert_eq!(t.len(), 16);
-        assert_eq!(token("t3", &parse(CLAUDE).unwrap()), t);
-        assert_ne!(token("t4", &p), t);
-        let other = Prompt { question: "Do you want to proceed?".into(), options: vec!["Yes".into(), "No".into()] };
-        assert_ne!(token("t3", &other), t);
-        let shown = shown("t3", Some("permission"), &p);
+        assert_eq!(token("t3", 4, &parse(&claude("git status")).unwrap()), t);
+        assert_ne!(token("t4", 4, &p), t);
+        // The same question and options about another command.
+        assert_ne!(token("t3", 4, &parse(&claude("git push --force origin main")).unwrap()), t);
+        // The next prompt after an answer is another turn.
+        assert_ne!(token("t3", 5, &p), t);
+        let shown = shown("t3", Some("permission"), 4, &p);
         assert_eq!(shown["token"], t);
+        assert_eq!(shown["context"][1], "git status");
         assert_eq!(shown["options"][2]["n"], 3);
     }
 
     #[test]
-    fn answers_name_an_option() {
-        let p = parse(CLAUDE).unwrap();
+    fn answers_name_one_plain_option() {
+        let p = parse(&claude("ls")).unwrap();
         assert_eq!(choose(&p, "approve"), Ok(1));
         assert_eq!(choose(&p, "deny"), Ok(3));
         assert_eq!(choose(&p, "2"), Ok(2));
         assert!(choose(&p, "4").is_err());
         assert!(choose(&p, "0").is_err());
         assert!(choose(&p, "always").is_err());
-        let odd = Prompt { question: String::new(), options: vec!["Run it".into(), "Skip".into()] };
-        assert!(choose(&odd, "approve").is_err(), "no option says yes");
-        assert!(choose(&odd, "deny").is_err());
+        assert!(choose(&menu(&["Run it", "Skip"]), "approve").is_err(), "no option says yes");
+        assert!(choose(&menu(&["Run it", "Skip"]), "deny").is_err());
         // "Nothing" doesn't start with the word "no".
-        let tricky = Prompt { question: String::new(), options: vec!["Yes".into(), "Nothing else".into()] };
-        assert!(choose(&tricky, "deny").is_err());
+        assert!(choose(&menu(&["Yes", "Nothing else"]), "deny").is_err());
+        // A standing grant is never "approve", wherever it is listed.
+        assert_eq!(choose(&menu(&["Yes, and don't ask again", "Yes", "No"]), "approve"), Ok(2));
+        assert!(choose(&menu(&["Allow always", "Allow for this session", "Deny"]), "approve").is_err());
+        assert!(choose(&menu(&["Yes, and bypass permissions", "No"]), "approve").is_err());
+        // Several plain yeses: only a bare one is clear.
+        assert!(choose(&menu(&["Yes, run it", "Yes, but in a sandbox", "No"]), "approve").is_err());
+        assert_eq!(choose(&menu(&["Yes, proceed (y)", "Yes (y)", "No"]), "approve"), Ok(2));
+    }
+
+    #[test]
+    fn answer_takes_its_token_anywhere() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(answer_args(&args(&["t3", "approve", "--token", "ab"])), Some(("t3", "approve", "ab")));
+        assert_eq!(answer_args(&args(&["t3", "--token", "ab", "1"])), Some(("t3", "1", "ab")));
+        assert_eq!(answer_args(&args(&["--token=ab", "t3", "deny"])), Some(("t3", "deny", "ab")));
+        for bad in [&["t3", "approve"][..], &["t3", "approve", "--token"], &["t3", "--token", "ab"], &["t3", "1", "2", "--token", "ab"]] {
+            assert_eq!(answer_args(&args(bad)), None, "{bad:?}");
+        }
     }
 
     #[test]
