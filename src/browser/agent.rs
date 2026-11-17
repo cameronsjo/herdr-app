@@ -667,6 +667,50 @@ fn error(id: &Value, session: Option<&str>, code: i64, message: &str) -> String 
 /// Input sent through that stream server also keeps the daemon alive.
 pub const IDLE_TIMEOUT_MS: &str = "300000";
 
+/// The terminal label naming the control socket of the app that holds a
+/// terminal now. The app writes it on each of its local terminals
+/// (`AppWindow::fork_claim_terminals`); the provider reads it from the core.
+/// Not `herdr.`: it is the fork's, and only this fork's provider reads it.
+pub const SOCKET_LABEL: &str = "herdr-app-fork.socket";
+
+/// The [`SOCKET_LABEL`] in a `terminal.get` reply, if it looks like an app's
+/// control socket: an absolute path to a file named `herdr-app.sock`.
+pub fn labeled_socket(reply: &Value) -> Option<String> {
+    let label = reply.pointer("/result/labels").and_then(|l| l.get(SOCKET_LABEL)).and_then(Value::as_str)?;
+    let path = std::path::Path::new(label);
+    (path.is_absolute() && path.file_name().is_some_and(|n| n == "herdr-app.sock")).then(|| label.to_owned())
+}
+
+/// The sockets the provider tries, in order, each once: the app holding the
+/// terminal now, the one pinned when it started, the default app home's.
+pub fn provider_sockets(labeled: Option<&str>, pinned: Option<&str>, default: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for s in [labeled, pinned, Some(default)].into_iter().flatten() {
+        if !s.is_empty() && !out.iter().any(|o| o == s) {
+            out.push(s.to_owned());
+        }
+    }
+    out
+}
+
+/// A labeled socket is tried only if this user owns it and its folder, and
+/// nobody else may write to that folder (`socket::bind_private`'s rule), so
+/// a label can't point an agent's attach at another user's listener.
+#[cfg(target_os = "macos")]
+fn private_socket(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
+    // SAFETY: geteuid has no preconditions.
+    let me = unsafe { libc::geteuid() };
+    let (Ok(sock), Some(Ok(folder))) = (std::fs::symlink_metadata(path), path.parent().map(std::fs::metadata)) else { return false };
+    sock.file_type().is_socket() && sock.uid() == me && folder.uid() == me && folder.mode() & 0o022 == 0
+}
+
+/// Browser panes are macOS-only: elsewhere no label is trusted.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn private_socket(_path: &std::path::Path) -> bool {
+    false
+}
+
 /// `AGENT_BROWSER_*` for a new local terminal (`hc.rs` `Core::run`): Herdr as
 /// agent-browser's provider, pinned to this app's socket, and a session of its
 /// own (the terminal's id is the core's to give, after it starts).
@@ -762,42 +806,75 @@ pub fn respond(request: &Value, env: &dyn Fn(&str) -> Option<String>, attach: im
     }
 }
 
-/// The id of the core this process's environment points at (`hc` picks it
-/// from `XDG_STATE_HOME` and `HC_SESSION`, as the terminal's own `hc` does).
-/// None when `hc` doesn't answer within 3 s.
+/// What the caller's core says about it: the core's id (terminal ids are
+/// per core) and the [`SOCKET_LABEL`] on `terminal`, the control socket of
+/// the app that holds it now. `hc` picks the core from `XDG_STATE_HOME` and
+/// `HC_SESSION`, as the terminal's own `hc` does. Either is None when `hc`
+/// doesn't answer within 3 s.
 #[cfg(unix)]
-fn caller_core() -> Option<String> {
+fn caller_facts(terminal: Option<&str>) -> (Option<String>, Option<String>) {
     use std::io::{BufRead, BufReader, Write};
-    let mut child = crate::spawn::command(crate::core_bin::path())
+    let Ok(mut child) = crate::spawn::command(crate::core_bin::path())
         .arg("connect")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .ok()?;
-    let mut stdin = child.stdin.take()?;
-    let stdout = child.stdout.take()?;
+    else {
+        return (None, None);
+    };
+    let (Some(mut stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return (None, None);
+    };
+    let mut requests = String::from("{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"hello\",\"params\":{}}\n");
+    if let Some(t) = terminal {
+        requests += &format!("{}\n", json!({ "jsonrpc": "2.0", "id": 1, "method": "terminal.get", "params": { "terminal": t } }));
+    }
+    let wanted = if terminal.is_some() { 2 } else { 1 };
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = stdin.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"hello\",\"params\":{}}\n");
-        let mut line = String::new();
-        let _ = BufReader::new(stdout).read_line(&mut line);
-        let _ = tx.send(line);
+        let _ = stdin.write_all(requests.as_bytes());
+        let mut lines = BufReader::new(stdout).lines();
+        for _ in 0..wanted {
+            let Some(Ok(line)) = lines.next() else { break };
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
     });
-    let line = rx.recv_timeout(std::time::Duration::from_secs(3)).ok();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let (mut core, mut socket) = (None, None);
+    for _ in 0..wanted {
+        let Ok(line) = rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) else { break };
+        let Ok(reply) = serde_json::from_str::<Value>(&line) else { continue };
+        match reply.get("id").and_then(Value::as_u64) {
+            Some(0) => core = super::core_id(&reply),
+            Some(1) => socket = labeled_socket(&reply),
+            _ => {}
+        }
+    }
     let _ = child.kill();
     let _ = child.wait();
-    super::core_id(&serde_json::from_str(&line?).ok()?)
+    (core, socket)
 }
 
-/// `herdr-app __agent-browser-provider --socket <path>`: one request on
+/// `herdr-app __agent-browser-provider [--socket <path>]`: one request on
 /// stdin (at most 1 MiB), one answer on stdout. Never starts CEF or a window.
+///
+/// Which app it asks ([`provider_sockets`]): the one holding the caller's
+/// terminal now (its [`SOCKET_LABEL`]), else the socket pinned when the
+/// terminal started, else the default app home's. A terminal outlives the
+/// app that started it (another build, another app home), so the pinned one
+/// may be gone (cameronsjo/herdr-app#6).
 #[cfg(unix)]
 pub fn provider_main(args: &[String]) -> i32 {
     use std::io::{BufRead, BufReader, Read, Write};
-    let socket = match args {
-        [flag, path] if flag == "--socket" => path.clone(),
-        _ => crate::mods::app_dir().join("herdr-app.sock").to_string_lossy().into_owned(),
+    let default = crate::mods::app_dir().join("herdr-app.sock").to_string_lossy().into_owned();
+    let pinned = match args {
+        [flag, path] if flag == "--socket" => Some(path.clone()),
+        _ => None,
     };
     let mut bytes = Vec::new();
     let read = std::io::stdin().lock().take(MAX_FRAME as u64 + 1).read_to_end(&mut bytes);
@@ -809,10 +886,13 @@ pub fn provider_main(args: &[String]) -> i32 {
     let answer = match request {
         Ok(request) => respond(&request, &|k| std::env::var(k).ok(), |mut attach| {
             // Terminal ids are per core; the app compares this with its own.
-            attach["core"] = caller_core().map_or(Value::Null, Value::String);
-            let mut stream = std::os::unix::net::UnixStream::connect(&socket).map_err(|_| no_app(&socket))?;
+            let (core, labeled) = caller_facts(attach["terminal"].as_str());
+            attach["core"] = core.map_or(Value::Null, Value::String);
+            let labeled = labeled.filter(|s| private_socket(std::path::Path::new(s)));
+            let sockets = provider_sockets(labeled.as_deref(), pinned.as_deref(), &default);
+            let mut stream = sockets.iter().find_map(|s| std::os::unix::net::UnixStream::connect(s).ok()).ok_or_else(|| no_app(&sockets.join(", ")))?;
             let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
-            stream.write_all(format!("{}\n", json!({ "attach": attach })).as_bytes()).map_err(|_| no_app(&socket))?;
+            stream.write_all(format!("{}\n", json!({ "attach": attach })).as_bytes()).map_err(|_| no_app(&sockets.join(", ")))?;
             let mut line = String::new();
             BufReader::new(&stream).take(MAX_FRAME as u64).read_line(&mut line).map_err(|e| format!("Herdr did not answer: {e}"))?;
             let reply: Value = serde_json::from_str(&line).map_err(|_| "Herdr's answer is not JSON".to_owned())?;
@@ -836,6 +916,24 @@ mod tests {
     #[allow(unused_imports)]
     use crate::browser::{dev_switch, parked, read_dev_switch, remote};
     use serde_json::{Value, json};
+
+    #[test]
+    fn the_provider_asks_the_app_holding_the_terminal_first() {
+        let reply = |label: &str| json!({ "jsonrpc": "2.0", "id": 1, "result": { "address": "t3", "labels": { (SOCKET_LABEL): label } } });
+        let now = "/Users/me/.config/herdr-app-dev/herdr-app.sock";
+        assert_eq!(labeled_socket(&reply(now)).as_deref(), Some(now));
+        // Only an absolute path to an app's control socket.
+        for bad in ["herdr-app.sock", "/tmp/other.sock", "", "/Users/me/.config/herdr-app/"] {
+            assert_eq!(labeled_socket(&reply(bad)), None, "{bad:?}");
+        }
+        assert_eq!(labeled_socket(&json!({ "id": 1, "result": { "labels": {} } })), None);
+        assert_eq!(labeled_socket(&json!({ "id": 1, "error": { "code": 1, "message": "no terminal" } })), None);
+        // Holder, then the socket pinned at start, then the default home; each once.
+        let pinned = "/Users/me/.config/herdr-app/herdr-app.sock";
+        assert_eq!(provider_sockets(Some(now), Some(pinned), pinned), vec![now.to_owned(), pinned.to_owned()]);
+        assert_eq!(provider_sockets(None, None, pinned), vec![pinned.to_owned()]);
+        assert_eq!(provider_sockets(Some(pinned), Some(""), "/d/herdr-app.sock"), vec![pinned.to_owned(), "/d/herdr-app.sock".to_owned()]);
+    }
 
     // ---- one URL gate
 

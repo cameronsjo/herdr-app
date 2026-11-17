@@ -305,6 +305,17 @@ Terminal ids are per core, so the provider also reads the caller's core id
 (`hc` from the caller's environment), and the window attaches only a
 terminal of its own core.
 
+Which app the provider asks: the one that holds the caller's terminal now.
+Each app with browser panes labels its local terminals
+`herdr-app-fork.socket=<its control socket>`, once per terminal per run,
+so the app started last holds the terminals it shows. The provider reads
+that label from the core (`terminal.get`) and tries it first, but only if
+the socket and its folder are this user's and nobody else may write to the
+folder. Then it tries the socket pinned in the terminal's
+`AGENT_BROWSER_PLUGINS` when it started, then the default app home's. So a
+terminal started by one build keeps working after you switch to another
+build on another app home (cameronsjo/herdr-app#6).
+
 How it works: Herdr gives its local terminals `AGENT_BROWSER_PROVIDER=herdr`,
 `AGENT_BROWSER_PLUGINS` (Herdr's own provider, `herdr-app
 __agent-browser-provider`, first) and an `AGENT_BROWSER_SESSION` of their

@@ -25,6 +25,11 @@ pub(super) struct ForkBrowser {
     /// that loaded: the key monitor's source while a page has the keyboard.
     #[cfg(all(target_os = "macos", feature = "browser-pane"))]
     page_keys: Vec<(String, String, String)>,
+    /// Local terminals this app has labeled as its own this run
+    /// (`fork_claim_terminals`): each once, so two apps on one core don't
+    /// take a terminal back and forth.
+    #[cfg(all(target_os = "macos", feature = "browser-pane"))]
+    claimed: std::collections::HashSet<String>,
 }
 
 impl ForkBrowser {
@@ -35,6 +40,8 @@ impl ForkBrowser {
             control_focus: None,
             #[cfg(all(target_os = "macos", feature = "browser-pane"))]
             page_keys: Vec::new(),
+            #[cfg(all(target_os = "macos", feature = "browser-pane"))]
+            claimed: Default::default(),
         }
     }
 }
@@ -118,6 +125,40 @@ impl AppWindow {
     pub(super) fn fork_focus_moved(&mut self) {
         self.fork.layout_page = None;
         self.fork.control_focus = None;
+    }
+
+    /// Labels each of this app's local terminals with its control socket
+    /// (`agent::SOCKET_LABEL`), so agent-browser in it finds the app that
+    /// holds it now, not the one that started it (cameronsjo/herdr-app#6).
+    /// Each terminal once per run, when the core lists it with another
+    /// socket or none: the app started last holds the terminals it shows.
+    pub(super) fn fork_claim_terminals(&mut self, cx: &mut Context<Self>) {
+        #[cfg(all(target_os = "macos", feature = "browser-pane"))]
+        {
+            let socket = crate::mods::app_dir().join("herdr-app.sock").to_string_lossy().into_owned();
+            let label = crate::browser::agent::SOCKET_LABEL;
+            let local = self.model.spaces.iter().filter(|s| s.machine.is_none()).flat_map(|s| &s.tabs).flat_map(|t| crate::model::addresses(&t.root));
+            let todo: Vec<String> = local
+                .filter(|a| !a.contains('/') && !self.fork.claimed.contains(a))
+                .filter(|a| self.live.get(a).is_some_and(|r| r.pointer("/labels").and_then(|l| l.get(label)).and_then(Value::as_str) != Some(socket.as_str())))
+                .collect();
+            for addr in todo {
+                self.fork.claimed.insert(addr.clone());
+                let core = self.core.clone();
+                let params = json!({ "terminal": addr, "labels": { (label): socket } });
+                cx.spawn(async move |this, cx| {
+                    let Err(e) = cx.background_executor().spawn(async move { core.call("terminal.label", params) }).await else { return };
+                    tracing::warn!("browser: cannot label terminal {}: {e:#}", crate::browser::log_safe(&addr));
+                    // Try again on a later listing.
+                    let _ = this.update(cx, |this, _| this.fork.claimed.remove(&addr));
+                })
+                .detach();
+            }
+            let live = &self.live;
+            self.fork.claimed.retain(|a| live.contains_key(a));
+        }
+        #[cfg(not(all(target_os = "macos", feature = "browser-pane")))]
+        let _ = cx;
     }
 
     /// After `sync`: pages follow the model, and the keyboard follows them.
