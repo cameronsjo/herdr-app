@@ -1,5 +1,5 @@
 // FORK(background-mods): the fork's own mods: the background ones (defaults/mods/open-folder,
-// space-groups, name-sync), agents/fork.js, and browser-prototype, a browser block's page.
+// space-groups, name-sync, outside-agents), agents/fork.js, and browser-prototype, a browser block's page.
 import { test, expect } from "bun:test";
 import { readFile } from "node:fs/promises";
 
@@ -237,4 +237,39 @@ test("agents: a cut never splits an emoji", async () => {
   expect(name).toBe(`${"a".repeat(78)}\u{1F600}\u2026`);
   expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(name)).toBe(false);
   expect(() => groups("project", [], [], [{ address: "t1", space: "s1" }], all)).not.toThrow();
+});
+
+test("outside-agents reads a heartbeat file and drops it when its ttl passes", async () => {
+  const { parse, live } = await load("outside-agents", ["parse", "live"]);
+  const now = 1_700_000_000_000;
+  const a = parse("cmux", JSON.stringify({ name: " cmux claude ", status: "working", title: "fixing login", ttl: 30 }), now);
+  expect(a).toMatchObject({ id: "cmux", name: "cmux claude", status: "working", title: "fixing login", task: null, until: now + 30_000 });
+  // `at` in seconds or milliseconds; never later than when it was seen.
+  expect(parse("x", JSON.stringify({ status: "idle", at: (now - 10_000) / 1000 }), now).until).toBe(now - 10_000 + 60_000);
+  expect(parse("x", JSON.stringify({ status: "idle", at: now + 999_999 }), now).until).toBe(now + 60_000);
+  expect(parse("x", JSON.stringify({ status: "error", ttl: 0 }), now)).toMatchObject({ status: "blocked", until: now + 1000 });
+  expect(parse("x", JSON.stringify({ status: "busy" }), now)).toBeNull();
+  expect(parse("x", "not json", now)).toBeNull();
+  expect(parse("x", null, now)).toBeNull();
+  expect(parse("../x", JSON.stringify({ status: "idle" }), now)).toBeNull();
+  for (const status of ["constructor", "__proto__", "toString"]) expect(parse("x", JSON.stringify({ status }), now)).toBeNull();
+  // A status that is not a string is not a status, and does not throw.
+  for (const status of [{ toString: null, valueOf: null }, 1, ["idle"]]) expect(parse("x", JSON.stringify({ status }), now)).toBeNull();
+  expect(parse("x", JSON.stringify({ status: "idle", pad: "p".repeat(5000) }), now)).toBeNull();
+  expect(parse("x", JSON.stringify({ status: "idle", name: "n".repeat(500) }), now).name.length).toBe(80);
+  expect(parse("x", JSON.stringify({ status: "idle", name: "a\n\u202eb", title: `${"t".repeat(199)}\u{1F600}x` }), now)).toMatchObject({ name: "a b", title: `${"t".repeat(199)}\u{1F600}` });
+  const agents = new Map([["b", { ...a, id: "b", name: "b", until: now + 1, text: "{}" }], ["a", { ...a, id: "a", name: "a", until: now + 1 }], ["old", { ...a, id: "old", name: "c", until: now }]]);
+  const shown = live(agents, now);
+  expect(shown.map((x: any) => x.id)).toEqual(["a", "b"]);
+  expect(shown[0]).not.toHaveProperty("until");
+  expect(shown[1]).not.toHaveProperty("text");
+});
+
+test("agents: outside agents and the empty message", async () => {
+  const { empty } = await loadFork();
+  const outside = [{ id: "c", status: "working" }];
+  expect(empty("priority", false, outside)).toBe("");
+  expect(empty("needs", false, outside)).toBe("No agents need you.");
+  expect(empty("needs", false, [{ id: "c", status: "blocked" }])).toBe("");
+  expect(empty("priority", false, undefined)).toBeNull();
 });

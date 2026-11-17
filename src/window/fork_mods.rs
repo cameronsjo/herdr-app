@@ -17,7 +17,7 @@
 use super::*;
 
 /// The shipped fork mods that run in the background (`defaults/mods/<name>/`).
-pub(super) const BACKGROUND: &[&str] = &["open-folder", "space-groups", "name-sync"];
+pub(super) const BACKGROUND: &[&str] = &["open-folder", "space-groups", "name-sync", "outside-agents"];
 
 /// Where a background copy lives in `AppWindow::copies`. No layout node has
 /// this id: layout ids are the layout file's, and they never hold a colon here.
@@ -103,6 +103,8 @@ pub(super) mod tests {
         assert!(main.is_file(), "start-up installs the shipped background mod");
         std::fs::write(&main, probe).unwrap();
         cx.update(|window, cx| view.update(cx, |this, cx| this.files_changed(vec![format!("mods/{name}/main.js").into()], window, cx)));
+        // Under outside-agents' two-second start: its file reads run on real threads,
+        // which the test scheduler refuses.
         cx.executor().advance_clock(std::time::Duration::from_secs(1));
         cx.run_until_parked();
         let slot = format!("fork-background:{name}");
