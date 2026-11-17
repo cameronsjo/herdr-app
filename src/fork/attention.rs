@@ -85,6 +85,8 @@ struct Watch {
     changed: u64,
     /// When the screen was last read (or asked for), ms.
     read: u64,
+    /// Whether the mods were last told it is stalled.
+    shown: bool,
 }
 
 fn hash_of(v: &impl std::hash::Hash) -> u64 {
@@ -174,7 +176,7 @@ impl Queue {
                 continue;
             }
             let report = hash_of(&rec.get("report").map(Value::to_string));
-            let w = self.watches.entry(addr.clone()).or_insert(Watch { screen: 0, report, changed: now, read: 0 });
+            let w = self.watches.entry(addr.clone()).or_insert(Watch { screen: 0, report, changed: now, read: 0, shown: false });
             if w.report != report {
                 w.report = report;
                 w.changed = now;
@@ -189,18 +191,18 @@ impl Queue {
     }
 
     /// A screen read for the stall check came back (`text`), or failed
-    /// (None: an unreadable screen is no evidence of a stall, so it counts
-    /// as a sign of life). True when that starts or ends a stall.
+    /// (None, or an empty screen: no evidence of a stall, so it counts as a
+    /// sign of life). True when the stall the mods were last shown changes:
+    /// one started since, or this read ended one.
     pub fn saw_screen(&mut self, addr: &str, text: Option<&str>, now: u64, limit_ms: u64) -> bool {
-        let before = self.stalled(addr, now, limit_ms);
-        let screen = text.map(|t| hash_of(&t));
-        if let Some(w) = self.watches.get_mut(addr)
-            && (screen.is_none() || screen != Some(w.screen))
-        {
+        let screen = text.filter(|t| !t.trim().is_empty()).map(|t| hash_of(&t));
+        let Some(w) = self.watches.get_mut(addr) else { return false };
+        if screen.is_none() || screen != Some(w.screen) {
             w.screen = screen.unwrap_or(0);
             w.changed = now;
         }
-        before != self.stalled(addr, now, limit_ms)
+        let stalled = limit_ms > 0 && now.saturating_sub(w.changed) >= limit_ms;
+        std::mem::replace(&mut w.shown, stalled) != stalled
     }
 
     /// Whether a working agent has shown no sign of life for `limit_ms` (0: off).
@@ -335,7 +337,9 @@ mod tests {
         assert_eq!(q.screens_to_read(&live, t0 + READ_EVERY_MS, limit), vec!["s1".to_owned()]);
         assert!(!q.saw_screen("s1", Some("thinking"), t0 + READ_EVERY_MS, limit));
         assert!(q.stalled("s1", t0 + limit, limit));
-        assert!(!q.saw_screen("s1", Some("thinking"), t0 + limit, limit), "already stalled: no flip");
+        // The read that finds the stall says so, once.
+        assert!(q.saw_screen("s1", Some("thinking"), t0 + limit, limit), "a stall starts");
+        assert!(!q.saw_screen("s1", Some("thinking"), t0 + limit, limit), "already shown");
         // A new screen is, and ends the stall.
         assert!(q.saw_screen("s1", Some("thinking."), t0 + limit, limit));
         assert!(!q.stalled("s1", t0 + limit + 1, limit));
@@ -346,11 +350,16 @@ mod tests {
         assert!(!q.stalled("s1", t0 + 2 * limit + 1, limit));
         // A screen that can't be read is no evidence of a stall.
         assert!(q.stalled("s1", t0 + 3 * limit, limit));
+        assert!(q.saw_screen("s1", Some("thinking."), t0 + 3 * limit, limit), "shown stalled");
         assert!(q.saw_screen("s1", None, t0 + 3 * limit, limit));
         assert!(!q.stalled("s1", t0 + 3 * limit, limit));
+        // Nor is an empty one.
+        assert!(q.stalled("s1", t0 + 4 * limit, limit));
+        q.saw_screen("s1", Some(" \n"), t0 + 4 * limit, limit);
+        assert!(!q.stalled("s1", t0 + 4 * limit, limit));
         // Stopping forgets it; off forgets everything and never stalls.
         live.insert("s1".to_owned(), json!({ "status": "done" }));
-        q.screens_to_read(&live, t0 + 4 * limit, limit);
+        q.screens_to_read(&live, t0 + 5 * limit, limit);
         assert!(!q.stalled("s1", t0 + 9 * limit, limit));
         assert!(!q.stalled("s1", t0 + 9 * limit, 0));
         assert!(q.screens_to_read(&live, t0, 0).is_empty());
