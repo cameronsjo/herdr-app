@@ -954,6 +954,13 @@ has 124 programs (agents, editors, runtimes, tools, databases, infra);
   `spaces` sidebar nests worktree spaces under their repo's and shows each
   space's repo, branch, ahead/behind and uncommitted changes). Shipped mods
   are Herdr's; duplicate with `mod.clone` before editing.
+<!-- FORK(background-mods): this build's mods with no block of their own, in one block. -->
+- This build also runs mods with no block of their own, loaded on every layout:
+  `open-folder` (`open-folder.open:<folder>` goes to this computer's space already in that
+  folder, else makes one there; `open-folder.pick` asks for the folder first) and
+  `space-groups` (`space-groups.up` / `space-groups.down` move the shown space and its git
+  worktree spaces as one block). Run them with `herdr-app do <name>`, `run(name)` or a
+  `keys.json` binding; deleting a mod's folder turns it off.
 
 ### Check before you finish
 

@@ -7,6 +7,7 @@
 use crate::hc::Core;
 mod floats;
 mod fork_browser; // FORK(browser): the browser pane's part of the window
+mod fork_mods; // FORK(background-mods): fork mods with no block of their own
 mod movable;
 mod pane_drag;
 mod pane_size;
@@ -1314,6 +1315,7 @@ impl AppWindow {
                 }
             }
         }
+        mods.extend(fork_mods::background(&self.folders)); // FORK(background-mods)
         (terms, mods)
     }
 
@@ -1377,6 +1379,7 @@ impl AppWindow {
                 }
             }
         }
+        out.extend(fork_mods::background(&self.folders)); // FORK(background-mods)
         out
     }
 

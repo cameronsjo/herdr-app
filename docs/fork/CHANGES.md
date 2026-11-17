@@ -99,3 +99,18 @@ Gap check 2026-11-15 against herdr-app `ce9a3cf` and herdr-core. To port: camero
 | Palette recents and keywords, confirm destructive actions, type-submit, skill directory | built in |
 
 TUI-only (server, renderer, or fork tooling): cold-restore labels, `rows_by_agent` warning, Codex hooks, sync and release scripts.
+
+### Background mods (the host for the ports below)
+
+Added 2026-11-17 (Linear CAM-922). A mod copy normally lives only while a layout block, pane, float or overlay names it, and `<mod>.<command>` reaches only shown copies, so a command or watcher with no screen had nowhere to run, and the shipped layouts are upstream's files. The window now loads one copy of each mod in `BACKGROUND` (`src/window/fork_mods.rs`, fork-only) on every layout, counts it as shown, and never draws it: `init()`, `cx.spawn`, `cx.timer` and `nextCommand()` work; `render()` is not called. Deleting the mod's folder turns it off.
+
+- Seams: `src/window.rs`, the `mod fork_mods` line plus one line each at the end of `visible()` and `owned_mods()` (three `FORK(background-mods)` markers). `justfile`'s `test` recipe runs `scripts/fork-mods.test.ts` (one marked line). `defaults/AGENTS.md` lists the background mods' commands in one `FORK(background-mods)` block.
+- Upstream CI runs no mod tests (`ci.yml` runs only `scripts/docs.test.ts`), so the fork-only `.github/workflows/fork-mods.yml` runs `scripts/fork-mods.test.ts`.
+
+### Open a folder's existing space (cameronsjo/herdr-app#9)
+
+TUI: cameronsjo/herdr PR #64 (`workspace open` focused the workspace already in a folder). Shipped as the background mod `defaults/mods/open-folder/`: `herdr-app do open-folder.open:<folder>` (or `run("open-folder.open:<folder>")` from a mod, `~` expanded) selects this computer's first space made in that folder or whose first terminal is there now, else makes a space there; `open-folder.pick` asks with the folder picker first. No key is bound: `keys.json` is upstream's file. Upstream's worktree dialog already goes to a shown checkout; plain `space.new {folder}` still always makes a new space.
+
+### Move a worktree group as one block (cameronsjo/herdr-app#13)
+
+TUI: cameronsjo/herdr PR #79 (issue cameronsjo/herdr#48). Upstream's spaces list already keeps each repo's worktree spaces under its main checkout after a drag (`ordered()` in `defaults/mods/spaces/main.js`), but has no key or command to move a space by one place. Shipped as the background mod `defaults/mods/space-groups/`: `space-groups.up` and `space-groups.down` move the shown space's group (its repo's main checkout and the worktree spaces after it, found with `git rev-parse`) past one neighbouring group or lone space on the same machine. Unlike the TUI, on a worktree space the whole group moves instead of nothing.
