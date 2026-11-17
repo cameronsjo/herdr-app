@@ -23,22 +23,34 @@ function tabOf(t) {
   return slash === -1 ? label : `${t.address.slice(0, slash)}/${label}`;
 }
 
-// The tab.rename calls to make, and what each named terminal was called now.
-// `all`: terminals(); `tabs`: id -> TabInfo; `last`: address -> name last seen.
+const machineOf = (address) => (address.includes("/") ? address.slice(0, address.indexOf("/")) : "");
+
+// The tab.rename calls to make, and what each named terminal was called and
+// where. `all`: terminals(); `tabs`: id -> TabInfo; `last`: address ->
+// {name, tab} last decided on.
 function plan(all, tabs, last) {
   const named = all.filter((t) => t.state === "live" && typeof t.name === "string" && t.name.trim() && tabOf(t));
   const perTab = new Map();
   for (const t of named) perTab.set(tabOf(t), (perTab.get(tabOf(t)) ?? 0) + 1);
   const renames = [];
-  // Keep what we knew of terminals not listed now (an offline machine, a core
-  // still starting): when they come back, a rename made meanwhile still follows.
+  // Keep what we knew of terminals on a machine with nothing listed now (offline,
+  // or its core still starting): when they come back, a rename made meanwhile
+  // still follows. A machine that lists terminals has forgotten the rest.
   const listed = new Set(all.map((t) => t.address));
-  const seen = Object.fromEntries(Object.entries(last).filter(([address]) => !listed.has(address)));
+  const machines = new Set(all.map((t) => machineOf(t.address)));
+  const seen = Object.fromEntries(Object.entries(last).filter(([address]) => !listed.has(address) && !machines.has(machineOf(address))));
   for (const t of named) {
-    const id = tabOf(t), tab = tabs.get(id), name = t.name.trim();
-    seen[t.address] = name;
-    const before = last[t.address];
-    if (!tab || before === name || perTab.get(id) !== 1) continue;
+    const id = tabOf(t), tab = tabs.get(id), name = t.name.trim(), prev = last[t.address];
+    // Nothing to decide yet (its tab isn't shown yet, or another named terminal
+    // shares it): keep what we knew, so the decision is made once it can be.
+    if (!tab || perTab.get(id) !== 1) {
+      if (prev) seen[t.address] = prev;
+      continue;
+    }
+    seen[t.address] = { name, tab: id };
+    // A terminal new to this tab counts as unseen.
+    const before = prev?.tab === id ? prev.name : undefined;
+    if (before === name) continue;
     // New to us: only a tab nobody named. Renamed: a tab still called the old name too.
     const follows = !tab.named || (before !== undefined && tab.name === before);
     if (follows && tab.name !== name) renames.push({ id, name });
@@ -51,6 +63,8 @@ export default class NameSync extends View {
     if (checking()) return;
     try { this.last = JSON.parse(localStorage.getItem("names") ?? "{}"); } catch { this.last = {}; }
     if (!this.last || typeof this.last !== "object" || Array.isArray(this.last)) this.last = {};
+    // Only {name, tab} entries: an older build kept bare names.
+    this.last = Object.fromEntries(Object.entries(this.last).filter(([, v]) => typeof v?.name === "string" && typeof v?.tab === "string"));
     cx.timer.every(EVERY, () => this.tick());
     this.tick();
   }
