@@ -47,9 +47,13 @@ fn grouped_by_project_shows_one_header_the_task_line_and_the_name(cx: &mut TestA
     for want in ["herdr", "fix the login test", "fix-login"] {
         assert!(tree.contains(want), "missing {want:?}: {tree}");
     }
-    // Both agents sit under the one project header, not their spaces' headers.
-    assert!(!tree.contains("\"Remote\""), "{tree}");
+    // Both agents sit under the one project header, not their spaces' headers,
+    // and each row names its space, since the header no longer does.
     assert!(tree.contains("proj-"), "{tree}");
+    assert!(!tree.contains("proj-s"), "{tree}");
+    for space in ["\"Local\"", "\"Remote\""] {
+        assert!(tree.contains(space), "missing {space}: {tree}");
+    }
 }
 
 #[gpui::test]

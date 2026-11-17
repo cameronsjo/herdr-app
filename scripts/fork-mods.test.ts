@@ -197,3 +197,18 @@ test("agents: a terminal's name and task label, trimmed, or null", async () => {
   expect(nameOf(all, "t9")).toBeNull();
   expect(menuHeight(140)).toBe(140 + 31 * FORK_SORTS.length);
 });
+
+test("agents: a label drawn on one line with control and bidi characters dropped, and capped", async () => {
+  const { nameOf, taskOf, groups } = await loadFork();
+  const all = [
+    { address: "t1", name: "n".repeat(500), labels: { task: "fake\n\u202eclaude \u00b7 blocked\u0000x", project: "p\u0000q" } },
+    { address: "t2", labels: { task: "x".repeat(10000) } },
+  ];
+  expect(taskOf(all, "t1")).toBe("fake claude \u00b7 blocked x");
+  expect(nameOf(all, "t1")).toHaveLength(80);
+  expect(nameOf(all, "t1").endsWith("\u2026")).toBe(true);
+  expect(taskOf(all, "t2")).toHaveLength(200);
+  const out = groups("project", [], [], [{ address: "t1", space: "s1" }], all);
+  expect(out[0].label).toBe("p q");
+  expect(out[0].id).not.toContain("\u0000");
+});

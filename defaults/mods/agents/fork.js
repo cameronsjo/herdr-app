@@ -33,10 +33,17 @@ function byAddress(all) {
   if (!m) maps.set(all, (m = new Map(all.map((t) => [t.address, t]))));
   return m;
 }
-const text = (v) => (typeof v === "string" && v.trim() ? v.trim() : null);
+// Any process can set a label or a name, so a value is drawn on one line with
+// control and bidi characters dropped, and cut to `max` characters.
+const text = (v, max = 80) => {
+  if (typeof v !== "string") return null;
+  const s = v.replace(/[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]+/g, " ").trim();
+  if (!s) return null;
+  return s.length > max ? `${s.slice(0, max - 1).trimEnd()}\u2026` : s;
+};
 
-// A label's value on the terminal, trimmed, or null.
-const label = (terminal, key) => text(terminal?.labels?.[key]);
+// A label's value on the terminal, cleaned, or null.
+const label = (terminal, key, max) => text(terminal?.labels?.[key], max);
 
 // The terminal's own name, or null.
 export function nameOf(all, address) {
@@ -44,13 +51,18 @@ export function nameOf(all, address) {
 }
 
 export function taskOf(all, address) {
-  return label(byAddress(all).get(address), "task");
+  return label(byAddress(all).get(address), "task", 200);
 }
 
 // What a project group is called and keyed by: the `project` label, else the space.
 function project(a, terminal) {
   const p = label(terminal, "project");
   return p ? { key: `p\u0000${p}`, label: p } : { key: `s\u0000${a.space}`, label: a.space_name || "" };
+}
+
+// A row names its space when its header is a project, which can span spaces.
+export function namesSpace(id, all, address) {
+  return id === "project" && label(byAddress(all).get(address), "project") !== null;
 }
 
 // The list in this sort's order: needs-you keeps only the agents that need you
@@ -78,7 +90,7 @@ export function groups(id, built, pinnedGroups, rest, all) {
   const out = [...pinnedGroups];
   for (const a of rest) {
     const { key, label: name } = project(a, terminals.get(a.address));
-    const gid = `proj-${key}`;
+    const gid = `proj-${encodeURIComponent(key)}`;
     if (out.at(-1)?.id === gid) out.at(-1).members.push(a);
     else out.push({ id: gid, label: name, status: null, members: [a] });
   }
