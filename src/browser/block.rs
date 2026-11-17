@@ -47,10 +47,13 @@ pub fn block(content: &Content) -> Option<BrowserBlock> {
 
 /// [`block`] for a mod block's name and props.
 pub fn of_mod(name: &str, props: &Value) -> Option<BrowserBlock> {
-    if name != BROWSER_MOD {
+    // A props array would also deserialize (serde reads a struct from a
+    // sequence): only an object is a browser block.
+    if name != BROWSER_MOD || !props.is_object() {
         return None;
     }
-    serde_json::from_value::<BrowserBlock>(props.clone()).ok().filter(|b| !b.browser.is_empty())
+    // From the reference: render checks every mod block every frame.
+    BrowserBlock::deserialize(props).ok().filter(|b| !b.browser.is_empty())
 }
 
 /// Whether a block's content is a browser block (not a mod to load).
@@ -132,9 +135,16 @@ mod tests {
             let c: Content = serde_json::from_value(serde_json::json!({ "mod": "browser", "props": props })).unwrap();
             assert!(!is_browser(&c), "{props}");
         }
-        // A prototype block that names no browser is a mod by that name.
-        let c: Content = serde_json::from_value(serde_json::json!({ "mod": "browser-prototype", "props": { "browser": "" } })).unwrap();
-        assert!(!is_browser(&c));
+        // A prototype block that names no browser is a mod by that name, and
+        // so is one whose props aren't an object.
+        for props in [serde_json::json!({ "browser": "" }), serde_json::json!(["b1", "https://example.com/"])] {
+            let c: Content = serde_json::from_value(serde_json::json!({ "mod": "browser-prototype", "props": props })).unwrap();
+            assert!(!is_browser(&c), "{props}");
+            let n = Node::block("p", c.clone());
+            assert_eq!(n.browser(), None);
+            let mut c = c;
+            assert!(!set_url(&mut c, "https://b.test/"));
+        }
     }
 
     #[test]
