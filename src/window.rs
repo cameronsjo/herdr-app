@@ -9,6 +9,7 @@ mod floats;
 mod fork_attention; // FORK(attention): the attention queue's part of the window
 mod fork_browser; // FORK(browser): the browser pane's part of the window
 mod fork_mods; // FORK(background-mods): fork mods with no block of their own
+mod fork_spaces; // FORK(spaces): moving a tab to another space, merging spaces
 mod movable;
 mod pane_drag;
 mod pane_size;
@@ -3380,6 +3381,7 @@ impl AppWindow {
                 return;
             }
             n if n.starts_with("browser.") => if self.fork_dispatch(n, a, person, window, cx) { return }, // FORK(browser)
+            "tab.move_to_space" | "space.merge" => return self.fork_spaces(name, a, active_ctx, cx), // FORK(spaces)
             "terminal.select_all" => {
                 let view = match Self::owned(a, "terminal") {
                     Some(address) => self.shown_terminal_view(&address, window, cx),
