@@ -10,33 +10,45 @@
 // no block of its own (src/window/fork_mods.rs).
 
 import { View, div } from "gpui-kit";
-import { spaces, panes, run, pickFolder, home, notify, nextCommand, checking } from "herdr";
+import { spaces, panes, run, pickFolder, home, notify, nextCommand, checking, window } from "herdr";
 
-// The folder as spaces() and panes() report it: ~ expanded, no trailing slash
-// (a root such as / or C:\ keeps its own).
-function normal(path, homeDir) {
+// The folder as spaces() and panes() report it: ~ expanded, no trailing
+// separator (a root keeps its own). `win`: Windows, where \ separates too.
+function normal(path, homeDir, win = false) {
+  const sep = win ? /[\\/]+$/ : /\/+$/;
   let p = String(path ?? "").trim();
-  if (p === "~" || p.startsWith("~/") || p.startsWith("~\\")) p = homeDir.replace(/[\\/]+$/, "") + p.slice(1);
-  if (!/^([A-Za-z]:)?[\\/]$/.test(p)) p = p.replace(/[\\/]+$/, "");
+  if (p === "~" || p.startsWith("~/") || (win && p.startsWith("~\\"))) p = (homeDir.replace(sep, "") || homeDir.trim().slice(0, 1)) + p.slice(1);
+  const stripped = p.replace(sep, "");
+  if (stripped) p = stripped;
+  else if (p) p = p[0];
+  // A bare drive left by the strip (C:\ -> C:) is its root again.
+  if (win && /^[A-Za-z]:$/.test(p) && path.trim().length > 2) p += "\\";
   return p;
 }
 
 // A relative folder would resolve against the app's own working directory.
-// Absolute: /x, C:\x or C:/x, or a \\server\share path (Windows).
-const absolute = (p) => /^(\/|[A-Za-z]:[\\/]|\\\\)/.test(p);
+// Absolute: /x, and on Windows C:\x, C:/x or \\server\share too.
+const absolute = (p, win = false) => p.startsWith("/") || (win && /^([A-Za-z]:[\\/]|\\\\)/.test(p));
+
+// Two spellings of one folder compare equal: on Windows / and \ are one
+// separator and case doesn't matter (C:/Users/x is C:\users\x).
+const key = (p, homeDir, win) => {
+  const n = normal(p, homeDir, win);
+  return win ? n.replace(/\//g, "\\").toLowerCase() : n;
+};
 
 // The first of this computer's spaces in `folder` (made there, else its first
 // terminal is there now), or null.
-function existing(folder, all, ps, homeDir) {
-  const want = normal(folder, homeDir);
+function existing(folder, all, ps, homeDir, win = false) {
+  const want = key(folder, homeDir, win);
   if (!want) return null;
   const local = all.filter((s) => (s.machine ?? null) === null);
   const first = (s) => {
     const tabs = new Set((s.tabs ?? []).map((c) => c.id));
     return ps.find((p) => tabs.has(p.tab) && p.cwd)?.cwd ?? null;
   };
-  return local.find((s) => s.folder && normal(s.folder, homeDir) === want)
-    ?? local.find((s) => { const c = first(s); return c !== null && normal(c, homeDir) === want; })
+  return local.find((s) => s.folder && key(s.folder, homeDir, win) === want)
+    ?? local.find((s) => { const c = first(s); return c !== null && key(c, homeDir, win) === want; })
     ?? null;
 }
 
@@ -65,11 +77,12 @@ export default class OpenFolder extends View {
         try {
           const folder = asked.pick ? await pickFolder({ prompt: "Open" }) : asked.open;
           if (!folder) continue;
-          if (!absolute(normal(folder, home()))) {
-            notify({ title: "open-folder", body: `Give a whole path (/..., ~/... or C:\\...), not ${JSON.stringify(folder)}.`, level: "error" });
+          const win = window()?.platform === "windows";
+          if (!absolute(normal(folder, home(), win), win)) {
+            notify({ title: "open-folder", body: `Give a whole path (${win ? "C:\\..." : "/..."} or ~/...), not ${JSON.stringify(folder)}.`, level: "error" });
             continue;
           }
-          this.open(folder);
+          this.open(folder, win);
         } catch (e) {
           notify({ title: "Can't open the folder", body: String(e?.message ?? e), level: "error" });
         }
@@ -77,11 +90,11 @@ export default class OpenFolder extends View {
     });
   }
 
-  open(folder) {
+  open(folder, win) {
     const homeDir = home();
-    const there = existing(folder, spaces(), panes(), homeDir);
+    const there = existing(folder, spaces(), panes(), homeDir, win);
     if (there) run("space.select", { id: there.id });
-    else run("space.new", { folder: normal(folder, homeDir), machine: "" });
+    else run("space.new", { folder: normal(folder, homeDir, win), machine: "" });
   }
 
   render() {

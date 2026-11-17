@@ -28,22 +28,34 @@ test("open-folder finds the space made in a folder, or whose first terminal is t
 });
 
 test("open-folder reads open:<folder> and pick", async () => {
-  const { parse, absolute, normal } = await load("open-folder", ["parse", "absolute", "normal"]);
+  const { parse, absolute, normal, existing } = await load("open-folder", ["parse", "absolute", "normal", "existing"]);
   expect(absolute(normal("~/x", "/home/me"))).toBe(true);
   expect(absolute(normal("code/x", "/home/me"))).toBe(false);
+  expect(normal("//", "/home/me")).toBe("/");
+  expect(normal("~", "/")).toBe("/");
+  // Elsewhere a backslash is part of a name, and C:/x is relative.
+  expect(normal("/home/me/dir\\", "/home/me")).toBe("/home/me/dir\\");
+  expect(absolute(normal("C:/x", "/home/me"))).toBe(false);
+  expect(absolute(normal("~\\repo", "/home/me"))).toBe(false);
   // Windows: drive and UNC paths count, a bare drive or a relative path doesn't.
-  expect(absolute(normal("C:\\Users\\me\\repo\\", "C:\\Users\\me"))).toBe(true);
-  expect(normal("C:\\Users\\me\\repo\\", "C:\\Users\\me")).toBe("C:\\Users\\me\\repo");
-  expect(normal("C:\\", "C:\\Users\\me")).toBe("C:\\");
-  expect(normal("~\\repo", "C:\\Users\\me\\")).toBe("C:\\Users\\me\\repo");
-  expect(absolute("C:/Users/me")).toBe(true);
-  expect(absolute("\\\\server\\share\\repo")).toBe(true);
-  expect(absolute("C:repo")).toBe(false);
-  expect(absolute("repo\\x")).toBe(false);
+  const win = true;
+  expect(normal("C:\\Users\\me\\repo\\", "C:\\Users\\me", win)).toBe("C:\\Users\\me\\repo");
+  expect(normal("C:\\", "C:\\Users\\me", win)).toBe("C:\\");
+  expect(normal("C:\\\\", "C:\\Users\\me", win)).toBe("C:\\");
+  expect(normal("~\\repo", "C:\\Users\\me\\", win)).toBe("C:\\Users\\me\\repo");
+  expect(absolute("C:/Users/me", win)).toBe(true);
+  expect(absolute("\\\\server\\share\\repo", win)).toBe(true);
+  expect(absolute("C:repo", win)).toBe(false);
+  expect(absolute("C:", win)).toBe(false);
+  expect(absolute("repo\\x", win)).toBe(false);
   expect(parse("open:/a/b:c")).toEqual({ open: "/a/b:c" });
   expect(parse("pick")).toEqual({ pick: true });
   expect(parse("open:")).toBeNull();
   expect(parse("focus")).toBeNull();
+  // On Windows C:/Users/Me/repo and c:\users\me\repo\ are one folder.
+  const spacesWin = [{ id: "w1", folder: "C:\\Users\\Me\\repo", machine: null, tabs: [] }];
+  expect(existing("c:/users/me/repo/", spacesWin, [], "C:\\Users\\Me", true)?.id).toBe("w1");
+  expect(existing("c:/users/me/repo/", spacesWin, [], "C:\\Users\\Me", false)).toBeNull();
 });
 
 const ids = (n: string) => n.split(" ").map((id) => ({ id, machine: id.startsWith("r") ? "vps" : null }));
