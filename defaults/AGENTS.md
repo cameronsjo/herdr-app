@@ -228,7 +228,9 @@ A layout is a tree of nodes. Four types:
   terminal, full size: the one chosen with `agent.focus` / `agent.next`, else
   the focused pane's agent, else the first agent), or `{ "mod": "browser-prototype",
   "props": { "browser": "b1", "url": "...", "profile"?: "agent" } }` (a web
-  page the app draws, not a mod folder; it never opens in `floating`). <!-- FORK(browser) -->
+  page: the shipped `browser-prototype` mod draws it, and the page itself is a
+  native view the app places with `nativeView` from `herdr-native`; it never
+  opens in `floating`). <!-- FORK(browser) -->
 - `row` / `column`: children side by side / stacked.
 - `stack`: shows one child (`"active": "<child id>"`), with an optional
   `"header"` (a mod that draws tabs, or `"tabs"` for a plain built-in strip).

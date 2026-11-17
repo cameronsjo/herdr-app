@@ -6,10 +6,15 @@
 //! load and keeps it.
 //!
 //! The fork reads a browser block through [`block`] (or [`BrowserNode`]).
-//! Every place upstream treats a mod block as a mod must skip browser blocks:
-//! the window's mod slots (`AppWindow::visible`, `owned_mods`), its render
-//! arm, the mods' `panes` list, and `missing_mods`. Grep `Content::Mod` in
-//! upstream files after a sync for new ones.
+//! It is a real mod too (cameronsjo/herdr-app#4): the window starts the
+//! shipped `defaults/mods/browser-prototype/` for it like any mod, which
+//! draws the placeholder and places the page with `nativeView`
+//! (`super::element`). Two places upstream treats a mod block as a mod
+//! still check for a browser block first: the window's render arm (the
+//! block's frame, agent header and page placement are the window's) and
+//! the mods' `panes` list (a browser pane lists its page). Grep
+//! `Content::Mod` in upstream files after a sync for new ones that draw or
+//! list mods.
 //!
 //! `browser` is the app's id for the page (`b1`); `url` is where it was last,
 //! so a block whose browser isn't open (a restart, another screen) opens
@@ -55,6 +60,22 @@ pub fn of_mod(name: &str, props: &Value) -> Option<BrowserBlock> {
     // `render_block` asks this of every mod block every frame: the name
     // check above comes first, and props are read in place, not cloned.
     BrowserBlock::deserialize(props).ok().filter(|b| !b.browser.is_empty())
+}
+
+/// The props a mod block's copy gets. A browser block's lose `url`: it
+/// follows every navigation, so with it each new page would be a new mod
+/// instance (the copy reloads and the page blinks), and the whole url
+/// (sign-in codes, magic links) would reach mod JS, which sees the
+/// address only through `panes()` (no query) and `browsers()` (the query
+/// only while agent access is on). The tab document keeps it. Every place
+/// that builds a mod copy's instance (blocks, stack headers, floats) calls
+/// this, so `visible` and `owned_mods` agree.
+/// Every other block's props are unchanged.
+pub fn mod_props(name: &str, props: &Value) -> Value {
+    match (of_mod(name, props), props) {
+        (Some(_), Value::Object(o)) => Value::Object(o.iter().filter(|(k, _)| k.as_str() != "url").map(|(k, v)| (k.clone(), v.clone())).collect()),
+        _ => props.clone(),
+    }
 }
 
 /// Whether a block's content is a browser block (not a mod to load).
@@ -152,6 +173,21 @@ mod tests {
             let mut c = c;
             assert!(!set_url(&mut c, "https://b.test/"));
         }
+    }
+
+    #[test]
+    fn a_browser_blocks_mod_never_sees_its_url_so_navigating_keeps_the_copy() {
+        let mut page = content("b1", "https://example.test/cb?code=42", Some("agent"));
+        let Content::Mod { name, props } = &page else { unreachable!() };
+        let seen = mod_props(name, props);
+        assert_eq!(seen, serde_json::json!({ "browser": "b1", "profile": "agent" }));
+        assert!(set_url(&mut page, "https://example.test/next"));
+        let Content::Mod { name, props } = &page else { unreachable!() };
+        assert_eq!(mod_props(name, props), seen, "a navigation must not make a new mod instance");
+        // Any other mod block keeps every prop, url included.
+        let other = serde_json::json!({ "url": "https://example.test/?q=1", "x": 1 });
+        assert_eq!(mod_props("files", &other), other);
+        assert_eq!(mod_props(BROWSER_MOD, &serde_json::json!([1])), serde_json::json!([1]));
     }
 
     #[test]

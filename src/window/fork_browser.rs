@@ -624,9 +624,29 @@ impl AppWindow {
     /// on). Whether to draw it comes from the open browser (fixed when it
     /// opened), never the block's `profile`: agents can edit layouts, and
     /// removing the field must not hide the marker while access is on.
+    ///
+    /// The body is the `browser-prototype` mod's copy for this block, which
+    /// draws the placeholder and says where the page goes (`nativeView`),
+    /// with a canvas after it that places the page every frame
+    /// (`browser::element`). The window draws the body itself when the page
+    /// can't show here (`Browsers::drawn_by_mod`).
     pub(super) fn fork_render_browser(&self, n: &Node, browser: &str, url: &str, cx: &mut Context<Self>) -> AnyElement {
         let id = n.id.clone();
         let bar = self.fork.browsers.agent_state(browser).map(|_| self.agent_bar(&n.id, browser, cx));
+        let look = crate::browser::Look { surface: c("surface"), text: c("foreground"), dim: c("dim") };
+        let loaded = self.copies.get(&n.id).is_some_and(|c| c.root.is_some());
+        let owns = self.fork.browsers.owns(&n.id, browser);
+        let b = browser.to_owned();
+        let body = if self.fork.browsers.drawn_by_mod(&n.id, browser) && loaded {
+            let place = owns.then(|| canvas(|_, _, _| {}, move |bounds, _, window, _| crate::browser::place(&b, bounds, window)).absolute().size_full());
+            div().size_full().relative().child(self.render_slot(&n.id, cx)).children(place).into_any_element()
+        } else {
+            // The window's own placeholder. Also when the mod didn't load (the mods' VM
+            // failed, a broken edit): the page then fills the body, so it never depends on
+            // the mod runtime.
+            let fill = owns.then(|| canvas(|_, _, _| {}, move |bounds, _, window, _| crate::browser::place_whole(&b, bounds, window)).absolute().size_full());
+            div().size_full().relative().child(self.fork.browsers.element(&n.id, browser, url, look)).children(fill).into_any_element()
+        };
         div()
             .size_full()
             .flex()
@@ -637,15 +657,21 @@ impl AppWindow {
                     .flex_1()
                     .min_h_0()
                     .relative()
-                    // The page takes clicks itself once it shows; until then a click focuses the pane.
+                    // The page takes clicks itself once it shows; until then a click focuses the
+                    // pane and gives the page the keyboard. This runs after the mod slot's own
+                    // click handler, which focuses the pane as a mod that keeps the keyboard
+                    // (`focused_pane`): a browser pane's keyboard is its page's.
                     .on_any_mouse_down(cx.listener(move |this, _, window, cx| {
-                        if this.model.tab_of(&id).is_some() && this.model.focused_pane().as_deref() != Some(id.as_str()) {
-                            this.model.focus_pane(&id);
-                            this.focused_pane = None;
-                            this.sync(window, cx);
+                        if this.model.tab_of(&id).is_none() {
+                            return;
                         }
+                        if this.model.focused_pane().as_deref() != Some(id.as_str()) {
+                            this.model.focus_pane(&id);
+                        }
+                        this.focused_pane = None;
+                        this.sync(window, cx);
                     }))
-                    .child(self.fork.browsers.element(&n.id, browser, url, crate::browser::Look { surface: c("surface"), text: c("foreground"), dim: c("dim") })),
+                    .child(body),
             )
             .into_any_element()
     }
@@ -701,8 +727,8 @@ mod tests {
     }
 }
 
-/// The window keeps browser blocks out of upstream's mod code (the
-/// `FORK(browser)` seams in `src/window.rs`).
+/// A browser block runs as an ordinary mod: the shipped `browser-prototype`
+/// (cameronsjo/herdr-app#4).
 #[cfg(test)]
 mod window_tests {
     use crate::browser::block::BROWSER_MOD;
@@ -730,13 +756,13 @@ mod window_tests {
     }
 
     #[test]
-    fn browser_blocks_start_no_mod_copy() {
-        in_own_process("window_starts_no_mod_copy_for_a_browser");
+    fn a_browser_block_runs_the_browser_prototype_mod() {
+        in_own_process("window_runs_the_browser_prototype_mod");
     }
 
     #[gpui::test]
-    fn window_starts_no_mod_copy_for_a_browser(cx: &mut gpui::TestAppContext) {
-        if !running_alone("window_starts_no_mod_copy_for_a_browser") {
+    fn window_runs_the_browser_prototype_mod(cx: &mut gpui::TestAppContext) {
+        if !running_alone("window_runs_the_browser_prototype_mod") {
             return;
         }
         let home = crate::mods::app_dir();
@@ -748,7 +774,7 @@ mod window_tests {
         let layout = json!({ "id": "root", "type": "row", "children": [
             { "id": "page", "type": "block", "content": { "mod": BROWSER_MOD, "props": { "browser": "b1", "url": "about:blank" } } },
             { "id": "other", "type": "block", "content": { "mod": "frame-none" } } ],
-          "floating": [ { "id": "f", "content": { "mod": BROWSER_MOD, "props": { "browser": "b2" } } } ] });
+          "floating": [ { "id": "f", "content": { "mod": BROWSER_MOD, "props": { "browser": "b2", "url": "https://example.test/cb?code=42" } } } ] });
         std::fs::write(home.join("layouts/browsers.json"), layout.to_string()).unwrap();
         cx.update(crate::mods::init);
         let requests = crate::mods::install_policy();
@@ -759,10 +785,25 @@ mod window_tests {
         view.update(cx, |this, _| {
             assert_eq!(this.layout_name, "browsers");
             let (_, shown) = this.visible();
-            assert!(shown.iter().all(|(_, i)| i.name != BROWSER_MOD), "visible: {:?}", shown.iter().map(|(s, _)| s).collect::<Vec<_>>());
-            assert!(this.owned_mods().values().all(|i| i.name != BROWSER_MOD));
-            assert!(this.copies.values().all(|c| c.inst.name != BROWSER_MOD), "a browser block started a mod copy");
-            assert!(super::missing_mods("browsers").iter().all(|m| m != BROWSER_MOD));
+            assert!(shown.iter().any(|(s, i)| s == "page" && i.name == BROWSER_MOD), "visible: {:?}", shown.iter().map(|(s, _)| s).collect::<Vec<_>>());
+            let page = this.copies.get("page").expect("the browser block's mod copy");
+            assert_eq!(page.inst.name, BROWSER_MOD);
+            // It loaded: `herdr-native` (nativeView) resolves in the mods' VM.
+            assert!(page.root.is_some() && page.error.is_none(), "browser-prototype did not load: {:?}", page.error);
+            assert!(super::missing_mods("browsers").iter().all(|m| m != BROWSER_MOD), "the mod ships with Herdr");
+            // No copy's props hold a page's url, the float's included.
+            let owned = this.owned_mods();
+            for (slot, i) in shown.iter().map(|(s, i)| (s, i)).chain(owned.iter()) {
+                assert!(i.props.get("url").is_none(), "{slot} got a url: {}", i.props);
+            }
+            assert_eq!(owned.get(&super::floats::slot("f")).map(|i| &i.props["float"]), Some(&json!("f")));
+        });
+        // A new VM (memory restart) keeps the catalog, or every page shows "did not load".
+        cx.update(|window, cx| view.update(cx, |this, cx| assert!(this.restart_mods(window, cx))));
+        cx.run_until_parked();
+        view.update(cx, |this, _| {
+            let page = this.copies.get("page").expect("the browser block's mod copy after a restart");
+            assert!(page.root.is_some() && page.error.is_none(), "browser-prototype did not load after restart_mods: {:?}", page.error);
         });
     }
 

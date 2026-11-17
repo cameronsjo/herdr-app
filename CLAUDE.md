@@ -29,7 +29,7 @@ Run `scripts/fork/sync-upstream`; it is resumable, so re-run it after resolving 
 
 - Before resolving, run `git diff --find-renames=30% --name-status <base> origin/master` over the seam files. A rewritten file means re-implementing its seam, not merging it.
 - After taking `--theirs` on a seam file, re-apply every fork line from `git diff <upstream-base> <pre-sync-tip> -- <file>` (the sync script prints it). Markers are an index; the diff is the full list, and an unmarked line dropped here fails nothing (the app home's 0700 mode in `src/mods.rs` is one).
-- A browser block is a `Content::Mod` named `browser-prototype` (`src/browser/block.rs`). A new upstream `Content::Mod` match that starts, draws or lists mods would treat browser blocks as mods: grep upstream's diff for `Content::Mod` and add the `browser::block` check where needed.
+- A browser block is a `Content::Mod` named `browser-prototype` (`src/browser/block.rs`). It runs the shipped `browser-prototype` mod like any mod block, but the window draws its frame and the `panes` list describes its page: a new upstream `Content::Mod` match that draws or lists mods needs the `browser::block` check (grep upstream's diff for `Content::Mod`). A sync that changes how `ShellRuntime` is created must keep `browser::element::components()` (the mods' `nativeView`).
 - Count `log_safe` and escape call sites in `src/browser/` and seam files before and after; a drop is a finding.
 - Record each conflict decision under the sync's dated heading in `docs/fork/CHANGES.md`.
 

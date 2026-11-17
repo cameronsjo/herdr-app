@@ -75,18 +75,20 @@ engine; the first is CEF's alone and goes away with another engine:
    (`vendor/gpui-pre-macos/src/platform.rs`, 34 lines, `HERDR:` marked):
    two report and set a flag, and `sendEvent:` sets it around the call.
    The protocol itself is added at run time, after CEF's framework loads.
-2. **A block that hosts a native view.** Today a mod block,
+2. **A block that hosts a native view.** A mod block,
    `{ "mod": "browser-prototype", "props": { "browser": "b1", "url": "…", "profile"?: "agent" } }`,
-   that the app draws itself, with bounds and visibility reported each
-   frame, and key and focus routing. It is a mod block because the core
+   drawn by the shipped `browser-prototype` mod with a `nativeView` element
+   (`src/browser/element.rs`, cameronsjo/herdr-app#4), while the app places
+   the page each frame, hides it under overlays and routes keys and focus. It is a mod block because the core
    keeps a machine's whole layout as one document and `Content` in
    `src/layout.rs` is an untagged enum: a block of a new kind matches no
    variant in a released herdr-app, which then can't read that machine's
    layout at all. Checked against master's `Content`: `{ "browser": "b1" }`
    fails with "data did not match any variant of untagged enum Content",
    while the mod block parses, shows that one pane as a mod that didn't
-   load, and keeps its props. A general "native view" element a mod could
-   draw would make this an ordinary mod.
+   load, and keeps its props. The element is the general piece: a mod
+   says where a native view Herdr owns goes, and the window keeps it there
+   on frames where the mod's cached paint is reused.
 3. **An overlay hook.** GPUI draws in one Metal layer and can't draw over a
    native view, so Herdr's overlays report their rectangles each frame and a
    page under one is hidden (its block shows the title and url meanwhile).

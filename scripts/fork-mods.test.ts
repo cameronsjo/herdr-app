@@ -1,4 +1,5 @@
-// FORK(background-mods): the fork's own mods (defaults/mods/open-folder, space-groups, name-sync) and agents/fork.js.
+// FORK(background-mods): the fork's own mods: the background ones (defaults/mods/open-folder,
+// space-groups, name-sync), agents/fork.js, and browser-prototype, a browser block's page.
 import { test, expect } from "bun:test";
 import { readFile } from "node:fs/promises";
 
@@ -144,6 +145,22 @@ test("name-sync remembers an offline machine's terminals and forgets ended ones"
   const { seen } = plan([term("t1", "x", "c1", "finished")], tabsOf({ id: "c1", name: "1", named: false }), last);
   // t1 ended; t2 is no longer listed on a machine that lists terminals; vps lists nothing.
   expect(seen).toEqual({ "vps/t9": { name: "away", tab: "vps/c2" } });
+});
+
+test("browser-prototype's placeholder never shows a saved address's query or sign-in", async () => {
+  const { shownUrl, placeholder } = await load("browser-prototype", ["shownUrl", "placeholder"]);
+  expect(shownUrl("https://me:pw@example.test/cb?code=42#top")).toBe("https://example.test/cb");
+  expect(shownUrl("https://example.test/a@b")).toBe("https://example.test/a@b");
+  expect(shownUrl("https://me:p@ss@example.test/")).toBe("https://example.test/");
+  expect(placeholder(undefined, "x", true).note).toContain("floating");
+  expect(placeholder(undefined, undefined)).toEqual({ title: null, note: "Opening…" });
+  expect(shownUrl(undefined)).toBe("");
+  // Not open yet: the saved address, bare.
+  expect(placeholder(undefined, "https://example.test/cb?code=42")).toEqual({ title: null, note: "Opening https://example.test/cb" });
+  // Open: what browsers() says (already without a query unless agent access is on).
+  expect(placeholder({ loading: true, url: "https://example.test/", title: "" }, "x")).toEqual({ title: null, note: "Opening https://example.test/" });
+  expect(placeholder({ loading: false, url: "https://example.test/", title: "Example" }, "x")).toEqual({ title: "Example", note: "https://example.test/" });
+  expect(placeholder({ loading: false, url: "https://example.test/", title: "" }, "x")).toEqual({ title: null, note: "https://example.test/" });
 });
 
 async function loadFork() {
