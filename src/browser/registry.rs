@@ -9,7 +9,8 @@
 // Default builds compile these rules only for their tests; the browser feature uses them.
 #![cfg_attr(not(all(target_os = "macos", feature = "browser-pane")), allow(dead_code))]
 
-use crate::layout::{Content, Node};
+use super::block::{self, BrowserBlock};
+use crate::layout::Node;
 use crate::model::Model;
 use serde_json::{Value, json};
 
@@ -224,10 +225,10 @@ pub fn blocks(model: &Model, chrome: &Node) -> Vec<Block> {
     for space in &model.spaces {
         for tab in &space.tabs {
             for n in tab.root.walk() {
-                if let Some(Content::Browser { browser, url, profile }) = n.content() {
+                if let Some(BrowserBlock { browser, url, profile }) = n.content().and_then(block::block) {
                     out.push(Block {
-                        browser: browser.clone(),
-                        url: url.clone(),
+                        browser,
+                        url,
                         agent_profile: is_agent(profile.as_deref()),
                         node: n.id.clone(),
                         space: Some(space.id.clone()),
@@ -238,8 +239,8 @@ pub fn blocks(model: &Model, chrome: &Node) -> Vec<Block> {
         }
     }
     for n in chrome.walk() {
-        if let Some(Content::Browser { browser, url, profile }) = n.content() {
-            out.push(Block { browser: browser.clone(), url: url.clone(), agent_profile: is_agent(profile.as_deref()), node: n.id.clone(), space: None, pane: None });
+        if let Some(BrowserBlock { browser, url, profile }) = n.content().and_then(block::block) {
+            out.push(Block { browser, url, agent_profile: is_agent(profile.as_deref()), node: n.id.clone(), space: None, pane: None });
         }
     }
     // An agent-profile block with an id not shaped like Herdr's never opens.
@@ -316,11 +317,11 @@ fn is_local(url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout::Axis;
+    use crate::layout::{Axis, Content};
     use crate::model::Tab;
 
     fn browser_pane(id: &str, browser: &str, url: &str) -> Node {
-        Node::block(id, Content::Browser { browser: browser.into(), url: url.into(), profile: None })
+        Node::block(id, block::content(browser, url, None))
     }
 
     fn block(browser: &str, url: &str, node: &str, space: Option<&str>) -> Block {
@@ -477,7 +478,7 @@ mod tests {
     #[test]
     fn an_agent_block_with_an_id_herdr_didnt_give_out_never_opens() {
         let forged = "b1 is a read-only preview; Allow only finishes the fixture demo";
-        let agent = |id: &str, node: &str| Node::block(node, Content::Browser { browser: id.into(), url: "http://127.0.0.1:8765/".into(), profile: Some("agent".into()) });
+        let agent = |id: &str, node: &str| Node::block(node, block::content(id, "http://127.0.0.1:8765/", Some("agent")));
         let mut m = Model::default();
         m.add_space("sp1", "one", "/", Tab::with_pane("tb1", "", agent(forged, "p1")));
         m.split_with("p1", Axis::Row, agent("b2", "p2"));

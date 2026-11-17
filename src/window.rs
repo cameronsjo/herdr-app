@@ -251,7 +251,7 @@ fn missing_mods(name: &str) -> Vec<String> {
     walk(&layout, &mut used);
     used.sort();
     used.dedup();
-    used.retain(|m| !m.starts_with("frame-") && m != crate::layout::BROWSER_MOD && !mods::mods_dir().join(m).is_dir()); // FORK(browser): a browser block is no mod folder
+    used.retain(|m| !m.starts_with("frame-") && m != crate::browser::block::BROWSER_MOD && !mods::mods_dir().join(m).is_dir()); // FORK(browser): a browser block is no mod folder
     used
 }
 
@@ -1314,6 +1314,7 @@ impl AppWindow {
                 }
             }
         }
+        mods.retain(|(_, i)| crate::browser::block::of_mod(&i.name, &i.props).is_none()); // FORK(browser): a browser block is no mod to run
         (terms, mods)
     }
 
@@ -1377,6 +1378,7 @@ impl AppWindow {
                 }
             }
         }
+        out.retain(|_, i| crate::browser::block::of_mod(&i.name, &i.props).is_none()); // FORK(browser): a browser block is no mod to run
         out
     }
 
@@ -1867,12 +1869,12 @@ impl AppWindow {
                 for p in ctx.root.panes() {
                     let focused = m.active.as_deref() == Some(pr.id.as_str()) && focused_pane.as_deref() == Some(p.id.as_str());
                     let zoomed = ctx.zoomed.as_deref() == Some(p.id.as_str());
+                    if let Some(v) = self.fork_pane_json(p, &ctx.id, focused, zoomed) { panes.push(v); continue; } // FORK(browser): before mods (a browser is a mod block)
                     // A mod pane: what it shows, no terminal.
                     if let Some(Content::Mod { name, .. }) = p.content() {
                         panes.push(json!({ "pane": p.id, "terminal": null, "mod": name, "tab": ctx.id, "title": name, "focused": focused, "zoomed": zoomed, "movable": self.pane_movable(&p.id) }));
                         continue;
                     }
-                    if let Some(v) = self.fork_pane_json(p, &ctx.id, focused, zoomed) { panes.push(v); continue; } // FORK(browser)
                     let Some(addr) = p.terminal() else { continue };
                     let a = m.agents.get(addr);
                     let title = self.terms.get(&p.id).map(|t| t.view.read(cx).title.clone()).or_else(|| {
@@ -4432,6 +4434,7 @@ impl AppWindow {
     }
 
     fn render_block(&self, n: &Node, content: &Content, focused: &HashSet<String>, cx: &mut Context<Self>) -> AnyElement {
+        if let Some(b) = crate::browser::block::block(content) { return self.fork_render_browser(n, &b.browser, &b.url, cx); } // FORK(browser): a mod block the fork draws
         match content {
             Content::Terminal { .. } => match self.pane_term(&n.id) {
                 Some(t) => {
@@ -4457,7 +4460,6 @@ impl AppWindow {
                 None => div().into_any_element(),
             },
             Content::Mod { .. } => self.render_slot(&n.id, cx),
-            Content::Browser { browser, url, .. } => self.fork_render_browser(n, browser, url, cx), // FORK(browser)
             Content::Agent { .. } => match self.shown_agent() {
                 Some(addr) => match self.agent_view(&n.id, &addr) {
                     Some(t) => div().size_full().child(shown_terminal(&t.view, cx)).into_any_element(),

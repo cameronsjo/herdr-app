@@ -5,6 +5,7 @@
 //! window's private fields and methods.
 
 use super::*;
+use crate::browser::block::{self, BrowserNode};
 
 /// The height of an agent browser's header (`AppWindow::agent_bar`).
 const AGENT_HEADER: f32 = 26.0;
@@ -43,7 +44,7 @@ impl ForkBrowser {
 /// the page's native view, so it would show only where Herdr draws (an
 /// agent browser's header, which it would hide on hover).
 pub(super) fn header_over(hover: bool, content: Option<&Content>) -> bool {
-    hover && !matches!(content, Some(Content::Browser { .. }))
+    hover && !content.is_some_and(block::is_browser)
 }
 
 /// Whether a command changes the tab document (`dispatch`'s structural list).
@@ -431,9 +432,9 @@ impl AppWindow {
     fn save_browser_url(&mut self, browser: &str, url: &str) {
         let Some(pane) = self.browser_pane(browser) else { return };
         if let Some(n) = self.model.tab_of(&pane).map(|t| t.id.clone()).and_then(|t| self.model.tab_mut(&t)).and_then(|t| t.root.find_mut(&pane))
-            && let Kind::Block { content: Content::Browser { url: saved, .. } } = &mut n.kind
+            && let Kind::Block { content } = &mut n.kind
         {
-            *saved = url.to_owned();
+            block::set_url(content, url);
         }
     }
 
@@ -448,7 +449,7 @@ impl AppWindow {
         };
         let (browser, url) = self.fork.browsers.prepare_open(url, &self.model, &self.chrome)?;
         let target = pane.or_else(|| self.model.focused_pane());
-        let block = |id: &str| Node::block(id, Content::Browser { browser: browser.clone(), url: url.clone(), profile: profile.clone() });
+        let block = |id: &str| Node::block(id, block::content(&browser, &url, profile.as_deref()));
         match place {
             "right" | "down" => {
                 let target = target.ok_or("no pane to open the browser beside: make a space first (space.new), or use place \"tab\"")?;
@@ -544,7 +545,8 @@ impl AppWindow {
 
     /// A browser pane in the mods' `panes` list: its page, no terminal.
     pub(super) fn fork_pane_json(&self, p: &Node, tab: &str, focused: bool, zoomed: bool) -> Option<Value> {
-        let Some(Content::Browser { browser, url, .. }) = p.content() else { return None };
+        let block::BrowserBlock { browser, url, .. } = p.content().and_then(block::block)?;
+        let (browser, url) = (&browser, &url);
         // A browser that isn't open: its saved url, without query or fragment
         // (codes and magic links stay in the tab document only; an open one's
         // comes from `info`).
@@ -562,10 +564,7 @@ impl AppWindow {
             .root
             .walk()
             .into_iter()
-            .filter_map(|n| match n.content() {
-                Some(Content::Browser { browser, url, .. }) => Some(browser_status(self.fork.browsers.info(browser, false), browser, &n.id, url)),
-                _ => None,
-            })
+            .filter_map(|n| n.content().and_then(block::block).map(|b| browser_status(self.fork.browsers.info(&b.browser, false), &b.browser, &n.id, &b.url)))
             .collect();
         if !browsers.is_empty() {
             tab["browsers"] = json!(browsers);
@@ -631,6 +630,7 @@ impl AppWindow {
 mod tests {
     // Not `super::*`: it brings `gpui::test`, which shadows `#[test]`.
     use super::{browser_status, header_over, needs_model_pane, structural};
+    use crate::browser::block;
     use crate::layout::Content;
     use serde_json::json;
 
@@ -646,7 +646,7 @@ mod tests {
 
     #[test]
     fn a_hover_header_is_never_drawn_over_a_browser_pane() {
-        let browser = Content::Browser { browser: "b1".into(), url: "https://example.test/".into(), profile: Some("agent".into()) };
+        let browser = block::content("b1", "https://example.test/", Some("agent"));
         assert!(!header_over(true, Some(&browser)), "a hover header would sit on the agent header");
         assert!(!header_over(false, Some(&browser)));
         let terminal = Content::Terminal { terminal: "t1".into() };
