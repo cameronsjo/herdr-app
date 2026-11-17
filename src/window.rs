@@ -253,7 +253,7 @@ fn missing_mods(name: &str) -> Vec<String> {
     walk(&layout, &mut used);
     used.sort();
     used.dedup();
-    used.retain(|m| !m.starts_with("frame-") && m != crate::browser::block::BROWSER_MOD && !mods::mods_dir().join(m).is_dir()); // FORK(browser): a browser block is no mod folder
+    used.retain(|m| !m.starts_with("frame-") && !mods::mods_dir().join(m).is_dir());
     used
 }
 
@@ -513,7 +513,8 @@ impl AppWindow {
     }
 
     fn with_file_events(core: Arc<Core>, requests: async_channel::Receiver<Request>, file_events: Option<crate::files::FileEvents>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let runtime = ShellRuntime::new(cx).map_err(|e| tracing::error!("script runtime failed, mods are off: {e:#}")).ok();
+        // FORK(browser): mods get herdr-native's nativeView.
+        let runtime = ShellRuntime::new_with_components(cx, crate::browser::element::components()).map_err(|e| tracing::error!("script runtime failed, mods are off: {e:#}")).ok();
         if let (Some(runtime), Some(events)) = (&runtime, &file_events) {
             runtime.set_source_revision_provider(events.revision_provider());
         }
@@ -1255,7 +1256,7 @@ impl AppWindow {
         let mut mods = Vec::new();
         let visit = |n: &Node, terms: &mut Vec<(String, String)>, mods: &mut Vec<(String, Instance)>| match n.content() {
             Some(Content::Terminal { terminal }) => terms.push((n.id.clone(), terminal.clone())),
-            Some(Content::Mod { name, props }) => mods.push((n.id.clone(), Instance { name: name.clone(), props: props.clone() })),
+            Some(Content::Mod { name, props }) => mods.push((n.id.clone(), Instance { name: name.clone(), props: crate::browser::block::mod_props(name, props) })), // FORK(browser): a page's url stays out of its mod
             _ => {}
         };
         let stacks = |root: &Node, mods: &mut Vec<(String, Instance)>| {
@@ -1263,7 +1264,7 @@ impl AppWindow {
                 if let Kind::Stack { header: Some(h), .. } = &n.kind
                     && let HeaderContent::Mod { name, props } = &h.content
                 {
-                    mods.push((format!("{}#header", n.id), Instance { name: name.clone(), props: props.clone() }));
+                    mods.push((format!("{}#header", n.id), Instance { name: name.clone(), props: crate::browser::block::mod_props(name, props) })); // FORK(browser): same as owned_mods
                 }
             }
         };
@@ -1316,7 +1317,6 @@ impl AppWindow {
                 }
             }
         }
-        mods.retain(|(_, i)| crate::browser::block::of_mod(&i.name, &i.props).is_none()); // FORK(browser): a browser block is no mod to run
         (terms, mods)
     }
 
@@ -1325,7 +1325,7 @@ impl AppWindow {
     /// tab (zoomed or not shown), and the overlays.
     fn owned_mods(&self) -> HashMap<String, Instance> {
         let mut out = HashMap::new();
-        let inst = |name: &String, props: &Value| Instance { name: name.clone(), props: props.clone() };
+        let inst = |name: &String, props: &Value| Instance { name: name.clone(), props: crate::browser::block::mod_props(name, props) }; // FORK(browser): a page's url stays out of its mod
         for n in self.chrome.walk() {
             if let Some(Content::Mod { name, props }) = n.content() {
                 out.insert(n.id.clone(), inst(name, props));
@@ -1380,7 +1380,6 @@ impl AppWindow {
                 }
             }
         }
-        out.retain(|_, i| crate::browser::block::of_mod(&i.name, &i.props).is_none()); // FORK(browser): a browser block is no mod to run
         out.extend(fork_mods::background(&self.folders)); // FORK(background-mods)
         out
     }
@@ -4223,7 +4222,7 @@ impl AppWindow {
     /// dialogs and windows too (toasts close). Hidden copies start fresh when
     /// shown. Terminals, the core and the layout stay.
     fn restart_mods(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let fresh = match ShellRuntime::replace_default(cx) {
+        let fresh = match ShellRuntime::replace_default_with_components(cx, crate::browser::element::components()) { // FORK(browser): mods get nativeView
             Ok(fresh) => fresh,
             Err(e) => {
                 tracing::error!("could not start a new script runtime: {e:#}");
@@ -5071,7 +5070,7 @@ fn num_in(v: &Value, k: &str) -> f32 {
 /// A floating mod's slot and copy (it's told its float id). `visible` and
 /// `owned_mods` must build the same, or a kept copy is dropped.
 fn float_mod(id: &str, name: &str, props: &Value) -> (String, Instance) {
-    let mut props = if props.is_object() { props.clone() } else { json!({}) };
+    let mut props = if props.is_object() { crate::browser::block::mod_props(name, props) } else { json!({}) }; // FORK(browser): a page's url stays out of its mod
     props["float"] = json!(id);
     (floats::slot(id), Instance { name: name.to_owned(), props })
 }

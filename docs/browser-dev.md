@@ -148,7 +148,10 @@ into the agent's console. It writes your answers to a results file.
   after a restart) or as a block in a layout. It is saved as a mod block so
   a herdr-app without this prototype, sharing the same core, shows that one
   pane as a mod that didn't load instead of failing to read the whole
-  layout. The name isn't `browser`, which Herdr's own browser mod will
+  layout. In this build it is an ordinary mod: the shipped
+  `browser-prototype` mod draws the placeholder and says where the page goes
+  with `nativeView` (`src/browser/element.rs`); Herdr draws the agent header
+  above it and places the page each frame. The name isn't `browser`, which Herdr's own browser mod will
   likely use: neither reads the other's blocks. In a floating block it
   never opens: a native view can't float over GPUI's drawing.
 - Each frame the page's view takes its block's bounds; a block that isn't
