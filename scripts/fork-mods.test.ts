@@ -236,6 +236,8 @@ test("outside-agents reads a heartbeat file and drops it when its ttl passes", a
   expect(parse("x", null, now)).toBeNull();
   expect(parse("../x", JSON.stringify({ status: "idle" }), now)).toBeNull();
   for (const status of ["constructor", "__proto__", "toString"]) expect(parse("x", JSON.stringify({ status }), now)).toBeNull();
+  // A status that is not a string is not a status, and does not throw.
+  for (const status of [{ toString: null, valueOf: null }, 1, ["idle"]]) expect(parse("x", JSON.stringify({ status }), now)).toBeNull();
   expect(parse("x", JSON.stringify({ status: "idle", pad: "p".repeat(5000) }), now)).toBeNull();
   expect(parse("x", JSON.stringify({ status: "idle", name: "n".repeat(500) }), now).name.length).toBe(80);
   expect(parse("x", JSON.stringify({ status: "idle", name: "a\n\u202eb", title: `${"t".repeat(199)}\u{1F600}x` }), now)).toMatchObject({ name: "a b", title: `${"t".repeat(199)}\u{1F600}` });
