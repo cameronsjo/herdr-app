@@ -151,6 +151,8 @@ test("browser-prototype's placeholder never shows a saved address's query or sig
   const { shownUrl, placeholder } = await load("browser-prototype", ["shownUrl", "placeholder"]);
   expect(shownUrl("https://me:pw@example.test/cb?code=42#top")).toBe("https://example.test/cb");
   expect(shownUrl("https://example.test/a@b")).toBe("https://example.test/a@b");
+  expect(shownUrl("https://me:p@ss@example.test/")).toBe("https://example.test/");
+  expect(placeholder(undefined, "x", true).note).toContain("floating");
   expect(shownUrl(undefined)).toBe("");
   // Not open yet: the saved address, bare.
   expect(placeholder(undefined, "https://example.test/cb?code=42")).toEqual({ title: null, note: "Opening https://example.test/cb" });

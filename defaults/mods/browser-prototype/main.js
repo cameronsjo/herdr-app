@@ -1,7 +1,7 @@
 // FORK(browser): a browser block's page (cameronsjo/herdr-app#4). Herdr saves a
 // browser pane as this mod's block, { "mod": "browser-prototype", "props":
 // { "browser": "b1", "url": "…", "profile"?: "agent" } }, and the window runs
-// it like any pane mod. It draws what shows while the page isn't there (its
+// it like any pane mod, with props { browser, profile? } (never the url). It draws what shows while the page isn't there (its
 // title and address while it opens, or while a menu or dialog covers it) and
 // says where the page goes with nativeView. The page is a native view on top:
 // Herdr shows it only while this block shows and nothing covers it, and keeps
@@ -10,19 +10,24 @@
 
 import { View, div } from "gpui-kit";
 import { nativeView } from "herdr-native";
-import { browsers, props, theme } from "herdr";
+import { browsers, panes, props, theme } from "herdr";
 
 /** A saved address without its query, fragment or sign-in (codes and magic
  *  links stay in the layout): what a page that isn't open shows. */
 function shownUrl(url) {
   if (typeof url !== "string") return "";
   const bare = url.split(/[?#]/)[0];
-  return bare.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/@]*@/i, "$1");
+  const m = /^([a-z][a-z0-9+.-]*:\/\/)([^/]*)(.*)$/i.exec(bare);
+  if (!m) return bare;
+  // The sign-in ends at the authority's last @ (a password may hold one).
+  const at = m[2].lastIndexOf("@");
+  return m[1] + (at < 0 ? m[2] : m[2].slice(at + 1)) + m[3];
 }
 
 /** What the placeholder says for this block's browser (`info`, from
  *  browsers(), or undefined while it isn't open yet): { title, note }. */
-function placeholder(info, savedUrl) {
+function placeholder(info, savedUrl, floating) {
+  if (floating) return { title: null, note: "A browser doesn't open in a floating block: put it in a pane or a layout block." };
   if (!info) return { title: null, note: `Opening ${shownUrl(savedUrl)}` };
   if (info.loading) return { title: null, note: `Opening ${info.url}` };
   return { title: info.title || null, note: info.url };
@@ -31,8 +36,12 @@ function placeholder(info, savedUrl) {
 export default class BrowserPage extends View {
   render() {
     const t = theme();
-    const { browser, url } = props() ?? {};
-    const { title, note } = placeholder(browsers().find((b) => b.browser === browser), url);
+    // The props name the browser only: the page's url isn't in them (it
+    // follows every navigation). A page not open yet shows its pane's saved
+    // address, which panes() gives without its query.
+    const { browser, float } = props() ?? {};
+    const saved = panes().find((p) => p.browser === browser)?.url;
+    const { title, note } = placeholder(browsers().find((b) => b.browser === browser), saved, Boolean(float));
     const card = div()
       .size_full()
       .flex()

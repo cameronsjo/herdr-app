@@ -59,12 +59,12 @@ use webkit as engine;
 #[cfg(all(target_os = "macos", feature = "browser-pane"))]
 mod view;
 #[cfg(all(target_os = "macos", feature = "browser-pane"))]
-pub use native::{Browsers, Event, place};
+pub use native::{Browsers, Event, place, place_whole};
 
 #[cfg(not(all(target_os = "macos", feature = "browser-pane")))]
 mod off;
 #[cfg(not(all(target_os = "macos", feature = "browser-pane")))]
-pub use off::{Browsers, Event, place};
+pub use off::{Browsers, Event, place, place_whole};
 
 /// Shows `ask` as an app-modal macOS alert and waits for the person's
 /// answer (`confirm::ask`). Call it from a foreground task, never while

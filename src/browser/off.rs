@@ -116,4 +116,7 @@ impl Browsers {
 }
 
 /// No pages to place.
+pub fn place_whole(_browser: &str, _bounds: gpui::Bounds<gpui::Pixels>, _window: &Window) {}
+
+/// No pages to place.
 pub fn place(_browser: &str, _block: gpui::Bounds<gpui::Pixels>, _window: &Window) {}

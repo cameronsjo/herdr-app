@@ -23,6 +23,12 @@
 //! outside the block that owns the page is ignored, so the page never leaves
 //! its block.
 //!
+//! Reports are keyed by the id a mod names, not by which mod painted them:
+//! another mod that draws `nativeView("browser", "b1")` with a rect inside
+//! b1's block can move or resize the page within that block. A report
+//! outside the block is ignored, so it can't take the page out of the block,
+//! over the agent header, or over an overlay, nor hide it.
+//!
 //! So a mod can't hide the page by leaving the element out of a later render:
 //! the page shows wherever the mod last put it until the block goes or an
 //! overlay covers it. The shipped mod always draws it.
@@ -119,18 +125,25 @@ fn inside(b: &Bounds<Pixels>, block: &Bounds<Pixels>) -> bool {
 /// Where `id`'s view goes this frame, in the block (`block`, its bounds)
 /// that owns it: the mod's last report this frame inside the block, else
 /// the last one taken, moved with the block. None: the mod hasn't placed it
-/// (still loading), or placed it outside the block.
+/// inside the block yet (still loading).
 #[cfg_attr(not(all(target_os = "macos", feature = "browser-pane")), allow(dead_code))]
 pub fn spot(id: &str, block: Bounds<Pixels>) -> Option<Bounds<Pixels>> {
-    if let Some(reports) = REPORTS.with_borrow_mut(|r| r.remove(id)) {
-        let taken = reports.into_iter().rev().find(|b| inside(b, &block));
-        HELD.with_borrow_mut(|h| match taken {
-            Some(b) => h.insert(id.to_owned(), (b.origin - block.origin, b.size)),
-            None => h.remove(id),
-        });
-        return taken;
+    let reports = REPORTS.with_borrow_mut(|r| r.remove(id)).unwrap_or_default();
+    // A report outside the block (another mod drawing the same id) is
+    // ignored, not taken as "hide": the block's own mod, its paint reused
+    // this frame, still holds the spot.
+    if let Some(b) = reports.into_iter().rev().find(|b| inside(b, &block)) {
+        HELD.with_borrow_mut(|h| h.insert(id.to_owned(), (b.origin - block.origin, b.size)));
+        return Some(b);
     }
     HELD.with_borrow(|h| h.get(id).map(|(offset, size)| Bounds { origin: block.origin + *offset, size: *size })).filter(|b| inside(b, &block))
+}
+
+/// The page closed: a page opened later under the same id starts from its
+/// mod's first report, not this one's last spot.
+#[cfg_attr(not(all(target_os = "macos", feature = "browser-pane")), allow(dead_code))]
+pub fn forget(id: &str) {
+    HELD.with_borrow_mut(|h| h.remove(id));
 }
 
 /// After a frame: reports no block took (an id nobody owns) go.
@@ -193,11 +206,14 @@ mod tests {
         let block = rect(0.0, 0.0, 300.0, 300.0);
         painted("b1", rect(0.0, 0.0, 300.0, 300.0));
         assert!(spot("b1", block).is_some());
-        // Another mod (an overlay, say) draws the same page elsewhere: ignored, and what
-        // was held goes, so the page hides rather than staying where the old report was.
+        // Another mod draws the same page elsewhere on a frame where the block's own
+        // mod was reused: ignored, and the page stays where its own mod put it.
         painted("b1", rect(500.0, 0.0, 300.0, 300.0));
-        assert_eq!(spot("b1", block), None);
-        assert_eq!(spot("b1", block), None);
+        assert_eq!(spot("b1", block), Some(block));
+        assert_eq!(spot("b1", block), Some(block));
+        // Never placed inside its block, a page has no spot however many reports it gets.
+        painted("b2", rect(500.0, 0.0, 300.0, 300.0));
+        assert_eq!(spot("b2", block), None);
     }
 
     #[test]
@@ -217,6 +233,16 @@ mod tests {
         painted("b1", rect(9.75, 10.0, 100.5, 100.0));
         assert!(spot("b1", block).is_some());
         painted("b1", rect(10.0, 10.0, 0.0, 100.0));
+        assert_eq!(spot("b1", block), None);
+    }
+
+    #[test]
+    fn a_closed_page_forgets_its_spot() {
+        reset();
+        let block = rect(0.0, 0.0, 300.0, 300.0);
+        painted("b1", block);
+        assert!(spot("b1", block).is_some());
+        forget("b1");
         assert_eq!(spot("b1", block), None);
     }
 

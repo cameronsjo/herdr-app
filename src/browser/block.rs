@@ -62,6 +62,19 @@ pub fn of_mod(name: &str, props: &Value) -> Option<BrowserBlock> {
     BrowserBlock::deserialize(props).ok().filter(|b| !b.browser.is_empty())
 }
 
+/// The props a mod block's copy gets. A browser block's lose `url`: it
+/// follows every navigation, so with it each new page would be a new mod
+/// instance (the copy reloads and the page blinks), and the whole url
+/// (sign-in codes, magic links) would reach mod JS, which only ever sees
+/// `public_url` (`browsers()`, `panes()`). The tab document keeps it.
+/// Every other block's props are unchanged.
+pub fn mod_props(name: &str, props: &Value) -> Value {
+    match (of_mod(name, props), props) {
+        (Some(_), Value::Object(o)) => Value::Object(o.iter().filter(|(k, _)| k.as_str() != "url").map(|(k, v)| (k.clone(), v.clone())).collect()),
+        _ => props.clone(),
+    }
+}
+
 /// Whether a block's content is a browser block (not a mod to load).
 pub fn is_browser(content: &Content) -> bool {
     block(content).is_some()
@@ -157,6 +170,21 @@ mod tests {
             let mut c = c;
             assert!(!set_url(&mut c, "https://b.test/"));
         }
+    }
+
+    #[test]
+    fn a_browser_blocks_mod_never_sees_its_url_so_navigating_keeps_the_copy() {
+        let mut page = content("b1", "https://example.test/cb?code=42", Some("agent"));
+        let Content::Mod { name, props } = &page else { unreachable!() };
+        let seen = mod_props(name, props);
+        assert_eq!(seen, serde_json::json!({ "browser": "b1", "profile": "agent" }));
+        assert!(set_url(&mut page, "https://example.test/next"));
+        let Content::Mod { name, props } = &page else { unreachable!() };
+        assert_eq!(mod_props(name, props), seen, "a navigation must not make a new mod instance");
+        // Any other mod block keeps every prop, url included.
+        let other = serde_json::json!({ "url": "https://example.test/?q=1", "x": 1 });
+        assert_eq!(mod_props("files", &other), other);
+        assert_eq!(mod_props(BROWSER_MOD, &serde_json::json!([1])), serde_json::json!([1]));
     }
 
     #[test]

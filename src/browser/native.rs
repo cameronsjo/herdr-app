@@ -94,6 +94,7 @@ impl Browsers {
             }
             engine::close(id);
             view::remove(id);
+            super::element::forget(id);
         }
         if changes.open.is_empty() {
             return;
@@ -377,6 +378,11 @@ impl Browsers {
             .into_any_element(),
         )
     }
+}
+
+/// The page fills `bounds`: a browser block whose mod didn't load.
+pub fn place_whole(browser: &str, bounds: gpui::Bounds<gpui::Pixels>, window: &Window) {
+    view::place(browser, bounds, window);
 }
 
 /// A browser block's frame, painted every frame after its mod: puts the

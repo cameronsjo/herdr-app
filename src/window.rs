@@ -1256,7 +1256,7 @@ impl AppWindow {
         let mut mods = Vec::new();
         let visit = |n: &Node, terms: &mut Vec<(String, String)>, mods: &mut Vec<(String, Instance)>| match n.content() {
             Some(Content::Terminal { terminal }) => terms.push((n.id.clone(), terminal.clone())),
-            Some(Content::Mod { name, props }) => mods.push((n.id.clone(), Instance { name: name.clone(), props: props.clone() })),
+            Some(Content::Mod { name, props }) => mods.push((n.id.clone(), Instance { name: name.clone(), props: crate::browser::block::mod_props(name, props) })), // FORK(browser): a page's url stays out of its mod
             _ => {}
         };
         let stacks = |root: &Node, mods: &mut Vec<(String, Instance)>| {
@@ -1325,7 +1325,7 @@ impl AppWindow {
     /// tab (zoomed or not shown), and the overlays.
     fn owned_mods(&self) -> HashMap<String, Instance> {
         let mut out = HashMap::new();
-        let inst = |name: &String, props: &Value| Instance { name: name.clone(), props: props.clone() };
+        let inst = |name: &String, props: &Value| Instance { name: name.clone(), props: crate::browser::block::mod_props(name, props) }; // FORK(browser): a page's url stays out of its mod
         for n in self.chrome.walk() {
             if let Some(Content::Mod { name, props }) = n.content() {
                 out.insert(n.id.clone(), inst(name, props));

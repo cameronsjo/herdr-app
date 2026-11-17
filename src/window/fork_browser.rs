@@ -633,15 +633,19 @@ impl AppWindow {
     pub(super) fn fork_render_browser(&self, n: &Node, browser: &str, url: &str, cx: &mut Context<Self>) -> AnyElement {
         let id = n.id.clone();
         let bar = self.fork.browsers.agent_state(browser).map(|_| self.agent_bar(&n.id, browser, cx));
-        let body = if self.fork.browsers.drawn_by_mod(&n.id, browser) {
-            let loaded = self.copies.get(&n.id).is_some_and(|c| c.root.is_some());
-            let place = (loaded && self.fork.browsers.owns(&n.id, browser)).then(|| {
-                let b = browser.to_owned();
-                canvas(|_, _, _| {}, move |bounds, _, window, _| crate::browser::place(&b, bounds, window)).absolute().size_full()
-            });
+        let look = crate::browser::Look { surface: c("surface"), text: c("foreground"), dim: c("dim") };
+        let loaded = self.copies.get(&n.id).is_some_and(|c| c.root.is_some());
+        let owns = self.fork.browsers.owns(&n.id, browser);
+        let b = browser.to_owned();
+        let body = if self.fork.browsers.drawn_by_mod(&n.id, browser) && loaded {
+            let place = owns.then(|| canvas(|_, _, _| {}, move |bounds, _, window, _| crate::browser::place(&b, bounds, window)).absolute().size_full());
             div().size_full().relative().child(self.render_slot(&n.id, cx)).children(place).into_any_element()
         } else {
-            self.fork.browsers.element(&n.id, browser, url, crate::browser::Look { surface: c("surface"), text: c("foreground"), dim: c("dim") })
+            // The window's own placeholder. Also when the mod didn't load (the mods' VM
+            // failed, a broken edit): the page then fills the body, so it never depends on
+            // the mod runtime.
+            let fill = owns.then(|| canvas(|_, _, _| {}, move |bounds, _, window, _| crate::browser::place_whole(&b, bounds, window)).absolute().size_full());
+            div().size_full().relative().child(self.fork.browsers.element(&n.id, browser, url, look)).children(fill).into_any_element()
         };
         div()
             .size_full()
