@@ -28,7 +28,11 @@ function shownUrl(url) {
  *  browsers(), or undefined while it isn't open yet): { title, note }. */
 function placeholder(info, savedUrl, floating) {
   if (floating) return { title: null, note: "A browser doesn't open in a floating block: put it in a pane or a layout block." };
-  if (!info) return { title: null, note: `Opening ${shownUrl(savedUrl)}` };
+  if (!info) {
+    // panes() lists tab panes only: a layout block's page has no saved address here.
+    const shown = shownUrl(savedUrl);
+    return { title: null, note: shown ? `Opening ${shown}` : "Opening…" };
+  }
   if (info.loading) return { title: null, note: `Opening ${info.url}` };
   return { title: info.title || null, note: info.url };
 }
@@ -58,6 +62,7 @@ export default class BrowserPage extends View {
       .size_full()
       .relative()
       .child(card)
-      .when(Boolean(browser), (d) => d.child(nativeView("browser", browser).absolute().inset_0()));
+      // A float doesn't hold the page: its report would move it.
+      .when(Boolean(browser) && !float, (d) => d.child(nativeView("browser", browser).absolute().inset_0()));
   }
 }

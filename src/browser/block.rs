@@ -65,8 +65,11 @@ pub fn of_mod(name: &str, props: &Value) -> Option<BrowserBlock> {
 /// The props a mod block's copy gets. A browser block's lose `url`: it
 /// follows every navigation, so with it each new page would be a new mod
 /// instance (the copy reloads and the page blinks), and the whole url
-/// (sign-in codes, magic links) would reach mod JS, which only ever sees
-/// `public_url` (`browsers()`, `panes()`). The tab document keeps it.
+/// (sign-in codes, magic links) would reach mod JS, which sees the
+/// address only through `panes()` (no query) and `browsers()` (the query
+/// only while agent access is on). The tab document keeps it. Every place
+/// that builds a mod copy's instance (blocks, stack headers, floats) calls
+/// this, so `visible` and `owned_mods` agree.
 /// Every other block's props are unchanged.
 pub fn mod_props(name: &str, props: &Value) -> Value {
     match (of_mod(name, props), props) {

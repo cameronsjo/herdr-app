@@ -774,7 +774,7 @@ mod window_tests {
         let layout = json!({ "id": "root", "type": "row", "children": [
             { "id": "page", "type": "block", "content": { "mod": BROWSER_MOD, "props": { "browser": "b1", "url": "about:blank" } } },
             { "id": "other", "type": "block", "content": { "mod": "frame-none" } } ],
-          "floating": [ { "id": "f", "content": { "mod": BROWSER_MOD, "props": { "browser": "b2" } } } ] });
+          "floating": [ { "id": "f", "content": { "mod": BROWSER_MOD, "props": { "browser": "b2", "url": "https://example.test/cb?code=42" } } } ] });
         std::fs::write(home.join("layouts/browsers.json"), layout.to_string()).unwrap();
         cx.update(crate::mods::init);
         let requests = crate::mods::install_policy();
@@ -791,6 +791,19 @@ mod window_tests {
             // It loaded: `herdr-native` (nativeView) resolves in the mods' VM.
             assert!(page.root.is_some() && page.error.is_none(), "browser-prototype did not load: {:?}", page.error);
             assert!(super::missing_mods("browsers").iter().all(|m| m != BROWSER_MOD), "the mod ships with Herdr");
+            // No copy's props hold a page's url, the float's included.
+            let owned = this.owned_mods();
+            for (slot, i) in shown.iter().map(|(s, i)| (s, i)).chain(owned.iter()) {
+                assert!(i.props.get("url").is_none(), "{slot} got a url: {}", i.props);
+            }
+            assert_eq!(owned.get(&super::floats::slot("f")).map(|i| &i.props["float"]), Some(&json!("f")));
+        });
+        // A new VM (memory restart) keeps the catalog, or every page shows "did not load".
+        cx.update(|window, cx| view.update(cx, |this, cx| assert!(this.restart_mods(window, cx))));
+        cx.run_until_parked();
+        view.update(cx, |this, _| {
+            let page = this.copies.get("page").expect("the browser block's mod copy after a restart");
+            assert!(page.root.is_some() && page.error.is_none(), "browser-prototype did not load after restart_mods: {:?}", page.error);
         });
     }
 

@@ -1264,7 +1264,7 @@ impl AppWindow {
                 if let Kind::Stack { header: Some(h), .. } = &n.kind
                     && let HeaderContent::Mod { name, props } = &h.content
                 {
-                    mods.push((format!("{}#header", n.id), Instance { name: name.clone(), props: props.clone() }));
+                    mods.push((format!("{}#header", n.id), Instance { name: name.clone(), props: crate::browser::block::mod_props(name, props) })); // FORK(browser): same as owned_mods
                 }
             }
         };
@@ -5070,7 +5070,7 @@ fn num_in(v: &Value, k: &str) -> f32 {
 /// A floating mod's slot and copy (it's told its float id). `visible` and
 /// `owned_mods` must build the same, or a kept copy is dropped.
 fn float_mod(id: &str, name: &str, props: &Value) -> (String, Instance) {
-    let mut props = if props.is_object() { props.clone() } else { json!({}) };
+    let mut props = if props.is_object() { crate::browser::block::mod_props(name, props) } else { json!({}) }; // FORK(browser): a page's url stays out of its mod
     props["float"] = json!(id);
     (floats::slot(id), Instance { name: name.to_owned(), props })
 }
