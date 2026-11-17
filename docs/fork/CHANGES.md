@@ -24,7 +24,6 @@ Upstream files the fork changes that can't carry a `FORK(` comment. A sync resol
 
 Exceptions to `CLAUDE.md` rule 4, each with its reason.
 
-- `Content::Browser` (`src/layout.rs`): the browser block. cameronsjo/herdr-app#18 tracks saving it as a mod block instead.
 - `Snapshot.browsers` (`src/mods.rs`): the mods' `browsers()` list. `Snapshot` is the one store every mod read goes through, and a parallel fork store would duplicate its revision tracking.
 
 ## Upstream syncs
@@ -56,8 +55,8 @@ Built 2026-10-30 to 2026-11-01 on `browser-prototype`. Design and security model
 
 - Engines behind cargo features: `browser` (CEF) and `browser-webkit` (WKWebView), both on the macOS-only `browser-pane`.
 - Panes save as a `browser-prototype` mod block, so a stock app shows one unloaded pane instead of failing the layout, and upstream's future browser mod never reads this fork's blocks.
-- Seams (upstream-owned files touched): see the footprint table. The window's browser code is in `src/window/fork_browser.rs`, the saved form of a browser block in `src/layout/fork_browser.rs`, and the control socket's owner-only checks in `src/browser/socket.rs`; `src/window.rs` (33 lines), `src/layout.rs` (6) and `src/control.rs` (2) keep only `FORK(browser)` call lines.
-- `Content::Browser` still widens upstream's `Content` enum, and `Content` (de)serializes through the fork's `Saved`, which must mirror upstream's serde attributes. cameronsjo/herdr-app#18 tracks removing the variant.
+- Seams (upstream-owned files touched): see the footprint table. The window's browser code is in `src/window/fork_browser.rs`, reading a browser block in `src/browser/block.rs`, and the control socket's owner-only checks in `src/browser/socket.rs`; `src/window.rs` and `src/control.rs` keep only `FORK(browser)` call lines.
+- A browser block is a `Content::Mod` named `browser-prototype` in memory too (cameronsjo/herdr-app#18, 2026-11-17), so upstream's `Content` enum and its serde attributes are untouched and `src/layout.rs` has no fork lines. The fork reads one through `browser::block::block`. Upstream code that treats a mod block as a mod skips browser blocks at four `FORK(browser)` seams in `src/window.rs`: `visible` and `owned_mods` (no mod copy starts), `render_block` (the fork draws it), and the mods' `panes` list (`fork_pane_json` runs first). `missing_mods` already skipped the name. After a sync, grep upstream's new `Content::Mod` sites for another place that needs the check.
 
 ## Updates and automation
 
