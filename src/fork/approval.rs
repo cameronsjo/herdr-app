@@ -43,12 +43,30 @@ fn clean(s: &str) -> String {
     s.chars().filter(|c| !c.is_control() && !matches!(*c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2069}' | '\u{feff}')).collect()
 }
 
-/// A line drawn only of box or rule characters: a prompt panel's top edge.
+/// A prompt panel's top edge: a box's top (`╭───╮`, `┌───┐`) or a bare
+/// rule (`────`). A box's bottom, or a line that mixes corners, is content:
+/// taking it as the top would hide the lines above it.
 fn edge(line: &str) -> bool {
     let t = line.trim();
     // Box-drawing only: a `---` or `===` line is text (a diff, markdown).
-    // A box's sides alone (an empty row inside it) are no edge.
-    t.chars().any(|c| matches!(c, '─' | '━' | '═' | '╭' | '╮' | '┌' | '┐')) && t.chars().all(|c| matches!(c, '─' | '━' | '═' | '╭' | '╮' | '╰' | '╯' | '┌' | '┐' | '└' | '┘' | '│' | '┃' | '║' | ' '))
+    let rule = |c: char| matches!(c, '─' | '━' | '═');
+    if t.is_empty() || !t.chars().any(rule) {
+        return false;
+    }
+    let n = t.chars().count();
+    let top = n > 2 && matches!(t.chars().next(), Some('╭' | '┌')) && matches!(t.chars().last(), Some('╮' | '┐')) && t.chars().skip(1).take(n - 2).all(rule);
+    top || t.chars().all(rule)
+}
+
+/// The panel's top edge above the options at `first`. A bare rule counts
+/// only when it is at least as wide as every line under it: a panel's rule
+/// spans it, and a short rule is part of what is shown (a table in a
+/// heredoc), so the lines above it still belong to the prompt.
+fn top_edge(lines: &[&str], first: usize) -> Option<usize> {
+    (0..first).rev().find(|&i| {
+        let t = lines[i].trim();
+        edge(t) && (!t.chars().all(|c| matches!(c, '─' | '━' | '═')) || lines[i + 1..first].iter().all(|l| l.trim_end().chars().count() <= lines[i].trim_end().chars().count()))
+    })
 }
 
 /// One screen line without a box's edges and the padding inside them.
@@ -137,7 +155,7 @@ pub fn parse(screen: &str) -> Option<Prompt> {
         return None;
     }
     // The question, then its context up to the panel's top edge.
-    let top = lines[..first].iter().rposition(|l| edge(l));
+    let top = top_edge(&lines, first);
     let mut above = lines[top.map_or(0, |t| t + 1)..first].iter().rev().map(|l| clean(unboxed(l))).filter(|l| !l.is_empty());
     let question = above.next().unwrap_or_default();
     let mut context: Vec<String> = above.collect();
@@ -240,9 +258,11 @@ fn current(core: &crate::hc::Core, terminal: &str) -> Result<(Option<String>, u6
     Ok((kind, turn, p))
 }
 
-/// How long `answer` waits for the key to go in: the core holds it while a
-/// person types in that pane.
-const KEYS_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+/// How long `answer` waits for the key to go in. The core holds it for as
+/// long as a person keeps typing in that pane and can't take it back, so
+/// `answer` waits for the reply and checks it; only a lost core ends this
+/// sooner.
+const KEYS_WAIT: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 
 /// `answer`'s arguments, `--token` anywhere: terminal, answer, token.
 fn answer_args(rest: &[String]) -> Option<(&str, &str, &str)> {
@@ -274,12 +294,13 @@ fn answer(core: &crate::hc::Core, terminal: &str, answer: &str, want: &str) -> R
     // answering there moves the agent on: its turn then differs, and this
     // key went to whatever came next.
     let sent = core.call_timeout("terminal.keys", json!({ "terminal": terminal, "keys": [n.to_string()] }), KEYS_WAIT).map_err(|e| {
-        failed(format!("{e:#} (someone may be typing in terminal {terminal}'s pane; the key may still go in: check the pane before trying again)"))
+        failed(format!("{e:#}: the key {n} may still be queued for terminal {terminal}; the core presses it 3 s after typing in that pane stops and it can't be cancelled, so it may answer a later prompt: check the pane"))
     })?;
     // No turn in the reply: nothing to check against, so not "answered".
     let at = sent.get("turn").and_then(Value::as_u64);
     let word = sent.get("status").and_then(Value::as_str);
-    if at != Some(turn) || word.is_some_and(|w| w != "blocked") {
+    // No status means the program no longer reports blocked: not "answered".
+    if at != Some(turn) || word != Some("blocked") {
         return Err((4, format!("pressed {n} on terminal {terminal}, but it moved on while the key waited for typing in its pane to stop: the key may have answered a later prompt; check the pane")));
     }
     Ok(json!({ "terminal": terminal, "answered": n, "label": p.options[n - 1] }))
@@ -370,11 +391,17 @@ some earlier output
         assert_eq!(parse(boxed_wrap).unwrap().options, ["Yes, and don't ask again", "No"]);
         // The whole command is context, however long; `---` inside it is
         // text, and a box's empty row is no edge.
-        let long = format!("─────\n Bash command\n   rm -rf ~/proj/data\n{}   ---\n│        │\n Do you want to proceed?\n 1. Yes\n 2. No\n", "   echo ok\n".repeat(15));
+        let long = format!("{}\n Bash command\n   rm -rf ~/proj/data\n{}   ---\n│        │\n Do you want to proceed?\n 1. Yes\n 2. No\n", "─".repeat(40), "   echo ok\n".repeat(15));
         let p = parse(&long).unwrap();
         assert!(p.complete);
         assert_eq!(p.context[1], "rm -rf ~/proj/data");
         assert_eq!(p.context.len(), 18);
+        // A short rule or a box's bottom inside the command is content: the
+        // lines above it still belong to the prompt.
+        let heredoc = format!("{}\n Bash command\n   rm -rf ~/proj/data\n   cat <<EOF\n   ────────\n   EOF\n Do you want to proceed?\n 1. Yes\n 2. No\n", "─".repeat(40));
+        assert!(parse(&heredoc).unwrap().context.contains(&"rm -rf ~/proj/data".to_string()));
+        let bottom = "──────────────────────────────\n Bash command\n   rm -rf ~/proj/data\n   ╰──────╯\n Proceed?\n 1. Yes\n 2. No\n";
+        assert!(parse(bottom).unwrap().context.contains(&"rm -rf ~/proj/data".to_string()));
         // No top edge above it: maybe cut off.
         let cut = parse("   rm -rf x\n Proceed?\n 1. Yes\n 2. No\n").unwrap();
         assert!(!cut.complete);

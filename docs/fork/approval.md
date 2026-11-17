@@ -22,8 +22,10 @@ herdr-app approval answer t3 approve --token 9f2c4e…
   label, a description) joins the option above it. Boxes and selection
   markers (`❯`, `›`) are ignored, and control, bidi and zero-width
   characters are dropped. The line above the options is the question. All
-  the lines above that, up to the panel's top edge (a box corner or a
-  `───` rule, never a `---` line), are its context: for Claude Code's Bash
+  the lines above that, up to the panel's top edge (a box's top `╭───╮` or
+  `┌───┐`, or a `───` rule at least as wide as everything under it; never a
+  `---` line, a box's bottom or a short rule inside the command), are its
+  context: for Claude Code's Bash
   prompt, the whole command. `complete` is false when no top edge was found
   on screen, so part of what is asked may be scrolled off.
 - The token is a hash of the terminal, its turn (the core counts one each
@@ -56,16 +58,21 @@ herdr-app approval answer t3 approve --token 9f2c4e…
   their choices (Claude Code, Codex). A prompt without numbers has to be
   answered in its pane.
 - Key delivery goes through the core's quiet gate: if a person typed into
-  that terminal in the last ~3 s, the key waits (up to 60 s here) until
-  they stop. The check runs before that wait, so a person who answers in
+  that terminal in the last ~3 s, the key waits until they stop, however
+  long they keep typing. `answer` waits with it so it can check the result.
+  Stopping `answer` (Ctrl-C, a lost connection) does not cancel the key: the
+  core still presses it 3 s after typing stops, on whatever prompt is
+  showing then. The check runs before that wait, so a person who answers in
   the pane meanwhile moves the agent on, and the key lands on whatever
   comes next. `answer` catches some of these afterwards and exits with 4:
   when the core says the agent was no longer blocked, or its turn (the core
   counts one each time the program's status leaves `working`) had moved
   on. It can't catch an agent that goes from one prompt straight to the
   next without reporting `working` in between, and it can't take a key
-  back. A core-side check (press only if the turn or screen still matches)
-  would close this; herdr-core has none today.
+  back. herdr-core would close this by cancelling a `terminal.keys` call
+  when its connection closes (as it does for `terminal.send`) and by
+  pressing only if the turn still matches; it does neither today, and that
+  change belongs upstream.
 - Any process running as you can call this, as it already can call
   `hc keys`. An agent told to unblock another agent could approve that
   agent's prompt this way; only answer prompts you've read.
