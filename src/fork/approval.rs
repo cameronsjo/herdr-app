@@ -17,9 +17,13 @@ use sha2::{Digest, Sha256};
 #[derive(Clone, Debug, PartialEq)]
 pub struct Prompt {
     /// What is being asked about: the lines above the question, up to a
-    /// box's or rule's top edge (at most [`CONTEXT`]). Claude Code shows the
-    /// Bash command here, so it is part of the token.
+    /// box's or rule's top edge. Claude Code shows the Bash command here, so
+    /// all of it is part of the token and of what `show` prints.
     pub context: Vec<String>,
+    /// Whether the context reaches a panel's top edge. False when the
+    /// screen's top cut it off or no edge was drawn: some of what is asked
+    /// may not be on screen, so `approve` and `deny` ask for a number.
+    pub complete: bool,
     /// The line above the options (often the question), "" if none.
     pub question: String,
     /// The options, numbered from 1, in order.
@@ -30,22 +34,21 @@ pub struct Prompt {
 /// a box's bottom edge, the input line).
 const BELOW: usize = 6;
 
-/// How many lines above the question are read as its context.
-const CONTEXT: usize = 12;
-
 /// The most options a menu may have: answers are one digit.
 const MAX_OPTIONS: usize = 9;
 
 /// Screen text as shown to a caller: no control characters and no bidi
 /// formatting, which could make a label read as something else.
 fn clean(s: &str) -> String {
-    s.chars().filter(|c| !c.is_control() && !matches!(*c, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')).collect()
+    s.chars().filter(|c| !c.is_control() && !matches!(*c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2069}' | '\u{feff}')).collect()
 }
 
 /// A line drawn only of box or rule characters: a prompt panel's top edge.
 fn edge(line: &str) -> bool {
     let t = line.trim();
-    !t.is_empty() && t.chars().all(|c| matches!(c, '─' | '━' | '═' | '╭' | '╮' | '╰' | '╯' | '┌' | '┐' | '└' | '┘' | '│' | '┃' | '║' | '-' | '='))
+    // Box-drawing only: a `---` or `===` line is text (a diff, markdown).
+    // A box's sides alone (an empty row inside it) are no edge.
+    t.chars().any(|c| matches!(c, '─' | '━' | '═' | '╭' | '╮' | '┌' | '┐')) && t.chars().all(|c| matches!(c, '─' | '━' | '═' | '╭' | '╮' | '╰' | '╯' | '┌' | '┐' | '└' | '┘' | '│' | '┃' | '║' | ' '))
 }
 
 /// One screen line without a box's edges and the padding inside them.
@@ -116,8 +119,11 @@ pub fn parse(screen: &str) -> Option<Prompt> {
         }
         i -= 1;
     }
+    // Lines under the last option, indented deeper, are its too.
+    let last_indent = indent(lines[last]);
+    let tail = lines[last + 1..end].iter().take_while(|l| !unboxed(l).is_empty() && indent(l) > last_indent).count();
     let mut options: Vec<(usize, String)> = Vec::new();
-    for l in &lines[first..=last] {
+    for l in &lines[first..=last + tail] {
         match (option(l), options.last_mut()) {
             (Some(o), _) => options.push(o),
             (None, Some((_, label))) => {
@@ -131,11 +137,13 @@ pub fn parse(screen: &str) -> Option<Prompt> {
         return None;
     }
     // The question, then its context up to the panel's top edge.
-    let mut above = lines[..first].iter().rev().take_while(|l| !edge(l)).map(|l| clean(unboxed(l))).filter(|l| !l.is_empty());
+    let top = lines[..first].iter().rposition(|l| edge(l));
+    let mut above = lines[top.map_or(0, |t| t + 1)..first].iter().rev().map(|l| clean(unboxed(l))).filter(|l| !l.is_empty());
     let question = above.next().unwrap_or_default();
-    let mut context: Vec<String> = above.take(CONTEXT).collect();
+    let mut context: Vec<String> = above.collect();
     context.reverse();
-    Some(Prompt { context, question, options: options.into_iter().map(|(_, l)| clean(&l)).collect() })
+    let complete = top.is_some() && !context.is_empty();
+    Some(Prompt { context, complete, question, options: options.into_iter().map(|(_, l)| clean(&l)).collect() })
 }
 
 /// The token for one prompt: the terminal, its turn (the core counts one
@@ -145,7 +153,8 @@ pub fn token(terminal: &str, turn: u64, p: &Prompt) -> String {
     let mut h = Sha256::new();
     let turn = turn.to_string();
     let head = [terminal, turn.as_str(), "\u{1}"].into_iter();
-    let parts = head.chain(p.context.iter().map(String::as_str)).chain(["\u{1}", p.question.as_str()]).chain(p.options.iter().map(String::as_str));
+    let complete = if p.complete { "complete" } else { "cut" };
+    let parts = head.chain([complete]).chain(p.context.iter().map(String::as_str)).chain(["\u{1}", p.question.as_str()]).chain(p.options.iter().map(String::as_str));
     for part in parts {
         h.update(part.as_bytes());
         h.update([0]);
@@ -154,7 +163,7 @@ pub fn token(terminal: &str, turn: u64, p: &Prompt) -> String {
 }
 
 /// Words that make an option a standing grant, not a one-time answer.
-const STANDING: &[&str] = &["always", "don't ask", "dont ask", "do not ask", "session", "all ", "every", "remember", "bypass", "auto-accept", "auto accept", "without asking"];
+const STANDING: &[&str] = &["always", "don't ask", "dont ask", "do not ask", "again", "session", "all ", "every", "remember", "bypass", "auto-accept", "auto accept", "without asking", "permanent", "trust", "for this project"];
 
 /// The option an answer means: a number, `approve` (the one option that
 /// starts with yes, allow or approve and grants nothing beyond this once)
@@ -164,7 +173,7 @@ pub fn choose(p: &Prompt, answer: &str) -> Result<usize, String> {
     let one = |words: &[&str], what: &str| -> Result<usize, String> {
         let found: Vec<usize> = (0..p.options.len())
             .filter(|&i| {
-                let o = p.options[i].to_lowercase();
+                let o = p.options[i].to_lowercase().replace('’', "'");
                 words.iter().any(|w| o == *w || o.starts_with(&format!("{w} ")) || o.starts_with(&format!("{w},")) || o.starts_with(&format!("{w}.")))
                     && (what == "denies" || !STANDING.iter().any(|s| o.contains(s)))
             })
@@ -178,6 +187,10 @@ pub fn choose(p: &Prompt, answer: &str) -> Result<usize, String> {
             _ => Err(format!("more than one option here {what}: answer with its number")),
         }
     };
+    let named = matches!(answer, "approve" | "yes" | "allow" | "deny" | "no" | "reject");
+    if named && !p.complete {
+        return Err("part of this prompt may be off screen (no top edge found above it): read it in its pane and answer with its number".to_owned());
+    }
     let n = match answer {
         "approve" | "yes" | "allow" => one(&["yes", "allow", "approve"], "approves")?,
         "deny" | "no" | "reject" => one(&["no", "deny", "reject"], "denies")?,
@@ -192,7 +205,7 @@ pub fn choose(p: &Prompt, answer: &str) -> Result<usize, String> {
 /// What `show` prints for a blocked terminal's prompt.
 pub fn shown(terminal: &str, kind: Option<&str>, turn: u64, p: &Prompt) -> Value {
     let options: Vec<Value> = p.options.iter().enumerate().map(|(i, l)| json!({ "n": i + 1, "label": l })).collect();
-    json!({ "terminal": terminal, "kind": kind, "context": p.context, "question": p.question, "options": options, "token": token(terminal, turn, p) })
+    json!({ "terminal": terminal, "kind": kind, "context": p.context, "complete": p.complete, "question": p.question, "options": options, "token": token(terminal, turn, p) })
 }
 
 /// The terminal's word (its program's 7501 state) and blocked kind, from a
@@ -220,7 +233,7 @@ fn current(core: &crate::hc::Core, terminal: &str) -> Result<(Option<String>, u6
         return Err((3, format!("terminal {terminal} is not blocked (it is {}): nothing to answer", word.unwrap_or("not an agent"))));
     }
     let kind = kind.map(str::to_owned);
-    let turn = rec.get("turn").and_then(Value::as_u64).unwrap_or(0);
+    let turn = rec.get("turn").and_then(Value::as_u64).ok_or_else(|| failed(format!("the core did not say terminal {terminal}'s turn: this core is too old to answer prompts safely")))?;
     let read = core.call("terminal.read", json!({ "terminal": terminal, "lines": 0 })).map_err(|e| failed(format!("{e:#}")))?;
     let text = read.get("text").and_then(Value::as_str).unwrap_or_default();
     let p = parse(text).ok_or_else(|| (3, format!("terminal {terminal} is blocked, but its screen shows no numbered options: answer it in its pane")))?;
@@ -263,8 +276,10 @@ fn answer(core: &crate::hc::Core, terminal: &str, answer: &str, want: &str) -> R
     let sent = core.call_timeout("terminal.keys", json!({ "terminal": terminal, "keys": [n.to_string()] }), KEYS_WAIT).map_err(|e| {
         failed(format!("{e:#} (someone may be typing in terminal {terminal}'s pane; the key may still go in: check the pane before trying again)"))
     })?;
-    let at = sent.get("turn").and_then(Value::as_u64).unwrap_or(turn);
-    if at != turn {
+    // No turn in the reply: nothing to check against, so not "answered".
+    let at = sent.get("turn").and_then(Value::as_u64);
+    let word = sent.get("status").and_then(Value::as_str);
+    if at != Some(turn) || word.is_some_and(|w| w != "blocked") {
         return Err((4, format!("pressed {n} on terminal {terminal}, but it moved on while the key waited for typing in its pane to stop: the key may have answered a later prompt; check the pane")));
     }
     Ok(json!({ "terminal": terminal, "answered": n, "label": p.options[n - 1] }))
@@ -319,6 +334,8 @@ mod tests {
     fn claude(command: &str) -> String {
         format!(
             "\
+some earlier output
+────────────────────────────────
  Bash command
 
    {command}
@@ -333,7 +350,7 @@ mod tests {
     }
 
     fn menu(options: &[&str]) -> Prompt {
-        Prompt { context: vec![], question: String::new(), options: options.iter().map(|o| o.to_string()).collect() }
+        Prompt { context: vec!["x".into()], complete: true, question: String::new(), options: options.iter().map(|o| o.to_string()).collect() }
     }
 
     #[test]
@@ -345,15 +362,25 @@ mod tests {
         assert_eq!(p.options[1], "Yes, and don't ask again for rm commands in /src/app");
         // In a box, with a hint below: the box's top edge ends the context.
         let boxed = "earlier output\n╭────────╮\n│ Edit src/a.rs           │\n│ Allow this edit?        │\n│ › 1. Allow              │\n│   2) Deny               │\n╰────────╯\n  Esc to cancel\n";
-        assert_eq!(parse(boxed), Some(Prompt { context: vec!["Edit src/a.rs".into()], question: "Allow this edit?".into(), options: vec!["Allow".into(), "Deny".into()] }));
+        assert_eq!(parse(boxed), Some(Prompt { context: vec!["Edit src/a.rs".into()], complete: true, question: "Allow this edit?".into(), options: vec!["Allow".into(), "Deny".into()] }));
         // A wrapped label and a description join the option above.
         let wrapped = "Pick one\n 1. Yes\n      the plain one\n 2. Yes, and don't ask again for git\n    commands in /src/app\n 3. No\n";
         assert_eq!(parse(wrapped).unwrap().options, ["Yes the plain one", "Yes, and don't ask again for git commands in /src/app", "No"]);
         let boxed_wrap = "╭──╮\n│ Go?            │\n│ ❯ 1. Yes, and don't ask │\n│      again          │\n│   2. No             │\n╰──╯\n";
         assert_eq!(parse(boxed_wrap).unwrap().options, ["Yes, and don't ask again", "No"]);
+        // The whole command is context, however long; `---` inside it is
+        // text, and a box's empty row is no edge.
+        let long = format!("─────\n Bash command\n   rm -rf ~/proj/data\n{}   ---\n│        │\n Do you want to proceed?\n 1. Yes\n 2. No\n", "   echo ok\n".repeat(15));
+        let p = parse(&long).unwrap();
+        assert!(p.complete);
+        assert_eq!(p.context[1], "rm -rf ~/proj/data");
+        assert_eq!(p.context.len(), 18);
+        // No top edge above it: maybe cut off.
+        let cut = parse("   rm -rf x\n Proceed?\n 1. Yes\n 2. No\n").unwrap();
+        assert!(!cut.complete);
         // Control and bidi characters never reach a caller.
-        let sly = "Proceed?\n 1. Yes\u{202e}oN\n 2. No\u{9b}2J\n";
-        assert_eq!(parse(sly).unwrap().options, ["YesoN", "No2J"]);
+        let sly = "Proceed?\n 1. Yes\u{202e}oN\n 2. No\u{9b}2J don\u{200b}'t\n";
+        assert_eq!(parse(sly).unwrap().options, ["YesoN", "No2J don't"]);
     }
 
     #[test]
@@ -415,6 +442,12 @@ mod tests {
         // Several plain yeses: only a bare one is clear.
         assert!(choose(&menu(&["Yes, run it", "Yes, but in a sandbox", "No"]), "approve").is_err());
         assert_eq!(choose(&menu(&["Yes, proceed (y)", "Yes (y)", "No"]), "approve"), Ok(2));
+        assert!(choose(&menu(&["Yes, and don\u{2019}t ask again", "No"]), "approve").is_err(), "a curly apostrophe");
+        // A prompt that may be cut off takes only a number.
+        let mut cut = menu(&["Yes", "No"]);
+        cut.complete = false;
+        assert!(choose(&cut, "approve").is_err() && choose(&cut, "deny").is_err());
+        assert_eq!(choose(&cut, "1"), Ok(1));
     }
 
     #[test]

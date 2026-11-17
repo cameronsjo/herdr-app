@@ -7,7 +7,7 @@ without pressing keys blind.
 ```sh
 herdr-app approval show t3
 # {"terminal":"t3","kind":"permission","context":["Bash command","rm -rf build/"],
-#  "question":"Do you want to proceed?",
+#  "complete":true,"question":"Do you want to proceed?",
 #  "options":[{"n":1,"label":"Yes"},{"n":2,"label":"Yes, and don't ask again …"},
 #             {"n":3,"label":"No, and tell Claude what to do differently (esc)"}],
 #  "token":"9f2c4e…"}
@@ -20,10 +20,12 @@ herdr-app approval answer t3 approve --token 9f2c4e…
   bottom: options `1.` to `N.` (or `1)`), two to nine of them, with at most
   six lines under them. A line indented deeper than the options (a wrapped
   label, a description) joins the option above it. Boxes and selection
-  markers (`❯`, `›`) are ignored, and control and bidi characters are
-  dropped. The line above the options is the question. The lines above
-  that, up to the panel's top edge (at most 12), are its context: for
-  Claude Code's Bash prompt, the command.
+  markers (`❯`, `›`) are ignored, and control, bidi and zero-width
+  characters are dropped. The line above the options is the question. All
+  the lines above that, up to the panel's top edge (a box corner or a
+  `───` rule, never a `---` line), are its context: for Claude Code's Bash
+  prompt, the whole command. `complete` is false when no top edge was found
+  on screen, so part of what is asked may be scrolled off.
 - The token is a hash of the terminal, its turn (the core counts one each
   time the agent stops working, so the next prompt after an answer is a
   new turn), the context, the question and the options. A token names one
@@ -38,7 +40,9 @@ herdr-app approval answer t3 approve --token 9f2c4e…
   grants nothing beyond this once: an option that says always, don't ask
   again, session, all, bypass or auto-accept is never `approve`. When
   several plain options match, only a bare `Yes` counts; otherwise give the
-  number. `deny` is the one that starts with no, deny or reject.
+  number. `deny` is the one that starts with no, deny or reject. On a prompt
+  that isn't `complete`, `approve` and `deny` refuse: read it in its pane
+  and give the number.
 - It uses the core the window uses (the configured one, else the usual
   install places), and starts it if it isn't running.
 - Output is JSON on stdout, errors on stderr. Exit codes: 0 done; 1 the core
@@ -55,11 +59,16 @@ herdr-app approval answer t3 approve --token 9f2c4e…
   that terminal in the last ~3 s, the key waits (up to 60 s here) until
   they stop. The check runs before that wait, so a person who answers in
   the pane meanwhile moves the agent on, and the key lands on whatever
-  comes next. `answer` sees this afterwards (the turn changed) and exits
-  with 4, but it can't take the key back.
+  comes next. `answer` catches some of these afterwards and exits with 4:
+  when the core says the agent was no longer blocked, or its turn (the core
+  counts one each time the program's status leaves `working`) had moved
+  on. It can't catch an agent that goes from one prompt straight to the
+  next without reporting `working` in between, and it can't take a key
+  back. A core-side check (press only if the turn or screen still matches)
+  would close this; herdr-core has none today.
 - Any process running as you can call this, as it already can call
   `hc keys`. An agent told to unblock another agent could approve that
   agent's prompt this way; only answer prompts you've read.
 - Holding approvals in an agent's permission hook (Claude Code's
-  `PermissionRequest`) until `answer` replies is not built; see the
-  follow-up issue.
+  `PermissionRequest`) until `answer` replies is not built:
+  cameronsjo/herdr-app#37.
