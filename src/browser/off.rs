@@ -85,6 +85,15 @@ impl Browsers {
         Err(UNAVAILABLE.into())
     }
 
+    /// No pages, so the window always draws [`Self::element`].
+    pub fn drawn_by_mod(&self, _node: &str, _browser: &str) -> bool {
+        false
+    }
+
+    pub fn owns(&self, _node: &str, _browser: &str) -> bool {
+        false
+    }
+
     pub fn element(&self, _node: &str, browser: &str, url: &str, look: super::Look) -> AnyElement {
         div()
             .size_full()
@@ -105,3 +114,6 @@ impl Browsers {
         None
     }
 }
+
+/// No pages to place.
+pub fn place(_browser: &str, _block: gpui::Bounds<gpui::Pixels>, _window: &Window) {}

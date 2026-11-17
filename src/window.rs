@@ -253,7 +253,7 @@ fn missing_mods(name: &str) -> Vec<String> {
     walk(&layout, &mut used);
     used.sort();
     used.dedup();
-    used.retain(|m| !m.starts_with("frame-") && m != crate::browser::block::BROWSER_MOD && !mods::mods_dir().join(m).is_dir()); // FORK(browser): a browser block is no mod folder
+    used.retain(|m| !m.starts_with("frame-") && !mods::mods_dir().join(m).is_dir());
     used
 }
 
@@ -513,7 +513,8 @@ impl AppWindow {
     }
 
     fn with_file_events(core: Arc<Core>, requests: async_channel::Receiver<Request>, file_events: Option<crate::files::FileEvents>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let runtime = ShellRuntime::new(cx).map_err(|e| tracing::error!("script runtime failed, mods are off: {e:#}")).ok();
+        // FORK(browser): mods get herdr-native's nativeView.
+        let runtime = ShellRuntime::new_with_components(cx, crate::browser::element::components()).map_err(|e| tracing::error!("script runtime failed, mods are off: {e:#}")).ok();
         if let (Some(runtime), Some(events)) = (&runtime, &file_events) {
             runtime.set_source_revision_provider(events.revision_provider());
         }
@@ -1316,7 +1317,6 @@ impl AppWindow {
                 }
             }
         }
-        mods.retain(|(_, i)| crate::browser::block::of_mod(&i.name, &i.props).is_none()); // FORK(browser): a browser block is no mod to run
         (terms, mods)
     }
 
@@ -1380,7 +1380,6 @@ impl AppWindow {
                 }
             }
         }
-        out.retain(|_, i| crate::browser::block::of_mod(&i.name, &i.props).is_none()); // FORK(browser): a browser block is no mod to run
         out.extend(fork_mods::background(&self.folders)); // FORK(background-mods)
         out
     }
@@ -4223,7 +4222,7 @@ impl AppWindow {
     /// dialogs and windows too (toasts close). Hidden copies start fresh when
     /// shown. Terminals, the core and the layout stay.
     fn restart_mods(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let fresh = match ShellRuntime::replace_default(cx) {
+        let fresh = match ShellRuntime::replace_default_with_components(cx, crate::browser::element::components()) { // FORK(browser): mods get nativeView
             Ok(fresh) => fresh,
             Err(e) => {
                 tracing::error!("could not start a new script runtime: {e:#}");

@@ -6,10 +6,15 @@
 //! load and keeps it.
 //!
 //! The fork reads a browser block through [`block`] (or [`BrowserNode`]).
-//! Every place upstream treats a mod block as a mod must skip browser blocks:
-//! the window's mod slots (`AppWindow::visible`, `owned_mods`), its render
-//! arm, the mods' `panes` list, and `missing_mods`. Grep `Content::Mod` in
-//! upstream files after a sync for new ones.
+//! It is a real mod too (cameronsjo/herdr-app#4): the window starts the
+//! shipped `defaults/mods/browser-prototype/` for it like any mod, which
+//! draws the placeholder and places the page with `nativeView`
+//! (`super::element`). Two places upstream treats a mod block as a mod
+//! still check for a browser block first: the window's render arm (the
+//! block's frame, agent header and page placement are the window's) and
+//! the mods' `panes` list (a browser pane lists its page). Grep
+//! `Content::Mod` in upstream files after a sync for new ones that draw or
+//! list mods.
 //!
 //! `browser` is the app's id for the page (`b1`); `url` is where it was last,
 //! so a block whose browser isn't open (a restart, another screen) opens

@@ -29,6 +29,8 @@ compile_error!("browser-pane (or dev-agent-access) needs an engine: add the `bro
 pub mod socket;
 /// Browser blocks: mod blocks the fork reads as browsers (every build).
 pub mod block;
+/// `nativeView`: the mod element a browser block's page sits in (every build).
+pub mod element;
 #[cfg(any(test, all(target_os = "macos", feature = "browser-pane")))]
 pub mod agent;
 #[cfg(any(test, all(target_os = "macos", feature = "browser-pane")))]
@@ -57,12 +59,12 @@ use webkit as engine;
 #[cfg(all(target_os = "macos", feature = "browser-pane"))]
 mod view;
 #[cfg(all(target_os = "macos", feature = "browser-pane"))]
-pub use native::{Browsers, Event};
+pub use native::{Browsers, Event, place};
 
 #[cfg(not(all(target_os = "macos", feature = "browser-pane")))]
 mod off;
 #[cfg(not(all(target_os = "macos", feature = "browser-pane")))]
-pub use off::{Browsers, Event};
+pub use off::{Browsers, Event, place};
 
 /// Shows `ask` as an app-modal macOS alert and waits for the person's
 /// answer (`confirm::ask`). Call it from a foreground task, never while
