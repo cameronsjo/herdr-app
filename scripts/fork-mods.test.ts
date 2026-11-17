@@ -212,3 +212,12 @@ test("agents: a label drawn on one line with control and bidi characters dropped
   expect(out[0].label).toBe("p q");
   expect(out[0].id).not.toContain("\u0000");
 });
+
+test("agents: a cut never splits an emoji", async () => {
+  const { nameOf, groups } = await loadFork();
+  const all = [{ address: "t1", name: `${"a".repeat(78)}\u{1F600}\u{1F600}\u{1F600}`, labels: { project: `${"a".repeat(78)}\u{1F600}\u{1F600}\u{1F600}` } }];
+  const name = nameOf(all, "t1");
+  expect(name).toBe(`${"a".repeat(78)}\u{1F600}\u2026`);
+  expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(name)).toBe(false);
+  expect(() => groups("project", [], [], [{ address: "t1", space: "s1" }], all)).not.toThrow();
+});

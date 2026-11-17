@@ -37,9 +37,11 @@ function byAddress(all) {
 // control and bidi characters dropped, and cut to `max` characters.
 const text = (v, max = 80) => {
   if (typeof v !== "string") return null;
-  const s = v.replace(/[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]+/g, " ").trim();
+  const s = v.replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]+/g, " ").trim();
   if (!s) return null;
-  return s.length > max ? `${s.slice(0, max - 1).trimEnd()}\u2026` : s;
+  // Cut by code point, so an emoji at the cut stays whole.
+  const chars = Array.from(s);
+  return chars.length > max ? `${chars.slice(0, max - 1).join("").trimEnd()}\u2026` : s;
 };
 
 // A label's value on the terminal, cleaned, or null.
@@ -57,7 +59,7 @@ export function taskOf(all, address) {
 // What a project group is called and keyed by: the `project` label, else the space.
 function project(a, terminal) {
   const p = label(terminal, "project");
-  return p ? { key: `p\u0000${p}`, label: p } : { key: `s\u0000${a.space}`, label: a.space_name || "" };
+  return p ? { key: `p:${p}`, label: p } : { key: `s:${a.space}`, label: a.space_name || "" };
 }
 
 // A row names its space when its header is a project, which can span spaces.
@@ -90,7 +92,7 @@ export function groups(id, built, pinnedGroups, rest, all) {
   const out = [...pinnedGroups];
   for (const a of rest) {
     const { key, label: name } = project(a, terminals.get(a.address));
-    const gid = `proj-${encodeURIComponent(key)}`;
+    const gid = `proj-${key}`;
     if (out.at(-1)?.id === gid) out.at(-1).members.push(a);
     else out.push({ id: gid, label: name, status: null, members: [a] });
   }
