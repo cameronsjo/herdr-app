@@ -664,3 +664,39 @@ mod tests {
         assert!(!needs_model_pane("browser.close", &json!({})));
     }
 }
+
+/// The window keeps browser blocks out of upstream's mod code (the
+/// `FORK(browser)` seams in `visible`, `owned_mods` and `render_block`).
+#[cfg(test)]
+mod window_tests {
+    use crate::browser::block::BROWSER_MOD;
+    use serde_json::json;
+
+    #[gpui::test]
+    fn browser_blocks_start_no_mod_copy(cx: &mut gpui::TestAppContext) {
+        let home = crate::mods::app_dir();
+        crate::mods::write_workspace().unwrap();
+        std::fs::create_dir_all(home.join("layouts")).unwrap();
+        // A browser block in the tree, a floating one (float_mod adds a
+        // `float` prop) and a real mod beside them.
+        let layout = json!({ "id": "root", "type": "row", "children": [
+            { "id": "page", "type": "block", "content": { "mod": BROWSER_MOD, "props": { "browser": "b1", "url": "about:blank" } } },
+            { "id": "other", "type": "block", "content": { "mod": "frame-none" } } ],
+          "floating": [ { "id": "f", "content": { "mod": BROWSER_MOD, "props": { "browser": "b2" } } } ] });
+        std::fs::write(home.join("layouts/browsers.json"), layout.to_string()).unwrap();
+        cx.update(crate::mods::init);
+        let requests = crate::mods::install_policy();
+        crate::mods::set_shared("layout".into(), json!("browsers"));
+        crate::mods::set_shared("frame.welcomed".into(), json!("test"));
+        let (view, cx) = cx.add_window_view(|window, cx| super::AppWindow::with_file_events(crate::hc::offline(), requests, Some(crate::files::FileEvents::for_test(home.clone())), window, cx));
+        cx.run_until_parked();
+        view.update(cx, |this, _| {
+            assert_eq!(this.layout_name, "browsers");
+            let (_, shown) = this.visible();
+            assert!(shown.iter().all(|(_, i)| i.name != BROWSER_MOD), "visible: {:?}", shown.iter().map(|(s, _)| s).collect::<Vec<_>>());
+            assert!(this.owned_mods().values().all(|i| i.name != BROWSER_MOD));
+            assert!(this.copies.values().all(|c| c.inst.name != BROWSER_MOD), "a browser block started a mod copy");
+            assert!(super::missing_mods("browsers").iter().all(|m| m != BROWSER_MOD));
+        });
+    }
+}

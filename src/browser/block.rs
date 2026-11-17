@@ -52,7 +52,8 @@ pub fn of_mod(name: &str, props: &Value) -> Option<BrowserBlock> {
     if name != BROWSER_MOD || !props.is_object() {
         return None;
     }
-    // From the reference: render checks every mod block every frame.
+    // `render_block` asks this of every mod block every frame: the name
+    // check above comes first, and props are read in place, not cloned.
     BrowserBlock::deserialize(props).ok().filter(|b| !b.browser.is_empty())
 }
 
@@ -110,6 +111,12 @@ mod tests {
         assert_eq!(n.browser(), Some("b1"));
         let back: Node = serde_json::from_str(&serde_json::to_string(&n).unwrap()).unwrap();
         assert_eq!(back, n);
+        // Props the window adds (`float_mod`'s `float`, `overlay_layout`'s
+        // `overlay`) don't stop it being a browser.
+        for extra in ["float", "overlay"] {
+            let props = serde_json::json!({ "browser": "b1", "url": "https://example.com/", (extra): "x" });
+            assert_eq!(of_mod(BROWSER_MOD, &props).map(|b| b.browser), Some("b1".into()), "{extra}");
+        }
         // A block saved without a url still reads (it opens on a blank page).
         let bare: Node = serde_json::from_str(r#"{ "id": "p2", "type": "block", "content": { "mod": "browser-prototype", "props": { "browser": "b2" } } }"#).unwrap();
         assert_eq!(block(bare.content().unwrap()).map(|b| b.url), Some(String::new()));
