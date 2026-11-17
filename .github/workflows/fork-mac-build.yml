@@ -1,0 +1,103 @@
+# FORK(browser): the everyday browser build, made here instead of on
+# Cameron's Mac. Each push to master builds the WebKit dev bundle (the same
+# `scripts/browser-dev-bundle --webkit` that scripts/fork/daily-update ran
+# locally), attests where it was built, and publishes it as the prerelease
+# `browser-<sha>`. daily-update downloads it, checks the attestation, and
+# installs it. Fork-only file: upstream syncs never conflict on it.
+name: fork-mac-build
+run-name: ${{ format('browser build {0}', github.sha) }}
+
+on:
+  push:
+    branches: [master]
+  # Builds the current master again (e.g. after a failed run).
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One build per commit, never cancelled: a cancelled run publishes nothing.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.sha }}
+  cancel-in-progress: false
+
+env:
+  RUST_TOOLCHAIN: 1.95.0
+  ZIG_VERSION: 0.16.0
+  CARGO_INCREMENTAL: "0"
+  # How many browser-* prereleases to keep.
+  KEEP: 10
+
+jobs:
+  bundle:
+    if: github.ref == 'refs/heads/master'
+    runs-on: macos-15
+    timeout-minutes: 60
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - name: Restore build cache
+        id: cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: &cache-paths |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: fork-mac-build-v1-${{ env.RUST_TOOLCHAIN }}-zig${{ env.ZIG_VERSION }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'vendor/**', 'crates/**', '.github/workflows/fork-mac-build.yml') }}
+          restore-keys: fork-mac-build-v1-${{ env.RUST_TOOLCHAIN }}-zig${{ env.ZIG_VERSION }}-
+      - name: Keep unchanged sources fresh
+        run: scripts/ci-sources restore
+      - name: Build the WebKit bundle
+        run: scripts/browser-dev-bundle --webkit
+      - name: Note the sources the cache was built from
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: scripts/ci-sources record
+      - name: Save build cache
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: *cache-paths
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+      - name: Pack
+        run: |
+          mkdir -p dist
+          ditto -c -k --keepParent "target/browser-dev-webkit/Herdr Dev.app" dist/herdr-browser-webkit.zip
+          (cd dist && shasum -a 256 herdr-browser-webkit.zip > herdr-browser-webkit.zip.sha256)
+          cat dist/herdr-browser-webkit.zip.sha256
+      - name: Attest where it was built
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
+        with:
+          subject-path: dist/herdr-browser-webkit.zip
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="browser-$GITHUB_SHA"
+          gh release create "$tag" dist/herdr-browser-webkit.zip dist/herdr-browser-webkit.zip.sha256 \
+            -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --latest=false \
+            --title "Browser build ${GITHUB_SHA:0:8}" \
+            --notes "The WebKit browser build of $GITHUB_SHA, for scripts/fork/daily-update. Ad hoc signed; daily-update re-signs it on install."
+      - name: Keep the newest ${{ env.KEEP }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release list -R "$GITHUB_REPOSITORY" --limit 200 --json tagName,createdAt \
+            --jq "[.[] | select(.tagName | startswith(\"browser-\"))] | sort_by(.createdAt) | reverse | .[$KEEP:] | .[].tagName" |
+            while read -r old; do gh release delete "$old" -R "$GITHUB_REPOSITORY" --cleanup-tag --yes; done
