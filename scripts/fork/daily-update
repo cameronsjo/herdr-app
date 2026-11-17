@@ -101,13 +101,20 @@ ci_passed() {
   done
 }
 
+# The newest fork-mac-build.yml run's status for a commit ("none" if none).
+build_state() {
+  gh api "repos/$repo_url_fork/actions/workflows/fork-mac-build.yml/runs?head_sha=$1&per_page=1" --jq '.workflow_runs[0].status // "none"' 2>/dev/null || echo unknown
+}
+
 # The `browser-<sha>` release's bundle, into the build worktree's target/.
 # 0: there; 2: its build is still running (wait for the next check);
 # 1: none, or it failed a check (build it here instead).
+# Called as `fetch_release … || rc=$?`, so set -e is off in here: every
+# step that matters checks its own result.
 fetch_release() {
   local sha=$1 tag="browser-$1" dir="$state_dir/download" state
   if ! gh release view "$tag" -R "$repo_url_fork" >/dev/null 2>&1; then
-    state=$(gh api "repos/$repo_url_fork/actions/workflows/fork-mac-build.yml/runs?head_sha=$sha&event=push&per_page=1" --jq '.workflow_runs[0].status // "none"' 2>/dev/null) || state=unknown
+    state=$(build_state "$sha")
     case $state in
       queued|in_progress|waiting|requested|pending) say "${sha:0:8}: its Actions build is $state"; return 2 ;;
     esac
@@ -115,23 +122,31 @@ fetch_release() {
     return 1
   fi
   rm -rf "$dir"
-  mkdir -p "$dir"
-  gh release download "$tag" -R "$repo_url_fork" -p "$asset" -p "$asset.sha256" -D "$dir" || { say "${sha:0:8}: download of $tag failed"; return 1; }
+  mkdir -p "$dir" || return 1
+  if ! gh release download "$tag" -R "$repo_url_fork" -p "$asset" -p "$asset.sha256" -D "$dir"; then
+    state=$(build_state "$sha")
+    case $state in
+      queued|in_progress|waiting|requested|pending) say "${sha:0:8}: $tag is still being published"; return 2 ;;
+    esac
+    say "${sha:0:8}: download of $tag failed"
+    return 1
+  fi
   (cd "$dir" && shasum -a 256 -c "$asset.sha256" >/dev/null) || { say "${sha:0:8}: $asset does not match its checksum"; return 1; }
   # Built by this repo's build workflow, from this exact commit on master.
   if ! gh attestation verify "$dir/$asset" -R "$repo_url_fork" --signer-workflow "$repo_url_fork/$build_workflow" \
-    --source-ref refs/heads/master --source-digest "$sha" >/dev/null 2>&1; then
+    --source-ref refs/heads/master --source-digest "$sha" --deny-self-hosted-runners >/dev/null 2>&1; then
     say "${sha:0:8}: $tag's attestation did not verify"
     notify "The downloaded build ${sha:0:8} failed its attestation check, so it was not used; see $log"
     return 1
   fi
-  ditto -x -k "$dir/$asset" "$dir/unpacked"
+  ditto -x -k "$dir/$asset" "$dir/unpacked" || { say "${sha:0:8}: could not unpack $asset"; return 1; }
   [[ -d "$dir/unpacked/Herdr Dev.app" ]] || { say "${sha:0:8}: $asset holds no Herdr Dev.app"; return 1; }
   xattr -dr com.apple.quarantine "$dir/unpacked/Herdr Dev.app" 2>/dev/null || true
-  mkdir -p "$build/target/browser-dev-webkit"
-  rm -rf "$build/target/browser-dev-webkit/Herdr Dev.app"
-  mv "$dir/unpacked/Herdr Dev.app" "$build/target/browser-dev-webkit/Herdr Dev.app"
+  local dest="$build/target/browser-dev-webkit"
+  mkdir -p "$dest" && rm -rf "$dest/Herdr Dev.app" && mv "$dir/unpacked/Herdr Dev.app" "$dest/Herdr Dev.app" ||
+    { say "${sha:0:8}: could not put the download in $dest"; return 1; }
   rm -rf "$dir"
+  return 0
 }
 
 # Same steps as browser-daily on, minus quitting and opening: its own bundle id, signed ad hoc.

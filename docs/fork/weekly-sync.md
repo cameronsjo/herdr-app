@@ -49,11 +49,12 @@ Release builds of the app offer `herdr-core` updates; source builds don't. The f
 
 ## Trust
 
-What reaches Cameron's Mac is upstream `master` source plus the fork's code, compiled locally: build scripts and proc macros run as Cameron during the build, and the app is signed ad hoc, not with upstream's notarized Developer ID. That is more trust than installing an upstream release (a tag a maintainer cut, built and notarized by upstream CI). The checkpoints, in order:
+What reaches Cameron's Mac is upstream `master` source plus the fork's code, compiled on a GitHub-hosted macOS runner by `fork-mac-build.yml` (or, when that build is missing or fails a check, on the Mac, where build scripts and proc macros run as Cameron), and signed ad hoc, not with upstream's notarized Developer ID. On the runner, the `build` job runs every build script with a read-only token; a separate `publish` job, which runs none of the repo's code, attests the zip and publishes it with `contents: write`. The build restores a `target/` cache that any master job can write, so the attestation proves which workflow and commit published the zip, not that no earlier master job touched the cache; that adds no reach beyond code already on master, which the build runs anyway. That is more trust than installing an upstream release (a tag a maintainer cut, built and notarized by upstream CI). The checkpoints, in order:
 
 1. The routine (Claude) reviews upstream's delta before running any of it, stops on a security hold, and holds a workflow change as a draft (Cameron's choice, 2026-11-15: Claude's review stands in for his).
 2. A sync with conflicts, a workflow change, or a held review never auto-merges.
 3. `master` moves only by merging a PR, merge commits only, after `test` and `browser-webkit` pass (ruleset 27338965; repository admins can bypass).
-4. `daily-update` builds only a PR merge commit whose `ci.yml` and `fork-browser.yml` push runs succeeded.
+4. `daily-update` takes only a PR merge commit whose `ci.yml` and `fork-browser.yml` push runs succeeded.
+5. It installs a downloaded build only when its sha256 matches and `gh attestation verify` passes for this repo, `fork-mac-build.yml` as the signer, `refs/heads/master`, that exact commit, and a GitHub-hosted runner. A zip uploaded by hand, by another workflow, from a branch, or for another commit fails that check.
 
 CI only proves the code builds and its tests pass; upstream also writes `ci.yml`, which is why a workflow change holds the sync. The routine's instructions live in this fork (this file, `CLAUDE.md`); upstream's `AGENTS.md` is read as data, not imported.
