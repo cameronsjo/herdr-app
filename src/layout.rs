@@ -6,12 +6,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-mod fork_browser; // FORK(browser)
-pub use fork_browser::BROWSER_MOD; // FORK(browser)
-
 /// What a block shows.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(from = "fork_browser::Saved", into = "fork_browser::Saved")] // FORK(browser): browser blocks save as mod blocks
+#[serde(untagged)]
 pub enum Content {
     Terminal { terminal: String },
     Mod {
@@ -31,7 +28,6 @@ pub enum Content {
     },
     /// An agent's terminal, full size (`"focused"`: the selected agent).
     Agent { agent: String },
-    Browser { browser: String, url: String, profile: Option<String> }, // FORK(browser): see layout/fork_browser.rs
 }
 
 /// Which side of its node a floating block sits on. Left/right make it
@@ -492,7 +488,7 @@ impl Node {
 
     /// A pane in a tab: a terminal, or a mod beside them (a viewer, a board).
     pub fn is_pane(&self) -> bool {
-        matches!(self.content(), Some(Content::Terminal { .. } | Content::Mod { .. } | Content::Browser { .. })) // FORK(browser)
+        matches!(self.content(), Some(Content::Terminal { .. } | Content::Mod { .. }))
     }
 
     pub fn closable(&self) -> bool {

@@ -5,6 +5,7 @@
 //! window's private fields and methods.
 
 use super::*;
+use crate::browser::block::{self, BrowserNode};
 
 /// The height of an agent browser's header (`AppWindow::agent_bar`).
 const AGENT_HEADER: f32 = 26.0;
@@ -43,7 +44,7 @@ impl ForkBrowser {
 /// the page's native view, so it would show only where Herdr draws (an
 /// agent browser's header, which it would hide on hover).
 pub(super) fn header_over(hover: bool, content: Option<&Content>) -> bool {
-    hover && !matches!(content, Some(Content::Browser { .. }))
+    hover && !content.is_some_and(block::is_browser)
 }
 
 /// Whether a command changes the tab document (`dispatch`'s structural list).
@@ -431,9 +432,9 @@ impl AppWindow {
     fn save_browser_url(&mut self, browser: &str, url: &str) {
         let Some(pane) = self.browser_pane(browser) else { return };
         if let Some(n) = self.model.tab_of(&pane).map(|t| t.id.clone()).and_then(|t| self.model.tab_mut(&t)).and_then(|t| t.root.find_mut(&pane))
-            && let Kind::Block { content: Content::Browser { url: saved, .. } } = &mut n.kind
+            && let Kind::Block { content } = &mut n.kind
         {
-            *saved = url.to_owned();
+            block::set_url(content, url);
         }
     }
 
@@ -448,7 +449,7 @@ impl AppWindow {
         };
         let (browser, url) = self.fork.browsers.prepare_open(url, &self.model, &self.chrome)?;
         let target = pane.or_else(|| self.model.focused_pane());
-        let block = |id: &str| Node::block(id, Content::Browser { browser: browser.clone(), url: url.clone(), profile: profile.clone() });
+        let block = |id: &str| Node::block(id, block::content(&browser, &url, profile.as_deref()));
         match place {
             "right" | "down" => {
                 let target = target.ok_or("no pane to open the browser beside: make a space first (space.new), or use place \"tab\"")?;
@@ -544,7 +545,8 @@ impl AppWindow {
 
     /// A browser pane in the mods' `panes` list: its page, no terminal.
     pub(super) fn fork_pane_json(&self, p: &Node, tab: &str, focused: bool, zoomed: bool) -> Option<Value> {
-        let Some(Content::Browser { browser, url, .. }) = p.content() else { return None };
+        let block::BrowserBlock { browser, url, .. } = p.content().and_then(block::block)?;
+        let (browser, url) = (&browser, &url);
         // A browser that isn't open: its saved url, without query or fragment
         // (codes and magic links stay in the tab document only; an open one's
         // comes from `info`).
@@ -562,10 +564,7 @@ impl AppWindow {
             .root
             .walk()
             .into_iter()
-            .filter_map(|n| match n.content() {
-                Some(Content::Browser { browser, url, .. }) => Some(browser_status(self.fork.browsers.info(browser, false), browser, &n.id, url)),
-                _ => None,
-            })
+            .filter_map(|n| n.content().and_then(block::block).map(|b| browser_status(self.fork.browsers.info(&b.browser, false), &b.browser, &n.id, &b.url)))
             .collect();
         if !browsers.is_empty() {
             tab["browsers"] = json!(browsers);
@@ -631,6 +630,7 @@ impl AppWindow {
 mod tests {
     // Not `super::*`: it brings `gpui::test`, which shadows `#[test]`.
     use super::{browser_status, header_over, needs_model_pane, structural};
+    use crate::browser::block;
     use crate::layout::Content;
     use serde_json::json;
 
@@ -646,7 +646,7 @@ mod tests {
 
     #[test]
     fn a_hover_header_is_never_drawn_over_a_browser_pane() {
-        let browser = Content::Browser { browser: "b1".into(), url: "https://example.test/".into(), profile: Some("agent".into()) };
+        let browser = block::content("b1", "https://example.test/", Some("agent"));
         assert!(!header_over(true, Some(&browser)), "a hover header would sit on the agent header");
         assert!(!header_over(false, Some(&browser)));
         let terminal = Content::Terminal { terminal: "t1".into() };
@@ -662,5 +662,83 @@ mod tests {
         assert!(!needs_model_pane("browser.open", &json!({ "place": "tab" })));
         assert!(!needs_model_pane("browser.open", &json!({ "pane": "p1" })));
         assert!(!needs_model_pane("browser.close", &json!({})));
+    }
+}
+
+/// The window keeps browser blocks out of upstream's mod code (the
+/// `FORK(browser)` seams in `src/window.rs`).
+#[cfg(test)]
+mod window_tests {
+    use crate::browser::block::BROWSER_MOD;
+    use serde_json::json;
+
+    /// `window::tests::in_own_process` for this module: the test alone in a
+    /// process of its own, on a fresh app home (a window takes the app home
+    /// and the mods' request channel, which are process-wide).
+    fn in_own_process(name: &str) {
+        let home = crate::test_tmp().join(format!("herdr-fork-window-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &format!("window::fork_browser::window_tests::{name}"), "--nocapture", "--test-threads=1"])
+            .env("HERDR_APP_HOME", &home)
+            .env("HERDR_TEST_WINDOW", name)
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&home);
+        let log = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success() && log.contains("1 passed"), "{log}");
+    }
+
+    fn running_alone(name: &str) -> bool {
+        std::env::var("HERDR_TEST_WINDOW").as_deref() == Ok(name)
+    }
+
+    #[test]
+    fn browser_blocks_start_no_mod_copy() {
+        in_own_process("window_starts_no_mod_copy_for_a_browser");
+    }
+
+    #[gpui::test]
+    fn window_starts_no_mod_copy_for_a_browser(cx: &mut gpui::TestAppContext) {
+        if !running_alone("window_starts_no_mod_copy_for_a_browser") {
+            return;
+        }
+        let home = crate::mods::app_dir();
+        assert!(std::env::var_os("HERDR_APP_HOME").is_some_and(|h| home == std::path::Path::new(&h)), "never the real app home");
+        crate::mods::write_workspace().unwrap();
+        std::fs::create_dir_all(home.join("layouts")).unwrap();
+        // A browser block in the tree, a floating one (float_mod adds a
+        // `float` prop) and a real mod beside them.
+        let layout = json!({ "id": "root", "type": "row", "children": [
+            { "id": "page", "type": "block", "content": { "mod": BROWSER_MOD, "props": { "browser": "b1", "url": "about:blank" } } },
+            { "id": "other", "type": "block", "content": { "mod": "frame-none" } } ],
+          "floating": [ { "id": "f", "content": { "mod": BROWSER_MOD, "props": { "browser": "b2" } } } ] });
+        std::fs::write(home.join("layouts/browsers.json"), layout.to_string()).unwrap();
+        cx.update(crate::mods::init);
+        let requests = crate::mods::install_policy();
+        crate::mods::set_shared("layout".into(), json!("browsers"));
+        crate::mods::set_shared("frame.welcomed".into(), json!("test"));
+        let (view, cx) = cx.add_window_view(|window, cx| super::AppWindow::with_file_events(crate::hc::offline(), requests, Some(crate::files::FileEvents::for_test(home.clone())), window, cx));
+        cx.run_until_parked();
+        view.update(cx, |this, _| {
+            assert_eq!(this.layout_name, "browsers");
+            let (_, shown) = this.visible();
+            assert!(shown.iter().all(|(_, i)| i.name != BROWSER_MOD), "visible: {:?}", shown.iter().map(|(s, _)| s).collect::<Vec<_>>());
+            assert!(this.owned_mods().values().all(|i| i.name != BROWSER_MOD));
+            assert!(this.copies.values().all(|c| c.inst.name != BROWSER_MOD), "a browser block started a mod copy");
+            assert!(super::missing_mods("browsers").iter().all(|m| m != BROWSER_MOD));
+        });
+    }
+
+    /// The mods' `panes` list asks `fork_pane_json` before upstream's mod-pane
+    /// branch, or a browser pane is listed as a mod named `browser-prototype`.
+    /// A sync that moves the line back passes every other test, so this reads
+    /// the order from the source.
+    #[test]
+    fn the_panes_list_asks_for_a_browser_before_a_mod() {
+        let source = include_str!("../window.rs");
+        let browser = source.find("if let Some(v) = self.fork_pane_json(").expect("the panes-list seam is in window.rs");
+        let mod_pane = source.find("if let Some(Content::Mod { name, .. }) = p.content() {").expect("upstream's mod-pane branch");
+        assert!(browser < mod_pane, "fork_pane_json must come before the mod-pane branch in the panes list");
     }
 }

@@ -27,6 +27,8 @@ compile_error!("browser-pane (or dev-agent-access) needs an engine: add the `bro
 
 /// The control socket is this user's only (every build: `control.rs`).
 pub mod socket;
+/// Browser blocks: mod blocks the fork reads as browsers (every build).
+pub mod block;
 #[cfg(any(test, all(target_os = "macos", feature = "browser-pane")))]
 pub mod agent;
 #[cfg(any(test, all(target_os = "macos", feature = "browser-pane")))]
