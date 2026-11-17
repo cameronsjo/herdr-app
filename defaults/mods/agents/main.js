@@ -208,9 +208,10 @@ export default class Agents extends View {
   // compact: a ! for blocked where a header already says "Needs you".
   status(t, a, compact = false) {
     const color = t[a.status] ?? t.dim;
+    if (a.status === "working" && a.stalled) return div().flex_none().px(6).h(18).rounded(5).bg(t.dim + "26").text_size(10.5).font_semibold().text_color(t.muted ?? t.dim).flex().items_center().child("Stalled"); // FORK(attention): no sign of life for a while
     if (a.status === "working") return svg("mods/workspace-chrome/spinner.svg").size(12).mx(1).flex_none().text_color(t.working).spin(900);
     if (a.status === "blocked" && compact) return div().size(14).flex_none().rounded(4).bg(t.blocked + "26").text_size(10.5).font_bold().text_color(t.blocked).flex().items_center().justify_center().child("!");
-    if (a.status === "blocked") return div().flex_none().px(6).h(18).rounded(5).bg(t.blocked + "26").text_size(10.5).font_semibold().text_color(t.blocked).flex().items_center().child("Needs you");
+    if (a.status === "blocked") return div().flex_none().px(6).h(18).rounded(5).bg(t.blocked + "26").text_size(10.5).font_semibold().text_color(t.blocked).max_w(160).flex().items_center().child(div().truncate().child(needsYou(a))); // FORK(attention): says why
     // Idle: a ring; done: a dot.
     if (a.status === "idle") return div().size(7).mx(3).flex_none().rounded(4).border(1.5).border_color(t.idle ?? t.dim);
     return div().size(7).mx(3).flex_none().rounded(4).bg(a.status === "done" ? color : t.dim + "00");
@@ -466,4 +467,11 @@ export default class Agents extends View {
         ),
       );
   }
+}
+
+// FORK(attention): why a blocked agent needs you (agents()'s `reason`, cameronsjo/herdr-app#16).
+function needsYou(a) {
+  const words = { permission: "Approval", question: "Question", auth: "Sign in", error: "Error" };
+  if (a.reason === "attention" && a.attention) return a.attention;
+  return words[a.reason] ?? "Needs you";
 }
