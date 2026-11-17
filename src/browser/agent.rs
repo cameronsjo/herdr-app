@@ -1043,6 +1043,8 @@ mod tests {
         assert_eq!(claim_todo(&m, &live, &claimed, mine), ["t2"]);
     }
 
+    // The label is a unix path, which only unix reads as absolute.
+    #[cfg(unix)]
     #[test]
     fn the_provider_reads_the_core_and_the_label_in_any_order() {
         let hello = json!({ "jsonrpc": "2.0", "id": 0, "result": { "core": { "id": "c1" } } }).to_string();
