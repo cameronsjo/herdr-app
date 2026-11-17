@@ -109,5 +109,53 @@ export function withTask(row, a, all, t, collapsed) {
     .child(div().id(`task-${a.address}`).pl(33).pr(8).pb(4).mt(-4).text_size(11.5).truncate().text_color(t.dim).child(task));
 }
 
-// The empty list's message for this sort, or null for upstream's.
-export const empty = (id, any) => (id === "needs" && any ? "No agents need you." : null);
+// FORK(outside-agents): the agents outside Herdr's terminals this sort shows
+// (`list`: shared "fork.outside-agents", from defaults/mods/outside-agents).
+function outsiders(id, list) {
+  const all = Array.isArray(list) ? list : [];
+  return id === "needs" ? all.filter((a) => a.status === "blocked") : all;
+}
+
+// The empty list's message for this sort, or null for upstream's. `any`: an agent
+// in a Herdr terminal reports; nothing to say when agents outside Herdr show.
+export function empty(id, any, outside) {
+  if (outsiders(id, outside).length) return "";
+  return id === "needs" && (any || (Array.isArray(outside) && outside.length)) ? "No agents need you." : null;
+}
+
+// FORK(outside-agents): an "Elsewhere" header and a row for each agent outside
+// Herdr's terminals, after the rest; nothing on the narrow rail. `status(s)`
+// draws upstream's status mark. There is no pane to go to, so a row does nothing.
+export function outside(t, id, collapsed, list, status) {
+  const shown = collapsed ? [] : outsiders(id, list);
+  if (!shown.length) return [];
+  const header = div()
+    .id("outside-agents")
+    .flex()
+    .px(8)
+    .pt(8)
+    .h(30)
+    .flex_none()
+    .gap(6)
+    .items_center()
+    .text_size(11)
+    .font_medium()
+    .child(div().text_color(t.dim).child("Elsewhere"))
+    .child(div().text_color(t.dim).child(String(shown.length)));
+  const row = (a) => div()
+    .id(`outside-${a.id}`)
+    .flex_none()
+    .child(div()
+      .flex()
+      .px(8)
+      .h(30)
+      .rounded(8)
+      .items_center()
+      .gap(9)
+      .child(div().flex().flex_1().min_w(0).gap(5).items_center()
+        .child(div().min_w(0).max_w(a.title ? 120 : 200).truncate().text_color(a.status === "idle" ? t.muted : t.foreground).child(a.name))
+        .when(Boolean(a.title), (el) => el.child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(`\u00b7 ${a.title}`))))
+      .child(status(a.status)))
+    .when(Boolean(a.task), (el) => el.child(div().pl(8).pr(8).pb(4).mt(-4).text_size(11.5).truncate().text_color(t.dim).child(a.task)));
+  return [header, ...shown.map(row)];
+}

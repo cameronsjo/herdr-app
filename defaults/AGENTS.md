@@ -971,6 +971,11 @@ has 124 programs (agents, editors, runtimes, tools, databases, infra);
   one-line task under the agent's row (`task=` clears it), and `project=<name>` groups agents
   under that name in its "Grouped by project" sort. Its "Needs you" sort lists only agents
   that need the person. A terminal's name (`hc run --name`) is its row's detail.
+- `outside-agents` lists agents that run outside Herdr's terminals (cmux, a plain terminal,
+  CI) under "Elsewhere" in the agents list: each keeps one `<id>.json` file in
+  `~/.config/herdr-app/outside-agents/` (`$HERDR_APP_HOME/outside-agents/` when set), `{"name": "…", "status": "working", "title": "…",
+  "task": "…", "ttl": 60}`, and rewrites it as its heartbeat. It drops out `ttl` seconds (60 by
+  default) after its last write, or when its file is deleted. The folder's `README.md` says more.
 
 ### Check before you finish
 

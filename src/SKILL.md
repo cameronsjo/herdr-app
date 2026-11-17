@@ -229,3 +229,7 @@ Never stop a server or session you didn't start.
 - Say what you're on in the agents list: `hc label $HC_TERMINAL_ID task="fix the login test"`
   puts that line under your row; `task=` clears it. `project=<name>` groups you with other
   agents on that project.
+- An agent running outside Herdr (cmux, a plain terminal) can still show in its agents
+  list: write `~/.config/herdr-app/outside-agents/<id>.json` as
+  `{"name":"cmux claude","status":"working","title":"fixing login","ttl":60}` and rewrite
+  it at least every `ttl` seconds; delete it when you stop. status: working, blocked, done, idle.
