@@ -1,21 +1,28 @@
 #!/usr/bin/env bash
 # Keeps the everyday browser build (~/Applications/Herdr Browser.app, see
-# scripts/browser-daily) on the newest fork/master, built on this Mac.
+# scripts/browser-daily) on the newest fork/master. GitHub Actions builds it
+# (.github/workflows/fork-mac-build.yml); this downloads it.
 #
 #   daily-update check     fetch fork/master; when it moved, is a PR merge, and
-#                          its CI passed (ci.yml, fork-browser.yml), build the WebKit bundle
-#                          in its own worktree. Herdr Browser not running:
-#                          install it in place. Running: leave it built and
-#                          notify once; nothing is quit or restarted.
+#                          its CI passed (ci.yml, fork-browser.yml), get the WebKit
+#                          bundle: the `browser-<sha>` release, its build attested by
+#                          fork-mac-build.yml on master (gh attestation verify). No
+#                          release and no build running for it, or a download that
+#                          fails a check: build it here instead, in its own worktree
+#                          (on AC power). Herdr Browser not running: install it in
+#                          place. Running: leave it ready and notify once; nothing
+#                          is quit or restarted.
 #   daily-update apply     put the built one in use now: quits Herdr and opens
 #                          it (scripts/browser-daily on; terminals keep running)
 #   daily-update status    what is built, installed, and waiting
-#   daily-update install   add the launchd agent (daily at 04:30, on AC power;
-#                          HERDR_DAILY_ANY_POWER=1 runs a check on battery too)
+#   daily-update install   add the launchd agent (a check every hour; a local
+#                          build only on AC power, HERDR_DAILY_ANY_POWER=1 on
+#                          battery too)
 #   daily-update uninstall remove it
 #
 # The build is the debug-profile dev bundle (scripts/browser-dev-bundle
-# --webkit), the same one `just browser-build --webkit` and browser-daily use.
+# --webkit), the same one `just browser-build --webkit` and browser-daily use;
+# a download lands where that build would, in the build worktree's target/.
 # The agent runs a copy of this script (~/.local/share/herdr-fork/); `check`
 # refreshes that copy from the build worktree by an atomic rename, so a
 # running copy is never rewritten.
@@ -25,6 +32,8 @@ set -Eeuo pipefail
 
 repo_url_fork="cameronsjo/herdr-app"
 required_workflows=(".github/workflows/ci.yml" ".github/workflows/fork-browser.yml")
+build_workflow=".github/workflows/fork-mac-build.yml"
+asset=herdr-browser-webkit.zip
 state_dir="$HOME/.local/share/herdr-fork"
 built_file="$state_dir/built"          # fork/master SHA of the last good build
 installed_file="$state_dir/installed"  # SHA now in ~/Applications/Herdr Browser.app
@@ -92,6 +101,62 @@ ci_passed() {
   done
 }
 
+# The newest fork-mac-build.yml run's status for a commit ("none" if none).
+build_state() {
+  gh api "repos/$repo_url_fork/actions/workflows/fork-mac-build.yml/runs?head_sha=$1&per_page=1" --jq '.workflow_runs[0].status // "none"' 2>/dev/null || echo unknown
+}
+
+# The `browser-<sha>` release's bundle, into the build worktree's target/.
+# 0: there; 2: its build is still running (wait for the next check);
+# 1: none, or it failed a check (build it here instead).
+# Called as `fetch_release … || rc=$?`, so set -e is off in here: every
+# step that matters checks its own result.
+fetch_release() {
+  local sha=$1 tag="browser-$1" dir="$state_dir/download" state draft
+  if draft=$(gh release view "$tag" -R "$repo_url_fork" --json isDraft --jq .isDraft 2>/dev/null) && [[ $draft == true ]]; then
+    state=$(build_state "$sha")
+    case $state in
+      queued|in_progress|waiting|requested|pending) say "${sha:0:8}: $tag is still being published"; return 2 ;;
+    esac
+    say "${sha:0:8}: $tag was left a draft (Actions build: $state)"
+    return 1
+  fi
+  if [[ -z ${draft:-} ]]; then
+    state=$(build_state "$sha")
+    case $state in
+      queued|in_progress|waiting|requested|pending) say "${sha:0:8}: its Actions build is $state"; return 2 ;;
+    esac
+    say "${sha:0:8}: no release $tag (Actions build: $state)"
+    return 1
+  fi
+  rm -rf "$dir"
+  mkdir -p "$dir" || return 1
+  if ! gh release download "$tag" -R "$repo_url_fork" -p "$asset" -p "$asset.sha256" -D "$dir"; then
+    state=$(build_state "$sha")
+    case $state in
+      queued|in_progress|waiting|requested|pending) say "${sha:0:8}: $tag is still being published"; return 2 ;;
+    esac
+    say "${sha:0:8}: download of $tag failed"
+    return 1
+  fi
+  (cd "$dir" && shasum -a 256 -c "$asset.sha256" >/dev/null) || { say "${sha:0:8}: $asset does not match its checksum"; return 1; }
+  # Built by this repo's build workflow, from this exact commit on master.
+  if ! gh attestation verify "$dir/$asset" -R "$repo_url_fork" --signer-workflow "$repo_url_fork/$build_workflow" \
+    --source-ref refs/heads/master --source-digest "$sha" --deny-self-hosted-runners >/dev/null 2>&1; then
+    say "${sha:0:8}: $tag's attestation did not verify"
+    notify "The downloaded build ${sha:0:8} failed its attestation check, so it was not used; see $log"
+    return 1
+  fi
+  ditto -x -k "$dir/$asset" "$dir/unpacked" || { say "${sha:0:8}: could not unpack $asset"; return 1; }
+  [[ -d "$dir/unpacked/Herdr Dev.app" ]] || { say "${sha:0:8}: $asset holds no Herdr Dev.app"; return 1; }
+  xattr -dr com.apple.quarantine "$dir/unpacked/Herdr Dev.app" 2>/dev/null || true
+  local dest="$build/target/browser-dev-webkit"
+  mkdir -p "$dest" && rm -rf "$dest/Herdr Dev.app" && mv "$dir/unpacked/Herdr Dev.app" "$dest/Herdr Dev.app" ||
+    { say "${sha:0:8}: could not put the download in $dest"; return 1; }
+  rm -rf "$dir"
+  return 0
+}
+
 # Same steps as browser-daily on, minus quitting and opening: its own bundle id, signed ad hoc.
 install_bundle() {
   local src="$build/target/browser-dev-webkit/Herdr Dev.app" sha=$1
@@ -121,9 +186,7 @@ cmd_check() {
   lock
   # shellcheck disable=SC2154  # trap_rc is assigned inside the trap string
   trap 'trap_rc=$?; say "check failed at line $LINENO: $BASH_COMMAND (exit $trap_rc)"; notify "The daily build check failed; see $log"; exit 1' ERR
-  local power remote sha
-  power=$(pmset -g ps)
-  if [[ "$power" != *"AC Power"* && -z "${HERDR_DAILY_ANY_POWER:-}" ]]; then say "on battery: skipped (HERDR_DAILY_ANY_POWER=1 builds anyway)"; return 0; fi
+  local power remote sha rc
   remote=$(fork_remote)
   git -C "$root" fetch --quiet --no-tags "$remote" master
   sha=$(git -C "$root" rev-parse "refs/remotes/$remote/master")
@@ -136,9 +199,18 @@ cmd_check() {
       git -C "$root" worktree prune
       git -C "$root" worktree add --quiet --detach "$build" "$sha"
     fi
-    git -C "$build" submodule update --init --depth 1 vendor/ghostty
-    say "building ${sha:0:8} (WebKit bundle)"
-    (cd "$build" && bash scripts/browser-dev-bundle --webkit)
+    rc=0
+    fetch_release "$sha" || rc=$?
+    if [[ $rc -eq 2 ]]; then return 0; fi
+    if [[ $rc -eq 0 ]]; then
+      say "downloaded ${sha:0:8} (WebKit bundle, built by $build_workflow)"
+    else
+      power=$(pmset -g ps)
+      if [[ "$power" != *"AC Power"* && -z "${HERDR_DAILY_ANY_POWER:-}" ]]; then say "on battery: local build skipped (HERDR_DAILY_ANY_POWER=1 builds anyway)"; return 0; fi
+      git -C "$build" submodule update --init --depth 1 vendor/ghostty
+      say "building ${sha:0:8} here (WebKit bundle)"
+      (cd "$build" && bash scripts/browser-dev-bundle --webkit)
+    fi
     printf '%s\n' "$sha" > "$built_file"
     refresh_self
   else
@@ -188,8 +260,7 @@ cmd_install() {
   <key>ProgramArguments</key>
   <array><string>/bin/bash</string><string>$self</string><string>check</string></array>
   <key>WorkingDirectory</key><string>$HOME</string>
-  <key>StartCalendarInterval</key>
-  <dict><key>Hour</key><integer>4</integer><key>Minute</key><integer>30</integer></dict>
+  <key>StartInterval</key><integer>3600</integer>
   <key>StandardOutPath</key><string>$log</string>
   <key>StandardErrorPath</key><string>$log</string>
   <key>LowPriorityIO</key><true/>
@@ -206,7 +277,7 @@ PLIST
     [[ $tries -eq 10 ]] && { echo "daily-update: launchctl bootstrap kept failing; see: launchctl print gui/$(id -u)/$label" >&2; exit 1; }
     sleep 1
   done
-  echo "installed: $plist (daily 04:30, on AC power); log $log"
+  echo "installed: $plist (a check every hour; local builds on AC power only); log $log"
   echo "first build now: bash $self check"
 }
 

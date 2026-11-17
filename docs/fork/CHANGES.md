@@ -67,7 +67,8 @@ Added 2026-11-15; setup order and the routine's prompt: `docs/fork/weekly-sync.m
 - `.github/workflows/fork-browser.yml` (fork-only): the WebKit browser build's tests on macOS, the check upstream's CI can't run.
 - `.github/dependabot.yml`: `tungstenite` only (the fork's one stand-alone crate); upstream's Actions entry kept, its version PRs off on the fork (one `FORK(browser)` line). Syncs copy `ci.yml`'s action pins into `fork-browser.yml`.
 - `src/update.rs` `checks_core`: the fork's browser builds offer `herdr-core` updates as release builds do, except in an isolated dev run with its own app home (one `FORK(browser)` line).
-- `scripts/fork/daily-update`: a launchd agent on Cameron's Mac builds each new `fork/master` that is a PR merge with `ci.yml` and `fork-browser.yml` green and installs it as the everyday browser build, never quitting a running one.
+- `.github/workflows/fork-mac-build.yml` (fork-only, added 2026-11-17, Linear CAM-913): each push to master builds the WebKit dev bundle on macOS with a read-only token, and a separate job attests it (`actions/attest-build-provenance`) and publishes it as the prerelease `browser-<sha>`, keeping the newest 10. Upstream's `release.yml` never publishes on the fork: it publishes only upstream's own tags, to upstream's storage.
+- `scripts/fork/daily-update`: a launchd agent on Cameron's Mac checks hourly for a new `fork/master` that is a PR merge with `ci.yml` and `fork-browser.yml` green, downloads its `browser-<sha>` release (checksum and `gh attestation verify` against `fork-mac-build.yml` on master), and installs it as the everyday browser build, never quitting a running one. With no release and no build running for it, or a download that fails a check, it builds the commit locally instead (on AC power).
 
 ## Artificer theme
 
