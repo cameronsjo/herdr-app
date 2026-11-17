@@ -226,3 +226,6 @@ Never stop a server or session you didn't start.
 - Extra environment variables for an agent go through `env` in its argv
   (macOS and Linux): `herdr-app do tab.new --name api --argv '["env","API_MODE=dev","claude"]'`.
   The values show in the terminal's argv (`hc ls`), so don't pass secrets this way.
+- Say what you're on in the agents list: `hc label $HC_TERMINAL_ID task="fix the login test"`
+  puts that line under your row; `task=` clears it. `project=<name>` groups you with other
+  agents on that project.

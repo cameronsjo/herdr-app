@@ -137,3 +137,15 @@ TUI: cameronsjo/herdr PR #149 (issue cameronsjo/herdr#97). Shipped as the backgr
 ### Extra environment variables for an agent (cameronsjo/herdr-app#11)
 
 TUI: cameronsjo/herdr PR #124 (`agent start --env`). No code: the app passes `argv` to the core as separate arguments (`src/hc.rs` `run`, wrapped by `unix_agent_argv` in `src/window.rs`), so `tab.new {argv: ["env", "K=V", "claude"]}` reaches the agent with no shell quoting to get wrong, which is what most of the TUI port was about. `src/SKILL.md` and `defaults/AGENTS.md` say so in their `FORK(background-mods)` blocks. Limits: Unix only (Windows agents start under PowerShell, which has no `env`); the values are in the terminal's argv for `hc ls` to show; the TUI's per-shell refusals don't apply because nothing is typed into a shell.
+
+### The agents list's task line, name, needs-you sort and project groups (cameronsjo/herdr-app#8)
+
+TUI: cameronsjo/herdr PR #86 (group by a project token), issues cameronsjo/herdr#97 (`name` token) and #98 (task line, location token, needs-me filter). Shipped in upstream's `defaults/mods/agents/` as a fork-only `fork.js` plus thin seams in its `main.js` (nine `FORK(agents)` markers: the import, the two sorts, the needs-you list's priority order, its filter, the task line, the name, the project groups, the sort menu's height and the empty message). A clone of the mod would need the shipped layouts, upstream's files, to name it, and would stop getting upstream's fixes.
+
+- Task line: `hc label <terminal> task="…"` draws a dim line under the agent's row; an empty value clears it. The TUI's `herdr agent task` verb is not ported: `hc label` already sets it from anywhere, and `$HC_TERMINAL_ID` names the calling agent.
+- Name: a terminal's core name (`hc run --name`) is its row's detail (after the space in priority order, the row's name under a space header).
+- Needs you: a third sort, priority order with only the agents that need the person (one of their sub-agents counts); the empty list says "No agents need you." when agents run. No key yet: cameronsjo/herdr-app#12 (the palette) adds commands.
+- Grouped by project: a fourth sort, one header per `project` label (`hc label <terminal> project=herdr`), else per space, each group gathered behind its first agent. The TUI's workspace-level token fallback has no equivalent: spaces carry no labels.
+- Location: not ported, upstream already names a row's space wherever no space header is above it.
+- Seams: `defaults/mods/agents/main.js` (above); `src/mods/render_tests.rs`, one `mod fork_agents` line (marked) for the render cases in `src/mods/render_tests/fork_agents.rs`. `src/SKILL.md` and `defaults/AGENTS.md` name the labels in their `FORK(background-mods)` blocks.
+- Sync: an upstream rewrite of the agents mod's `render()` means re-placing each marked line by hand; `fork_agents`' render cases and `scripts/fork-mods.test.ts` fail if one goes missing.
