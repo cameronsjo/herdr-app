@@ -214,3 +214,15 @@ Never experiment with pointer/key automation on the person's real display.
 When developing the app on Linux, its `scripts/sandbox` provides an isolated
 home, core and display: `up`, `do`, `status`, `shot`, then `down` when done.
 Never stop a server or session you didn't start.
+
+<!-- FORK(background-mods) -->
+## This build's extra commands
+
+- Open a folder without making a second space for it:
+  `herdr-app do open-folder.open:~/code/app` goes to the space already there, else makes one.
+- Move the shown space with its git worktree spaces: `herdr-app do space-groups.up` (or `.down`).
+- A terminal started with a name (`hc run --name fix-login …`) names its tab, if
+  nobody named the tab; a tab still called by the old name follows a new one.
+- Extra environment variables for an agent go through `env` in its argv
+  (macOS and Linux): `herdr-app do tab.new --name api --argv '["env","API_MODE=dev","claude"]'`.
+  The values show in the terminal's argv (`hc ls`), so don't pass secrets this way.

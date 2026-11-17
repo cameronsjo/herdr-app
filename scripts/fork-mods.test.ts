@@ -91,3 +91,35 @@ test("space-groups stays on its machine and leaves a worktree with no main alone
   expect(moves(all, git, "b", 1)).toEqual([]);
   expect(apply(order, moves(all, git, "r2", -1))).toBe("x1 b r2 r1");
 });
+
+const term = (address: string, name: string | null, tab: string, state = "live") => ({ address, name, state, labels: { "herdr.tab": tab } });
+const tabsOf = (...tabs: { id: string; name: string; named: boolean }[]) => new Map(tabs.map((t) => [t.id, t]));
+
+test("name-sync names an unnamed tab after its one named terminal", async () => {
+  const { plan } = await load("name-sync", ["plan"]);
+  const tabs = tabsOf({ id: "c1", name: "1", named: false }, { id: "vps/c2", name: "2", named: false }, { id: "c3", name: "3", named: false });
+  const all = [term("t1", "fix-login", "c1"), term("vps/t7", "deploy", "c2"), term("t3", "a", "c3"), term("t4", "b", "c3"), term("t5", null, "c1")];
+  const { renames, seen } = plan(all, tabs, {});
+  // Two named terminals in c3: neither name wins. A remote tab carries its machine prefix.
+  expect(renames).toEqual([{ id: "c1", name: "fix-login" }, { id: "vps/c2", name: "deploy" }]);
+  expect(seen).toEqual({ t1: "fix-login", "vps/t7": "deploy", t3: "a", t4: "b" });
+});
+
+test("name-sync leaves a tab someone named, unless it still carries the old name", async () => {
+  const { plan } = await load("name-sync", ["plan"]);
+  const all = [term("t1", "fix-login-2", "c1")];
+  // Renamed since we looked, and the tab still says the old name: it follows.
+  expect(plan(all, tabsOf({ id: "c1", name: "fix-login", named: true }), { t1: "fix-login" }).renames).toEqual([{ id: "c1", name: "fix-login-2" }]);
+  // The person named the tab something else: left alone.
+  expect(plan(all, tabsOf({ id: "c1", name: "auth work", named: true }), { t1: "fix-login" }).renames).toEqual([]);
+  // A named tab we've never seen a name for: left alone.
+  expect(plan(all, tabsOf({ id: "c1", name: "auth work", named: true }), {}).renames).toEqual([]);
+  // Nothing changed: nothing to do.
+  expect(plan(all, tabsOf({ id: "c1", name: "fix-login-2", named: true }), { t1: "fix-login-2" }).renames).toEqual([]);
+});
+
+test("name-sync remembers terminals that aren't listed and forgets ended ones", async () => {
+  const { plan } = await load("name-sync", ["plan"]);
+  const { seen } = plan([term("t1", "x", "c1", "exited")], tabsOf({ id: "c1", name: "1", named: false }), { t1: "x", "vps/t9": "away" });
+  expect(seen).toEqual({ "vps/t9": "away" });
+});

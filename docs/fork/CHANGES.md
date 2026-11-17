@@ -113,3 +113,11 @@ TUI: cameronsjo/herdr PR #64 (`workspace open` focused the workspace already in 
 ### Move a worktree group as one block (cameronsjo/herdr-app#13)
 
 TUI: cameronsjo/herdr PR #79 (issue cameronsjo/herdr#48). Upstream's spaces list already keeps each repo's worktree spaces under its main checkout after a drag (`ordered()` in `defaults/mods/spaces/main.js`), but has no key or command to move a space by one place. Shipped as the background mod `defaults/mods/space-groups/`: `space-groups.up` and `space-groups.down` move the shown space's group (its repo's main checkout and the worktree spaces after it, found with `git rev-parse`) past one neighbouring group or lone space on the same machine. Unlike the TUI, on a worktree space the whole group moves instead of nothing.
+
+### One name follows one agent onto its tab (cameronsjo/herdr-app#10)
+
+TUI: cameronsjo/herdr PR #149 (issue cameronsjo/herdr#97). Shipped as the background mod `defaults/mods/name-sync/`: a live terminal with a core name (`hc run --name`) names its tab when it is the tab's only named terminal and nobody named the tab; when its name changes, a tab still called by the old name follows. A tab renamed to anything else is left alone. It looks every two seconds (background copies aren't redrawn) and keeps the names it saw in its `localStorage`, so a change while a machine was offline still follows. Not ported: the TUI's pane border label, because upstream's pane header already shows the agent's title. The sidebar `name` token (cameronsjo/herdr PR #146) is part of cameronsjo/herdr-app#8.
+
+### Extra environment variables for an agent (cameronsjo/herdr-app#11)
+
+TUI: cameronsjo/herdr PR #124 (`agent start --env`). No code: the app passes `argv` to the core as separate arguments (`src/hc.rs` `run`, wrapped by `unix_agent_argv` in `src/window.rs`), so `tab.new {argv: ["env", "K=V", "claude"]}` reaches the agent with no shell quoting to get wrong, which is what most of the TUI port was about. `src/SKILL.md` and `defaults/AGENTS.md` say so in their `FORK(background-mods)` blocks. Limits: Unix only (Windows agents start under PowerShell, which has no `env`); the values are in the terminal's argv for `hc ls` to show; the TUI's per-shell refusals don't apply because nothing is typed into a shell.

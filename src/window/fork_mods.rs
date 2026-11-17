@@ -17,7 +17,7 @@
 use super::*;
 
 /// The shipped fork mods that run in the background (`defaults/mods/<name>/`).
-pub(super) const BACKGROUND: &[&str] = &["open-folder", "space-groups"];
+pub(super) const BACKGROUND: &[&str] = &["open-folder", "space-groups", "name-sync"];
 
 /// Where a background copy lives in `AppWindow::copies`. No layout node has
 /// this id: layout ids are the layout file's, and they never hold a colon here.
