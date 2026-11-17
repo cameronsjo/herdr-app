@@ -235,6 +235,8 @@ test("outside-agents reads a heartbeat file and drops it when its ttl passes", a
   expect(parse("x", "not json", now)).toBeNull();
   expect(parse("x", null, now)).toBeNull();
   expect(parse("../x", JSON.stringify({ status: "idle" }), now)).toBeNull();
+  for (const status of ["constructor", "__proto__", "toString"]) expect(parse("x", JSON.stringify({ status }), now)).toBeNull();
+  expect(parse("x", JSON.stringify({ status: "idle", pad: "p".repeat(5000) }), now)).toBeNull();
   expect(parse("x", JSON.stringify({ status: "idle", name: "n".repeat(500) }), now).name.length).toBe(80);
   expect(parse("x", JSON.stringify({ status: "idle", name: "a\n\u202eb", title: `${"t".repeat(199)}\u{1F600}x` }), now)).toMatchObject({ name: "a b", title: `${"t".repeat(199)}\u{1F600}` });
   const agents = new Map([["b", { ...a, id: "b", name: "b", until: now + 1, text: "{}" }], ["a", { ...a, id: "a", name: "a", until: now + 1 }], ["old", { ...a, id: "old", name: "c", until: now }]]);

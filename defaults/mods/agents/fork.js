@@ -143,7 +143,7 @@ export function outside(t, id, collapsed, list, status) {
     .child(div().text_color(t.dim).child("Elsewhere"))
     .child(div().text_color(t.dim).child(String(shown.length)));
   const row = (a) => div()
-    .id(`outside-${a.id}`)
+    .id(`outside-row-${a.id}`)
     .flex_none()
     .child(div()
       .flex()

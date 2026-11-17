@@ -14,10 +14,13 @@
 
 import { View, div } from "gpui-kit";
 import { appHome, readTextFile, writeTextFile, watchFolder, exec, setShared, window, checking } from "herdr";
+import * as fs from "fs/promises";
 
 const DIR = "outside-agents";
 const KEY = "fork.outside-agents";
 const MAX = 64;
+// A heartbeat is a few lines; a bigger file is not one.
+const MAX_TEXT = 4096;
 const START = 2000;
 const TTL = { min: 1, def: 60, max: 86400 };
 const STATUS = { working: "working", blocked: "blocked", error: "blocked", done: "done", idle: "idle" };
@@ -47,10 +50,10 @@ const fileId = (path) => path.split(/[\\/]/).pop().replace(/\.json$/, "");
 
 // One file's agent, or null: not JSON, no known status, or a bad id.
 function parse(id, text, seenAt) {
-  if (!/^[\w.-]{1,64}$/.test(id) || text == null) return null;
+  if (!/^[\w.-]{1,64}$/.test(id) || typeof text !== "string" || text.length > MAX_TEXT) return null;
   let v;
   try { v = JSON.parse(text); } catch { return null; }
-  const status = STATUS[v?.status];
+  const status = Object.hasOwn(STATUS, v?.status) ? STATUS[v.status] : null;
   if (!status) return null;
   const ttl = Math.min(TTL.max, Math.max(TTL.min, Number.isFinite(v.ttl) ? v.ttl : TTL.def));
   // Seconds or milliseconds; a time ahead of now counts as now.
@@ -72,7 +75,9 @@ export default class OutsideAgents extends View {
     if (checking()) return;
     this.dir = `${appHome().replace(/[\\/]+$/, "")}/${DIR}`;
     this.agents = new Map();
+    // Shared state outlives the app: clear the last run's list until this one reads.
     this.sent = "[]";
+    setShared(KEY, []);
     cx.spawn(async (cx) => {
       // Start-up first: the first look waits two seconds.
       await new Promise((done) => cx.timer.after(START, done));
@@ -84,7 +89,9 @@ export default class OutsideAgents extends View {
             const paths = await watchFolder(this.dir);
             // The folder itself (a batch too big to list, or its README) means look again.
             const files = paths.filter((p) => p.endsWith(".json"));
-            await (files.length < paths.length || !paths.length ? this.relist() : this.load(files));
+            if (files.length < paths.length || !paths.length) await this.relist();
+            // A changed file is a heartbeat even when a relist came with it (a temp-file rename).
+            if (files.length) await this.load(files);
             this.publish();
           }
         } catch {
@@ -106,13 +113,28 @@ export default class OutsideAgents extends View {
   }
 
   async relist() {
-    const windows = window()?.platform === "windows";
-    const out = windows ? await exec("cmd", ["/c", "dir", "/b", this.dir]) : await exec("ls", ["-1A", this.dir]);
-    if (out.code !== 0) return;
-    const names = out.stdout.split(/\r?\n/).filter((n) => n.endsWith(".json")).slice(0, MAX * 2);
+    const names = (await this.names()).filter((n) => n.endsWith(".json")).slice(0, MAX * 2);
     const keep = new Set(names.map(fileId));
     for (const id of this.agents.keys()) if (!keep.has(id)) this.agents.delete(id);
     await this.load(names.map((n) => `${this.dir}/${n}`), true);
+  }
+
+  // The folder's file names. Mods may read only under the home folder, so an app
+  // home set elsewhere (HERDR_APP_HOME) is listed by `ls`, or `dir` on Windows.
+  async names() {
+    try {
+      return await fs.readdir(this.dir);
+    } catch (e) {
+      if (window()?.platform !== "windows") {
+        const out = await exec("ls", ["-1A", "--", this.dir]);
+        if (out.code === 0) return out.stdout.split("\n");
+      } else {
+        const out = await exec("cmd", ["/d", "/c", "dir", "/b", "/a-d", this.dir.replace(/\//g, "\\")]);
+        // An empty folder: "File Not Found", exit 1, no output.
+        if (out.code === 0 || !out.stdout.trim()) return out.stdout.split(/\r?\n/);
+      }
+      throw e;
+    }
   }
 
   // `relisting`: a file read again unchanged is not a heartbeat; a change event is,
@@ -124,8 +146,14 @@ export default class OutsideAgents extends View {
       const text = await readTextFile(path).catch(() => null);
       if (relisting && text != null && this.agents.get(id)?.text === text) continue;
       const agent = parse(id, text, now);
-      if (agent) this.agents.set(id, { ...agent, text });
-      else this.agents.delete(id);
+      if (!agent) { this.agents.delete(id); continue; }
+      // An expired record stays (so an unchanged file isn't read as a new heartbeat)
+      // until room is needed: at most twice what shows are kept.
+      if (!this.agents.has(id) && this.agents.size >= MAX * 2) {
+        for (const [old, a] of this.agents) if (a.until <= now) this.agents.delete(old);
+        if (this.agents.size >= MAX * 2) continue;
+      }
+      this.agents.set(id, { ...agent, text });
     }
   }
 
