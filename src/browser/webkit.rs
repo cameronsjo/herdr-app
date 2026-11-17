@@ -433,6 +433,9 @@ pub fn set_zoom(id: &str, percent: f64) -> Result<f64, String> {
 /// pixel-ratio, mobile or touch emulation.
 pub fn set_viewport(id: &str, viewport: Option<Viewport>) -> Result<(), String> {
     need(id)?;
+    // What `ls` reports is what WebKit applies: the size (and the preset it
+    // came from), never mobile or a pixel ratio.
+    let viewport = viewport.map(|v| Viewport { mobile: false, scale_factor: 0.0, ..v });
     let size = viewport.as_ref().map(|v| (f64::from(v.width), f64::from(v.height)));
     STATE.with_borrow_mut(|s| {
         if let Some(p) = s.pages.get_mut(id) {
@@ -569,13 +572,22 @@ fn emit(id: &str, event: &Value) {
 fn run(id: &str, generation: u64, web: &WKWebView, pid: i64, step: Step, params: &Value) {
     let owned = id.to_owned();
     let done = move |r: Result<Value, String>| reply(&owned, pid, r);
+    // A script's answer counts only if the document it ran in is still the
+    // page's: a navigation commits a new one (`loader`), and the old one's
+    // answer would describe a page the agent can no longer see.
+    let document = loader(id, generation);
+    let owned = id.to_owned();
+    let same_document = move |r: Result<Value, String>| match document {
+        Some(d) if loader(&owned, generation) == Some(d) => r,
+        _ => Err(NAVIGATED.to_owned()),
+    };
     match step {
         Step::Reply(v) => done(Ok(v)),
         Step::Fail(e) => done(Err(e)),
-        Step::World(op @ ("evaluate" | "callFunctionOn")) => world_code(web, op, params, done),
-        Step::World(op) => in_world(web, op, params, done),
-        Step::AxTree => in_world(web, "getFullAXTree", params, move |r| done(r.and_then(|raw| translate::ax_tree(&raw)))),
-        Step::PageEval => page_eval(web, params, done),
+        Step::World(op @ ("evaluate" | "callFunctionOn")) => world_code(web, op, params, move |r| done(same_document(r))),
+        Step::World(op) => in_world(web, op, params, move |r| done(same_document(r))),
+        Step::AxTree => in_world(web, "getFullAXTree", params, move |r| done(same_document(r).and_then(|raw| translate::ax_tree(&raw)))),
+        Step::PageEval => page_eval(web, params, move |r| done(same_document(r))),
         Step::Navigate(url) => {
             let Some(r) = request(&url).filter(|_| agent::allowed_url(&url)) else {
                 return done(Err(format!("only http, https and about:blank pages open, not {}", agent::loggable(&url))));
@@ -621,6 +633,15 @@ fn run(id: &str, generation: u64, web: &WKWebView, pid: i64, step: Step, params:
             done(Ok(json!({})));
         }
     }
+}
+
+/// What a script call answers when the page committed a navigation (or was
+/// reopened) before the script finished: CDP's own message for it.
+const NAVIGATED: &str = "Inspected target navigated or closed";
+
+/// The committed-navigation count of `id`'s page, if it is open and still `generation`.
+fn loader(id: &str, generation: u64) -> Option<u64> {
+    STATE.with_borrow(|s| s.pages.get(id).filter(|p| p.generation == generation).map(|p| p.loader))
 }
 
 /// Answers `Page.navigate` requests waiting on `id`: `only` that one (its
