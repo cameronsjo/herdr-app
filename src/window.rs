@@ -2215,6 +2215,7 @@ impl AppWindow {
             changed |= self.model.set_turn(addr, turn, label.max(self.written_seen.get(addr).copied()));
         }
         self.written_seen.retain(|a, _| self.live.contains_key(a));
+        self.fork_claim_terminals(cx); // FORK(browser): agent-browser finds the app holding a terminal
         changed |= self.share_seen(cx);
         // Changes already made before Herdr started aren't news.
         if self.listed_once {
