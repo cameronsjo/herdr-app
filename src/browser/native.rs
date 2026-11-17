@@ -154,7 +154,8 @@ impl Browsers {
                 Ok(json!({ "browser": browser, "zoom": emulate::shown(now) }))
             }
             "browser.viewport" => {
-                let viewport = emulate::viewport(args)?;
+                // The reply, like `ls`, says what the engine applies.
+                let viewport = emulate::viewport(args)?.map(|v| if engine::VIEWPORT_SIZE_ONLY { emulate::size_only(v) } else { v });
                 let shown = viewport.as_ref().map(emulate::Viewport::json);
                 engine::set_viewport(browser, viewport)?;
                 Ok(json!({ "browser": browser, "viewport": shown }))
