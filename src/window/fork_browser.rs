@@ -666,15 +666,45 @@ mod tests {
 }
 
 /// The window keeps browser blocks out of upstream's mod code (the
-/// `FORK(browser)` seams in `visible`, `owned_mods` and `render_block`).
+/// `FORK(browser)` seams in `src/window.rs`).
 #[cfg(test)]
 mod window_tests {
     use crate::browser::block::BROWSER_MOD;
     use serde_json::json;
 
+    /// `window::tests::in_own_process` for this module: the test alone in a
+    /// process of its own, on a fresh app home (a window takes the app home
+    /// and the mods' request channel, which are process-wide).
+    fn in_own_process(name: &str) {
+        let home = crate::test_tmp().join(format!("herdr-fork-window-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &format!("window::fork_browser::window_tests::{name}"), "--nocapture", "--test-threads=1"])
+            .env("HERDR_APP_HOME", &home)
+            .env("HERDR_TEST_WINDOW", name)
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&home);
+        let log = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success() && log.contains("1 passed"), "{log}");
+    }
+
+    fn running_alone(name: &str) -> bool {
+        std::env::var("HERDR_TEST_WINDOW").as_deref() == Ok(name)
+    }
+
+    #[test]
+    fn browser_blocks_start_no_mod_copy() {
+        in_own_process("window_starts_no_mod_copy_for_a_browser");
+    }
+
     #[gpui::test]
-    fn browser_blocks_start_no_mod_copy(cx: &mut gpui::TestAppContext) {
+    fn window_starts_no_mod_copy_for_a_browser(cx: &mut gpui::TestAppContext) {
+        if !running_alone("window_starts_no_mod_copy_for_a_browser") {
+            return;
+        }
         let home = crate::mods::app_dir();
+        assert!(std::env::var_os("HERDR_APP_HOME").is_some_and(|h| home == std::path::Path::new(&h)), "never the real app home");
         crate::mods::write_workspace().unwrap();
         std::fs::create_dir_all(home.join("layouts")).unwrap();
         // A browser block in the tree, a floating one (float_mod adds a
@@ -698,5 +728,17 @@ mod window_tests {
             assert!(this.copies.values().all(|c| c.inst.name != BROWSER_MOD), "a browser block started a mod copy");
             assert!(super::missing_mods("browsers").iter().all(|m| m != BROWSER_MOD));
         });
+    }
+
+    /// The mods' `panes` list asks `fork_pane_json` before upstream's mod-pane
+    /// branch, or a browser pane is listed as a mod named `browser-prototype`.
+    /// A sync that moves the line back passes every other test, so this reads
+    /// the order from the source.
+    #[test]
+    fn the_panes_list_asks_for_a_browser_before_a_mod() {
+        let source = include_str!("../window.rs");
+        let browser = source.find("if let Some(v) = self.fork_pane_json(").expect("the panes-list seam is in window.rs");
+        let mod_pane = source.find("if let Some(Content::Mod { name, .. }) = p.content() {").expect("upstream's mod-pane branch");
+        assert!(browser < mod_pane, "fork_pane_json must come before the mod-pane branch in the panes list");
     }
 }
