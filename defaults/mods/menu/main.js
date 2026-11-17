@@ -75,6 +75,8 @@ function items(p, git) {
         ["Theme: ink", "app.theme", { name: "ink" }],
         ["Theme: moss", "app.theme", { name: "moss" }],
         ["Theme: atom one dark", "app.theme", { name: "atom-one-dark" }],
+        ["Theme: artificer dark", "app.theme", { name: "artificer-dark" }], // FORK(artificer)
+        ["Theme: artificer light", "app.theme", { name: "artificer-light" }], // FORK(artificer)
       ];
   }
 }
