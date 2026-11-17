@@ -6,6 +6,7 @@
 
 use crate::hc::Core;
 mod floats;
+mod fork_attention; // FORK(attention): the attention queue's part of the window
 mod fork_browser; // FORK(browser): the browser pane's part of the window
 mod fork_mods; // FORK(background-mods): fork mods with no block of their own
 mod movable;
@@ -1898,6 +1899,7 @@ impl AppWindow {
                         "pinned": self.live.get(addr).and_then(|r| r.pointer("/labels/herdr.pinned")).and_then(Value::as_str).is_some_and(|v| !v.is_empty()),
                         "focused": m.active.as_deref() == Some(pr.id.as_str()) && focused_pane.as_deref() == Some(p.id.as_str()),
                     }));
+                    self.fork_agent_fields(agents.last_mut(), addr); // FORK(attention): reason, attention, stalled
                 }
             }
         }
@@ -2201,9 +2203,10 @@ impl AppWindow {
         let visible: HashSet<String> = self.visible_addresses().into_iter().collect();
         let mut alerts = Vec::new();
         for (addr, rec) in &self.live {
-            let word = rec.get("status").and_then(Value::as_str).map(str::to_owned);
+            let word = crate::fork::attention::queue(|q| q.word(addr, rec)); // FORK(attention): the attention label shows as blocked
             let app = rec.get("report").and_then(|r| r.get("app")).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned);
             let looking = visible.contains(addr) && self.window_active;
+            let looking = looking || crate::fork::attention::queue(|q| q.handled(addr)); // FORK(attention): a label that went while the agent rested was dealt with: no Done alert
             let prev = self.model.agents.get(addr).and_then(|a| a.word.clone());
             let child = rec.get("parent").and_then(Value::as_str).is_some_and(|p| !p.is_empty());
             if let Some(alert) = self.model.alert_for(addr, child, prev.as_deref(), word.as_deref(), looking) {
@@ -2216,6 +2219,7 @@ impl AppWindow {
         }
         self.written_seen.retain(|a, _| self.live.contains_key(a));
         self.fork_claim_terminals(cx); // FORK(browser): agent-browser finds the app holding a terminal
+        self.fork_attention_tick(cx); // FORK(attention)
         changed |= self.share_seen(cx);
         // Changes already made before Herdr started aren't news.
         if self.listed_once {

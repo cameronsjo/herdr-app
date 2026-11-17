@@ -35,6 +35,7 @@ mod spawn;
 mod sprites;
 mod telemetry;
 mod feedback;
+mod fork; // FORK(attention): fork features beside the browser (src/fork/)
 mod terminal;
 mod update;
 mod update_notes;
