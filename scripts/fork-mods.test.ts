@@ -273,3 +273,49 @@ test("agents: outside agents and the empty message", async () => {
   expect(empty("needs", false, [{ id: "c", status: "blocked" }])).toBe("");
   expect(empty("priority", false, undefined)).toBeNull();
 });
+
+async function loadPalette(listed: any[] = []) {
+  const source = (await readFile(new URL("../defaults/frame/palette/fork.js", import.meta.url), "utf8"))
+    .replace(/^import [^;]*;\n/gm, "").replace(/^export /gm, "").replace("let listed = [];", "let listed = __listed;");
+  return new Function("__listed", "openOverlay", `${source}; return { commandsOf, entries, go, listable, text };`)(listed, (o: any) => opened.push(o));
+}
+const opened: any[] = [];
+const entry = (name: string, args: any = {}, group = "Pane") => ({ name, args, group, title: name, words: "", id: `${name}:${JSON.stringify(args)}` });
+
+test("palette: a mod lists only its own commands", async () => {
+  const { commandsOf } = await loadPalette();
+  const got = commandsOf("open-folder", { commands: [
+    { command: "open-folder.pick", title: "Open folder…" },
+    { command: "space-groups.up", title: "not mine" },
+    { command: "open-folder.a.b" },
+    { command: "open-folder." },
+    { title: "no command" },
+    { command: "open-folder.pick", title: "twice" },
+  ] });
+  expect(got.map((c: any) => c.name)).toEqual(["open-folder.pick"]);
+  expect(got[0]).toMatchObject({ group: "Mods", title: "Open folder…", id: "open-folder.pick:{}" });
+  expect(commandsOf("x", { commands: "nope" })).toEqual([]);
+  expect(commandsOf("x", null)).toEqual([]);
+  expect(commandsOf("x", { commands: [{ command: "x.y", title: "Quit\n\u202eHerdr" }] })[0].title).toBe("Quit Herdr");
+});
+
+test("palette: a folder named like the app's commands lists none", async () => {
+  const { listable } = await loadPalette();
+  const taken = new Set(["project", "context", "app", "pane"]);
+  expect(["open-folder", "space_groups"].every((n) => listable(n, taken))).toBe(true);
+  expect(["app", "pane", "project", "context", "a.b", ".hidden", ""].some((n) => listable(n, taken))).toBe(false);
+});
+
+test("palette: direction families are one row until you type", async () => {
+  const mod = { name: "open-folder.pick", args: {}, group: "Mods", title: "Open folder…", words: "", id: "open-folder.pick:{}" };
+  const { entries, go } = await loadPalette([mod]);
+  const list = [entry("tab.new", {}, "Tab"), entry("pane.split", { direction: "right" }), entry("pane.split", { direction: "down" }), entry("pane.go", { direction: "left" }), entry("pane.close")];
+  const empty = entries(list, "");
+  expect(empty.map((e: any) => e.id)).toEqual(["tab.new:{}", "pane.split:family", "pane.go:family", "pane.close:{}", "open-folder.pick:{}"]);
+  expect(empty[1]).toMatchObject({ title: "Split pane…", dirs: ["right", "down"] });
+  expect(entries(list, "split r").map((e: any) => e.id)).toContain('pane.split:{"direction":"right"}');
+  expect(entries([...list, mod], "").filter((e: any) => e.id === mod.id)).toHaveLength(1);
+  expect(go(list[0])).toBe(false);
+  expect(go(empty[1])).toBe(true);
+  expect(opened.at(-1)).toMatchObject({ mod: "pick-direction", props: { command: "pane.split", title: "Split pane", dirs: ["right", "down"] } });
+});

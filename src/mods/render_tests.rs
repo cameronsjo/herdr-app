@@ -1,6 +1,8 @@
 //! Shipped JS descriptions and native rendering regressions.
 // FORK(agents): the fork's agents-list cases, in render_tests/fork_agents.rs.
 mod fork_agents;
+// FORK(palette): the palette's family rows and the direction chooser, in render_tests/fork_palette.rs.
+mod fork_palette;
 use super::*;
 use gpui::TestAppContext;
 use gpui_shell::{ShellRuntime, plugin::DescriptionSession, policy::Policy};
@@ -246,6 +248,8 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
                 "hc" if first == json!(["machine", "add", "host", "--json"]) => {
                     Some(json!({"code":1,"stdout":"{\"error\":{\"kind\":\"host_key\",\"message\":\"unknown host key\"}}","stderr":""}))
                 }
+                // FORK(palette): the palette lists mods/ with ls when the app home is outside home.
+                "exec" if first == "ls" && a.get(1).map(from_host) == Some(json!(["-1A", "--", "/fixture/app/mods"])) => Some(json!({"code":0,"stdout":"","stderr":""})),
                 // The files panel lists a folder with sh: kind and name pairs.
                 "exec" if first == "sh" && a.get(1).map(from_host).and_then(|v| v.get(2).cloned()) == Some(json!("files")) => {
                     Some(json!({"code":0,"stdout":"d\u{0}src\u{0}f\u{0}README.md\u{0}","stderr":""}))
