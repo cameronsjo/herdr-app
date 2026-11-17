@@ -35,11 +35,18 @@ pub const READ_EVERY_MS: u64 = 60_000;
 /// The attention label's text, if set (trimmed, at most [`MAX_TEXT`] characters).
 pub fn attention(rec: &Value) -> Option<String> {
     let text = rec.pointer("/labels").and_then(|l| l.get(LABEL)).and_then(Value::as_str)?.trim();
-    if text.is_empty() {
+    let mut plain = text.chars().filter(|c| !c.is_control());
+    let cut: String = plain.by_ref().take(MAX_TEXT).collect();
+    if cut.is_empty() {
         return None;
     }
-    let cut: String = text.chars().filter(|c| !c.is_control()).take(MAX_TEXT).collect();
-    Some(if text.chars().count() > MAX_TEXT { format!("{cut}…") } else { cut })
+    Some(if plain.next().is_some() { format!("{cut}…") } else { cut })
+}
+
+/// Whether the attention label alone makes a terminal show as blocked: it is
+/// set and the program isn't working, blocked or in error.
+fn label_blocks(rec: &Value) -> bool {
+    !matches!(rec.get("status").and_then(Value::as_str), Some("working" | "blocked" | "error") | None) && attention(rec).is_some()
 }
 
 /// The word the app shows for a terminal (`rec`: a listed record, `status`
@@ -47,10 +54,7 @@ pub fn attention(rec: &Value) -> Option<String> {
 /// the attention label that isn't working, blocked or in error is blocked.
 pub fn word(rec: &Value) -> Option<String> {
     let w = rec.get("status").and_then(Value::as_str)?;
-    if !matches!(w, "working" | "blocked" | "error") && attention(rec).is_some() {
-        return Some("blocked".to_owned());
-    }
-    Some(w.to_owned())
+    Some(if label_blocks(rec) { "blocked" } else { w }.to_owned())
 }
 
 /// Why an agent needs the person: `error`, the program's blocked `kind`
@@ -70,72 +74,111 @@ pub fn reason(rec: &Value) -> Option<&'static str> {
     }
 }
 
-/// Terminals whose attention label should go: set while the agent works
-/// again (a new turn started). Each is returned once until the core echoes
-/// the label gone; `cleared_failed` lets one be tried again.
-pub fn labels_to_clear(live: &HashMap<String, Value>) -> Vec<String> {
-    let mut clearing = CLEARING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    clearing.retain(|a| live.get(a).is_some_and(|r| attention(r).is_some()));
-    let mut out = Vec::new();
-    for (addr, rec) in live {
-        if rec.get("status").and_then(Value::as_str) == Some("working") && attention(rec).is_some() && clearing.insert(addr.clone()) {
-            out.push(addr.clone());
-        }
-    }
-    out.sort();
-    out
-}
-
-/// A label removal that failed: try it on a later tick.
-pub fn cleared_failed(addr: &str) {
-    CLEARING.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(addr);
-}
-
-static CLEARING: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
-
-// ---- stalls ----------------------------------------------------------------
-
 /// One working agent's last sign of life.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Watch {
     /// A hash of the screen as last read.
     screen: u64,
+    /// A hash of the program's report as last seen.
+    report: u64,
     /// When the screen or the report last changed, ms.
     changed: u64,
     /// When the screen was last read (or asked for), ms.
     read: u64,
 }
 
+fn hash_of(v: &impl std::hash::Hash) -> u64 {
+    use std::hash::Hasher as _;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    v.hash(&mut h);
+    h.finish()
+}
+
+/// The queue's memory between ticks: one per window ([`queue`]); tests make
+/// their own.
 #[derive(Default)]
-struct Stalls {
+pub struct Queue {
+    /// Label removals on their way.
+    clearing: BTreeSet<String>,
+    /// Terminals shown blocked by the label alone, last time.
+    labeled: BTreeSet<String>,
+    /// Terminals whose label went while the agent wasn't working.
+    handled: BTreeSet<String>,
     watches: HashMap<String, Watch>,
 }
 
-static STALLS: Mutex<Option<Stalls>> = Mutex::new(None);
+static QUEUE: Mutex<Option<Queue>> = Mutex::new(None);
 
-fn with_stalls<R>(f: impl FnOnce(&mut Stalls) -> R) -> R {
-    let mut guard = STALLS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    f(guard.get_or_insert_with(Stalls::default))
+/// The window's queue.
+pub fn queue<R>(f: impl FnOnce(&mut Queue) -> R) -> R {
+    let mut guard = QUEUE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    f(guard.get_or_insert_with(Queue::default))
 }
 
-/// The terminals to read now for the stall check: working agents not read
-/// in the last [`READ_EVERY_MS`]. Forgets every other terminal, so an agent
-/// that stops working starts fresh. `limit_ms`: the stall time (0: off).
-pub fn screens_to_read(live: &HashMap<String, Value>, now: u64, limit_ms: u64) -> Vec<String> {
-    with_stalls(|s| {
-        if limit_ms == 0 {
-            s.watches.clear();
-            return Vec::new();
+impl Queue {
+    /// [`word`], remembering which terminals the label alone shows blocked,
+    /// so one whose label goes while it isn't working is [`Queue::handled`].
+    pub fn word(&mut self, addr: &str, rec: &Value) -> Option<String> {
+        if label_blocks(rec) {
+            self.labeled.insert(addr.to_owned());
+        } else if self.labeled.remove(addr) && !matches!(rec.get("status").and_then(Value::as_str), Some("working" | "blocked" | "error")) {
+            self.handled.insert(addr.to_owned());
         }
-        s.watches.retain(|a, _| live.get(a).is_some_and(|r| r.get("status").and_then(Value::as_str) == Some("working")));
+        word(rec)
+    }
+
+    /// Whether this terminal's label just went without the agent working: the
+    /// person (or the classifier) dealt with it, so its finish is not news.
+    /// Once.
+    pub fn handled(&mut self, addr: &str) -> bool {
+        self.handled.remove(addr)
+    }
+
+    /// Terminals whose attention label should go: set while the agent works
+    /// again (a new turn started). Each is returned once until the core
+    /// echoes the label gone; [`Queue::cleared_failed`] lets one be tried
+    /// again.
+    pub fn labels_to_clear(&mut self, live: &HashMap<String, Value>) -> Vec<String> {
+        self.clearing.retain(|a| live.get(a).is_some_and(|r| attention(r).is_some()));
+        self.labeled.retain(|a| live.contains_key(a));
+        self.handled.retain(|a| live.contains_key(a));
         let mut out = Vec::new();
         for (addr, rec) in live {
-            if rec.get("status").and_then(Value::as_str) != Some("working") {
+            if rec.get("status").and_then(Value::as_str) == Some("working") && attention(rec).is_some() && self.clearing.insert(addr.clone()) {
+                out.push(addr.clone());
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// A label removal that failed: try it on a later tick.
+    pub fn cleared_failed(&mut self, addr: &str) {
+        self.clearing.remove(addr);
+    }
+
+    /// The terminals to read now for the stall check: working agents not
+    /// read in the last [`READ_EVERY_MS`]. Forgets every other terminal, so
+    /// an agent that stops working starts fresh. A new report counts as a
+    /// sign of life. `limit_ms`: the stall time (0: off).
+    pub fn screens_to_read(&mut self, live: &HashMap<String, Value>, now: u64, limit_ms: u64) -> Vec<String> {
+        let working = |r: &Value| r.get("status").and_then(Value::as_str) == Some("working");
+        if limit_ms == 0 {
+            self.watches.clear();
+            return Vec::new();
+        }
+        self.watches.retain(|a, _| live.get(a).is_some_and(working));
+        let mut out = Vec::new();
+        for (addr, rec) in live {
+            if !working(rec) {
                 continue;
             }
-            let reported = rec.get("status_ms").and_then(Value::as_u64).unwrap_or(0);
-            let w = s.watches.entry(addr.clone()).or_insert(Watch { screen: 0, changed: now.max(reported), read: 0 });
-            w.changed = w.changed.max(reported);
+            let report = hash_of(&rec.get("report").map(Value::to_string));
+            let w = self.watches.entry(addr.clone()).or_insert(Watch { screen: 0, report, changed: now, read: 0 });
+            if w.report != report {
+                w.report = report;
+                w.changed = now;
+            }
             if now.saturating_sub(w.read) >= READ_EVERY_MS {
                 w.read = now;
                 out.push(addr.clone());
@@ -143,28 +186,27 @@ pub fn screens_to_read(live: &HashMap<String, Value>, now: u64, limit_ms: u64) -
         }
         out.sort();
         out
-    })
-}
+    }
 
-/// A screen read for the stall check came back.
-pub fn saw_screen(addr: &str, text: &str, now: u64) {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    text.hash(&mut h);
-    let screen = h.finish();
-    with_stalls(|s| {
-        if let Some(w) = s.watches.get_mut(addr)
-            && w.screen != screen
+    /// A screen read for the stall check came back (`text`), or failed
+    /// (None: an unreadable screen is no evidence of a stall, so it counts
+    /// as a sign of life). True when that starts or ends a stall.
+    pub fn saw_screen(&mut self, addr: &str, text: Option<&str>, now: u64, limit_ms: u64) -> bool {
+        let before = self.stalled(addr, now, limit_ms);
+        let screen = text.map(|t| hash_of(&t));
+        if let Some(w) = self.watches.get_mut(addr)
+            && (screen.is_none() || screen != Some(w.screen))
         {
-            w.screen = screen;
+            w.screen = screen.unwrap_or(0);
             w.changed = now;
         }
-    });
-}
+        before != self.stalled(addr, now, limit_ms)
+    }
 
-/// Whether a working agent has shown no sign of life for `limit_ms` (0: off).
-pub fn stalled(addr: &str, now: u64, limit_ms: u64) -> bool {
-    limit_ms > 0 && with_stalls(|s| s.watches.get(addr).is_some_and(|w| now.saturating_sub(w.changed) >= limit_ms))
+    /// Whether a working agent has shown no sign of life for `limit_ms` (0: off).
+    pub fn stalled(&self, addr: &str, now: u64, limit_ms: u64) -> bool {
+        limit_ms > 0 && self.watches.get(addr).is_some_and(|w| now.saturating_sub(w.changed) >= limit_ms)
+    }
 }
 
 /// `stall_minutes` from `<app home>/fork.json`, in ms (0: off, the default),
@@ -231,55 +273,87 @@ mod tests {
         let long = "a".repeat(60);
         assert_eq!(attention(&rec("done", None, Some(&long))).unwrap(), format!("{}…", "a".repeat(40)));
         assert_eq!(attention(&rec("done", None, Some("run\u{1b}[31m X\n"))).unwrap(), "run[31m X");
+        // Control characters don't count toward the cut.
+        assert_eq!(attention(&rec("done", None, Some(&format!("{}\u{7}", "a".repeat(40))))).unwrap(), "a".repeat(40));
+        assert_eq!(attention(&rec("done", None, Some("\u{7}"))), None);
     }
 
     #[test]
     fn a_label_is_cleared_once_when_the_agent_works_again() {
+        let mut q = Queue::default();
         let mut live = HashMap::new();
         live.insert("t1".to_owned(), rec("working", None, Some("run X")));
         live.insert("t2".to_owned(), rec("done", None, Some("run Y")));
-        assert_eq!(labels_to_clear(&live), vec!["t1".to_owned()]);
+        assert_eq!(q.labels_to_clear(&live), vec!["t1".to_owned()]);
         // Not again while the removal is on its way.
-        assert!(labels_to_clear(&live).is_empty());
+        assert!(q.labels_to_clear(&live).is_empty());
         // A failed removal is tried again.
-        cleared_failed("t1");
-        assert_eq!(labels_to_clear(&live), vec!["t1".to_owned()]);
+        q.cleared_failed("t1");
+        assert_eq!(q.labels_to_clear(&live), vec!["t1".to_owned()]);
         // Gone: forgotten, so a later label on t1 clears again.
         live.insert("t1".to_owned(), rec("working", None, None));
-        assert!(labels_to_clear(&live).is_empty());
+        assert!(q.labels_to_clear(&live).is_empty());
         live.insert("t1".to_owned(), rec("working", None, Some("again")));
-        assert_eq!(labels_to_clear(&live), vec!["t1".to_owned()]);
+        assert_eq!(q.labels_to_clear(&live), vec!["t1".to_owned()]);
+    }
+
+    #[test]
+    fn a_label_that_goes_while_the_agent_rests_is_handled_not_news() {
+        let mut q = Queue::default();
+        assert_eq!(q.word("t1", &rec("done", None, Some("run X"))).as_deref(), Some("blocked"));
+        assert!(!q.handled("t1"));
+        // Cleared without a new turn: the finish isn't news.
+        assert_eq!(q.word("t1", &rec("done", None, None)).as_deref(), Some("done"));
+        assert!(q.handled("t1"));
+        assert!(!q.handled("t1"), "once");
+        // Cleared because the agent works again: an ordinary turn.
+        q.word("t2", &rec("idle", None, Some("usage limit")));
+        q.word("t2", &rec("working", None, Some("usage limit")));
+        q.word("t2", &rec("working", None, None));
+        assert!(!q.handled("t2"));
+        // A program's own blocked word is not the label's.
+        q.word("t3", &rec("blocked", Some("permission"), Some("x")));
+        q.word("t3", &rec("done", None, None));
+        assert!(!q.handled("t3"));
     }
 
     #[test]
     fn a_working_agent_with_a_still_screen_stalls() {
+        let mut q = Queue::default();
         let limit = 10 * 60_000;
         let mut live = HashMap::new();
-        live.insert("s1".to_owned(), json!({ "status": "working", "status_ms": 1_000 }));
+        let working = |n: u64| json!({ "status": "working", "report": { "state": "working", "msg": n.to_string() } });
+        live.insert("s1".to_owned(), working(1));
         live.insert("s2".to_owned(), json!({ "status": "idle" }));
         let t0 = 1_000_000;
-        assert_eq!(screens_to_read(&live, t0, limit), vec!["s1".to_owned()]);
-        saw_screen("s1", "thinking", t0);
+        assert_eq!(q.screens_to_read(&live, t0, limit), vec!["s1".to_owned()]);
+        assert!(!q.saw_screen("s1", Some("thinking"), t0, limit));
         // Not read again within a minute.
-        assert!(screens_to_read(&live, t0 + 1_000, limit).is_empty());
-        assert!(!stalled("s1", t0 + limit - 1, limit));
-        // The same screen a minute later is no sign of life.
-        assert_eq!(screens_to_read(&live, t0 + READ_EVERY_MS, limit), vec!["s1".to_owned()]);
-        saw_screen("s1", "thinking", t0 + READ_EVERY_MS);
-        assert!(stalled("s1", t0 + limit, limit));
-        // A new screen is.
-        saw_screen("s1", "thinking.", t0 + limit);
-        assert!(!stalled("s1", t0 + limit + 1, limit));
+        assert!(q.screens_to_read(&live, t0 + 1_000, limit).is_empty());
+        assert!(!q.stalled("s1", t0 + limit - 1, limit));
+        // The same screen later is no sign of life.
+        assert_eq!(q.screens_to_read(&live, t0 + READ_EVERY_MS, limit), vec!["s1".to_owned()]);
+        assert!(!q.saw_screen("s1", Some("thinking"), t0 + READ_EVERY_MS, limit));
+        assert!(q.stalled("s1", t0 + limit, limit));
+        assert!(!q.saw_screen("s1", Some("thinking"), t0 + limit, limit), "already stalled: no flip");
+        // A new screen is, and ends the stall.
+        assert!(q.saw_screen("s1", Some("thinking."), t0 + limit, limit));
+        assert!(!q.stalled("s1", t0 + limit + 1, limit));
         // So is a new report.
-        live.insert("s1".to_owned(), json!({ "status": "working", "status_ms": t0 + 2 * limit }));
-        screens_to_read(&live, t0 + 2 * limit, limit);
-        assert!(!stalled("s1", t0 + 2 * limit + 1, limit));
+        assert!(q.stalled("s1", t0 + 2 * limit, limit));
+        live.insert("s1".to_owned(), working(2));
+        q.screens_to_read(&live, t0 + 2 * limit, limit);
+        assert!(!q.stalled("s1", t0 + 2 * limit + 1, limit));
+        // A screen that can't be read is no evidence of a stall.
+        assert!(q.stalled("s1", t0 + 3 * limit, limit));
+        assert!(q.saw_screen("s1", None, t0 + 3 * limit, limit));
+        assert!(!q.stalled("s1", t0 + 3 * limit, limit));
         // Stopping forgets it; off forgets everything and never stalls.
         live.insert("s1".to_owned(), json!({ "status": "done" }));
-        screens_to_read(&live, t0 + 3 * limit, limit);
-        assert!(!stalled("s1", t0 + 9 * limit, limit));
-        assert!(!stalled("s1", t0 + 9 * limit, 0));
-        assert!(screens_to_read(&live, t0, 0).is_empty());
+        q.screens_to_read(&live, t0 + 4 * limit, limit);
+        assert!(!q.stalled("s1", t0 + 9 * limit, limit));
+        assert!(!q.stalled("s1", t0 + 9 * limit, 0));
+        assert!(q.screens_to_read(&live, t0, 0).is_empty());
     }
 
     #[test]

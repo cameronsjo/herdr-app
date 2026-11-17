@@ -2203,9 +2203,10 @@ impl AppWindow {
         let visible: HashSet<String> = self.visible_addresses().into_iter().collect();
         let mut alerts = Vec::new();
         for (addr, rec) in &self.live {
-            let word = crate::fork::attention::word(rec); // FORK(attention): the attention label shows as blocked
+            let word = crate::fork::attention::queue(|q| q.word(addr, rec)); // FORK(attention): the attention label shows as blocked
             let app = rec.get("report").and_then(|r| r.get("app")).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned);
             let looking = visible.contains(addr) && self.window_active;
+            let looking = looking || crate::fork::attention::queue(|q| q.handled(addr)); // FORK(attention): a label that went while the agent rested was dealt with: no Done alert
             let prev = self.model.agents.get(addr).and_then(|a| a.word.clone());
             let child = rec.get("parent").and_then(Value::as_str).is_some_and(|p| !p.is_empty());
             if let Some(alert) = self.model.alert_for(addr, child, prev.as_deref(), word.as_deref(), looking) {
