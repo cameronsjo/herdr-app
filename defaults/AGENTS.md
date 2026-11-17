@@ -957,11 +957,16 @@ has 124 programs (agents, editors, runtimes, tools, databases, infra);
 <!-- FORK(background-mods): this build's mods with no block of their own, in one block. -->
 - This build also runs mods with no block of their own, loaded on every layout:
   `open-folder` (`open-folder.open:<folder>` goes to this computer's space already in that
-  folder, else makes one there; `open-folder.pick` asks for the folder first) and
+  folder, else makes one there; `open-folder.pick` asks for the folder first),
   `space-groups` (`space-groups.up` / `space-groups.down` move the shown space and its git
-  worktree spaces as one block). Run them with `herdr-app do <name>`, `run(name)` or a
-  `keys.json` binding. They only act when called; Herdr restores a deleted shipped mod at start.
-  Only the shipped folders run this way: a `mod.clone` copy runs where a layout block names it.
+  worktree spaces as one block), and `name-sync` (a terminal started with a name names its
+  tab when nobody named the tab; a tab still called by the old name follows a new one).
+  Run the commands with `herdr-app do <mod>.<command>`, `run(...)` or a `keys.json`
+  binding. Herdr restores a deleted shipped mod at start. Only the shipped folders run
+  this way: a `mod.clone` copy runs where a layout block names it.
+- Extra environment variables for one agent (macOS and Linux): put `env` first in its
+  argv, `tab.new {argv: ["env", "API_MODE=dev", "claude"]}`. Values show in the terminal's
+  argv (`hc ls`), so keep secrets out.
 
 ### Check before you finish
 
