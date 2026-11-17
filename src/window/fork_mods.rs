@@ -65,6 +65,56 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn a_background_copy_loads_and_gets_its_commands() {
+        // The window's mod tests share one app home: each runs alone in a process of its own.
+        let home = crate::test_tmp().join(format!("herdr-fork-mods-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "window::fork_mods::tests::background_copy", "--nocapture", "--test-threads=1"])
+            .env("HERDR_APP_HOME", &home)
+            .env("HERDR_TEST_WINDOW", "fork_background_copy")
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&home);
+        let log = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success() && log.contains("1 passed"), "{log}");
+    }
+
+    /// A background mod's folder with a probe in it: the window loads it with no
+    /// layout block, counts it as shown, and `<mod>.<command>` reaches it.
+    #[gpui::test]
+    fn background_copy(cx: &mut gpui::TestAppContext) {
+        if std::env::var("HERDR_TEST_WINDOW").as_deref() != Ok("fork_background_copy") {
+            return;
+        }
+        ON.set(true);
+        let probe = "import { View, div } from \"gpui-kit\";\n\
+            import { nextCommand, setShared } from \"herdr\";\n\
+            export default class Probe extends View {\n\
+              init(_props, cx) { setShared(\"fork.init\", true); cx.spawn(async () => { for (;;) setShared(\"fork.probe\", await nextCommand()); }); }\n\
+              render() { return div(); }\n\
+            }\n";
+        let name = BACKGROUND[0];
+        let layout = serde_json::json!({ "id": "root", "type": "block", "content": { "mod": "probe" } });
+        let (view, cx) = crate::window::tests::open_window(cx, "probe", "import { View, div } from \"gpui-kit\"; export default class P extends View { render() { return div(); } }", layout);
+        cx.run_until_parked();
+        // Start-up installed the shipped mod; swap in the probe the way an edit lands.
+        let main = crate::mods::app_dir().join("mods").join(name).join("main.js");
+        assert!(main.is_file(), "start-up installs the shipped background mod");
+        std::fs::write(&main, probe).unwrap();
+        cx.update(|window, cx| view.update(cx, |this, cx| this.files_changed(vec![format!("mods/{name}/main.js").into()], window, cx)));
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        let slot = format!("fork-background:{name}");
+        let loaded = view.update(cx, |this, _| this.copies.get(&slot).map(|c| (c.root.is_some(), c.error.clone())));
+        assert_eq!(loaded, Some((true, None)), "the background copy loads with no block");
+        assert_eq!(crate::mods::shared("fork.init"), Some(serde_json::json!(true)), "its init() runs without a render");
+        cx.update(|window, cx| view.update(cx, |this, cx| this.run(&format!("{name}.open:/tmp/x"), serde_json::json!({}), window, cx)));
+        cx.run_until_parked();
+        assert_eq!(crate::mods::shared("fork.probe"), Some(serde_json::json!("open:/tmp/x")), "its command arrives, payload and all");
+    }
+
+    #[test]
     fn background_slots_name_only_installed_mods() {
         ON.set(true);
         let slots = background(&BTreeMap::new());

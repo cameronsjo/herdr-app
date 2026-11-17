@@ -961,6 +961,7 @@ has 124 programs (agents, editors, runtimes, tools, databases, infra);
   `space-groups` (`space-groups.up` / `space-groups.down` move the shown space and its git
   worktree spaces as one block). Run them with `herdr-app do <name>`, `run(name)` or a
   `keys.json` binding. They only act when called; Herdr restores a deleted shipped mod at start.
+  Only the shipped folders run this way: a `mod.clone` copy runs where a layout block names it.
 
 ### Check before you finish
 

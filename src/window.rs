@@ -6133,7 +6133,8 @@ mod tests {
     /// welcome (it lists machines through the core). No other mods: the
     /// shipped ones run programs on threads of their own, which the test
     /// executor refuses.
-    fn open_window<'a>(cx: &'a mut gpui::TestAppContext, mod_name: &str, main_js: &str, layout: serde_json::Value) -> (gpui::Entity<super::AppWindow>, &'a mut gpui::VisualTestContext) {
+    // FORK(background-mods): pub(super) for src/window/fork_mods.rs's window test.
+    pub(super) fn open_window<'a>(cx: &'a mut gpui::TestAppContext, mod_name: &str, main_js: &str, layout: serde_json::Value) -> (gpui::Entity<super::AppWindow>, &'a mut gpui::VisualTestContext) {
         open_window_on(cx, crate::hc::offline(), mod_name, main_js, layout)
     }
 
