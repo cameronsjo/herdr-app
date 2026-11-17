@@ -20,6 +20,9 @@ function normal(path, homeDir) {
   return p;
 }
 
+// A relative folder would resolve against the app's own working directory.
+const absolute = (p) => p.startsWith("/");
+
 // The first of this computer's spaces in `folder` (made there, else its first
 // terminal is there now), or null.
 function existing(folder, all, ps, homeDir) {
@@ -57,7 +60,12 @@ export default class OpenFolder extends View {
           continue;
         }
         const folder = asked.pick ? await pickFolder({ prompt: "Open" }) : asked.open;
-        if (folder) this.open(folder);
+        if (!folder) continue;
+        if (!absolute(normal(folder, home()))) {
+          notify({ title: "open-folder", body: `Give a whole path (/... or ~/...), not ${JSON.stringify(folder)}.`, level: "error" });
+          continue;
+        }
+        this.open(folder);
       }
     });
   }

@@ -28,7 +28,9 @@ test("open-folder finds the space made in a folder, or whose first terminal is t
 });
 
 test("open-folder reads open:<folder> and pick", async () => {
-  const { parse } = await load("open-folder", ["parse"]);
+  const { parse, absolute, normal } = await load("open-folder", ["parse", "absolute", "normal"]);
+  expect(absolute(normal("~/x", "/home/me"))).toBe(true);
+  expect(absolute(normal("code/x", "/home/me"))).toBe(false);
   expect(parse("open:/a/b:c")).toEqual({ open: "/a/b:c" });
   expect(parse("pick")).toEqual({ pick: true });
   expect(parse("open:")).toBeNull();

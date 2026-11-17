@@ -22,8 +22,13 @@ pub(super) const BACKGROUND: &[&str] = &["open-folder", "space-groups"];
 const SLOT: &str = "fork-background:";
 
 /// The background copies to keep: one per [`BACKGROUND`] mod whose folder is
-/// installed (a person can delete one to turn it off).
+/// installed now (Herdr restores a deleted shipped mod at its next start).
 pub(super) fn background(folders: &BTreeMap<String, Found>) -> Vec<(String, Instance)> {
+    // Upstream's window tests count the copies they load; background copies stay out of them.
+    #[cfg(test)]
+    if !tests::ON.get() {
+        return Vec::new();
+    }
     BACKGROUND
         .iter()
         .filter(|name| folders.contains_key(**name))
@@ -32,9 +37,14 @@ pub(super) fn background(folders: &BTreeMap<String, Found>) -> Vec<(String, Inst
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::{BACKGROUND, background};
     use std::collections::BTreeMap;
+
+    thread_local! {
+        /// Off in every test but these, so upstream's copy counts hold.
+        pub(in crate::window) static ON: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
 
     #[test]
     fn every_background_mod_ships() {
@@ -48,7 +58,8 @@ mod tests {
 
     #[test]
     fn background_slots_name_only_installed_mods() {
+        ON.set(true);
         let slots = background(&BTreeMap::new());
-        assert!(slots.is_empty(), "a deleted mod folder turns its background copy off");
+        assert!(slots.is_empty(), "a mod with no folder gets no background copy");
     }
 }

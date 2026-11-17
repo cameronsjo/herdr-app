@@ -960,7 +960,7 @@ has 124 programs (agents, editors, runtimes, tools, databases, infra);
   folder, else makes one there; `open-folder.pick` asks for the folder first) and
   `space-groups` (`space-groups.up` / `space-groups.down` move the shown space and its git
   worktree spaces as one block). Run them with `herdr-app do <name>`, `run(name)` or a
-  `keys.json` binding; deleting a mod's folder turns it off.
+  `keys.json` binding. They only act when called; Herdr restores a deleted shipped mod at start.
 
 ### Check before you finish
 
