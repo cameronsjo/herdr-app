@@ -7,6 +7,7 @@
 use crate::hc::Core;
 mod floats;
 mod fork_browser; // FORK(browser): the browser pane's part of the window
+mod fork_mods; // FORK(background-mods): fork mods with no block of their own
 mod movable;
 mod pane_drag;
 mod pane_size;
@@ -1379,6 +1380,7 @@ impl AppWindow {
             }
         }
         out.retain(|_, i| crate::browser::block::of_mod(&i.name, &i.props).is_none()); // FORK(browser): a browser block is no mod to run
+        out.extend(fork_mods::background(&self.folders)); // FORK(background-mods)
         out
     }
 
@@ -1484,6 +1486,7 @@ impl AppWindow {
         let (model, live) = (&self.model, &self.live);
         self.swapped.retain(|p, a| model.address_of(p).is_some() && live.contains_key(a));
         let (mut terms, mods_visible) = self.visible();
+        let mods_visible = fork_mods::with_background(mods_visible, &self.folders); // FORK(background-mods): not in visible(), which telemetry reads
         let covered: HashSet<&str> = terms.iter().filter_map(|(slot, _)| slot.strip_suffix(SWAP)).collect();
         let mut displayed: HashSet<String> = terms.iter().filter(|(slot, _)| !covered.contains(slot.as_str())).map(|(slot, _)| slot.clone()).collect();
         // Agent blocks reuse their agent's pane view even when its tab isn't shown.
@@ -3893,6 +3896,7 @@ impl AppWindow {
     /// Which copies are on screen, for `<mod>.<command>` (`mods::send_command`).
     fn publish_shown_copies(&self) {
         let (_, shown) = self.visible();
+        let shown = fork_mods::with_background(shown, &self.folders); // FORK(background-mods)
         mods::set_shown_copies(shown.iter().filter_map(|(s, i)| self.copies.get(s).filter(|c| c.inst == *i)).map(|c| c.id).collect());
     }
 
@@ -6131,7 +6135,8 @@ mod tests {
     /// welcome (it lists machines through the core). No other mods: the
     /// shipped ones run programs on threads of their own, which the test
     /// executor refuses.
-    fn open_window<'a>(cx: &'a mut gpui::TestAppContext, mod_name: &str, main_js: &str, layout: serde_json::Value) -> (gpui::Entity<super::AppWindow>, &'a mut gpui::VisualTestContext) {
+    // FORK(background-mods): pub(super) for src/window/fork_mods.rs's window test.
+    pub(super) fn open_window<'a>(cx: &'a mut gpui::TestAppContext, mod_name: &str, main_js: &str, layout: serde_json::Value) -> (gpui::Entity<super::AppWindow>, &'a mut gpui::VisualTestContext) {
         open_window_on(cx, crate::hc::offline(), mod_name, main_js, layout)
     }
 
