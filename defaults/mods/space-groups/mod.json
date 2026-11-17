@@ -1,1 +1,1 @@
-{ "place": "none", "title": "Space groups" }
+{ "place": "none", "title": "Space groups", "commands": [{ "command": "space-groups.up", "title": "Move space group up", "words": "worktree reorder" }, { "command": "space-groups.down", "title": "Move space group down", "words": "worktree reorder" }] }

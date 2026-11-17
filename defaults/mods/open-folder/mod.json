@@ -1,1 +1,1 @@
-{ "place": "none", "title": "Open folder" }
+{ "place": "none", "title": "Open folder", "commands": [{ "command": "open-folder.pick", "title": "Open folder…", "words": "space folder directory choose" }] }

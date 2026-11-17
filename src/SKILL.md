@@ -233,3 +233,5 @@ Never stop a server or session you didn't start.
   list: write `~/.config/herdr-app/outside-agents/<id>.json` as
   `{"name":"cmux claude","status":"working","title":"fixing login","ttl":60}` and rewrite
   it at least every `ttl` seconds; delete it when you stop. status: working, blocked, done, idle.
+- A mod's commands show in the palette when its `mod.json` lists them:
+  `"commands": [{"command":"my-mod.refresh","title":"Refresh my board"}]` (its own `<mod>.` only).
