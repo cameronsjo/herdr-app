@@ -232,8 +232,8 @@ mod tests {
         let block = rect(10.0, 10.0, 100.0, 100.0);
         painted("b1", rect(9.75, 10.0, 100.5, 100.0));
         assert!(spot("b1", block).is_some());
-        painted("b1", rect(10.0, 10.0, 0.0, 100.0));
-        assert_eq!(spot("b1", block), None);
+        painted("b2", rect(10.0, 10.0, 0.0, 100.0));
+        assert_eq!(spot("b2", block), None);
     }
 
     #[test]
