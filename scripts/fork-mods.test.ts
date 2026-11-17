@@ -1,5 +1,5 @@
 // FORK(background-mods): the fork's own mods: the background ones (defaults/mods/open-folder,
-// space-groups, name-sync) and browser-prototype, a browser block's page.
+// space-groups, name-sync), agents/fork.js, and browser-prototype, a browser block's page.
 import { test, expect } from "bun:test";
 import { readFile } from "node:fs/promises";
 
@@ -161,4 +161,80 @@ test("browser-prototype's placeholder never shows a saved address's query or sig
   expect(placeholder({ loading: true, url: "https://example.test/", title: "" }, "x")).toEqual({ title: null, note: "Opening https://example.test/" });
   expect(placeholder({ loading: false, url: "https://example.test/", title: "Example" }, "x")).toEqual({ title: "Example", note: "https://example.test/" });
   expect(placeholder({ loading: false, url: "https://example.test/", title: "" }, "x")).toEqual({ title: null, note: "https://example.test/" });
+});
+
+async function loadFork() {
+  const source = (await readFile(new URL("../defaults/mods/agents/fork.js", import.meta.url), "utf8"))
+    .replace(/^import [^;]*;\n/gm, "").replace(/^export /gm, "");
+  return new Function("div", `${source}; return { order, groups, nameOf, taskOf, empty, FORK_SORTS, menuHeight };`)(() => ({}));
+}
+
+const agent = (address: string, space: string, extra = {}) => ({ address, space, space_name: space.toUpperCase(), ...extra });
+
+test("agents: needs you keeps only the agents that need you", async () => {
+  const { order, empty } = await loadFork();
+  const list = [agent("t1", "s1"), agent("t2", "s1"), agent("t3", "s2")];
+  const urgency = (a: { address: string }) => ({ t1: 2, t2: 4, t3: 4 })[a.address];
+  expect(order("needs", list, [], urgency).map((a: any) => a.address)).toEqual(["t2", "t3"]);
+  expect(order("priority", list, [], urgency)).toBe(list);
+  expect(empty("needs", true)).toBe("No agents need you.");
+  expect(empty("needs", false)).toBeNull();
+  expect(empty("grouped", true)).toBeNull();
+});
+
+test("agents: grouped by project gathers each project label behind its first agent", async () => {
+  const { order, groups } = await loadFork();
+  const all = [
+    { address: "t1", labels: { project: "herdr" } },
+    { address: "t2", labels: {} },
+    { address: "t3", labels: { project: " herdr " } },
+    { address: "t4", labels: { project: "" } },
+  ];
+  const list = [agent("t1", "s1"), agent("t2", "s1"), agent("t3", "s2"), agent("t4", "s1")];
+  const ordered = order("project", list, all, () => 1);
+  expect(ordered.map((a: any) => a.address)).toEqual(["t1", "t3", "t2", "t4"]);
+  const pinned = [{ id: "pinned", label: "Pinned", status: null, members: [] }];
+  const out = groups("project", [], pinned, ordered, all);
+  expect(out.map((g: any) => [g.label, g.members.map((a: any) => a.address)])).toEqual([
+    ["Pinned", []],
+    ["herdr", ["t1", "t3"]],
+    ["S1", ["t2", "t4"]],
+  ]);
+  const built = [{ id: "sp-s1" }];
+  expect(groups("grouped", built, pinned, ordered, all)).toBe(built);
+});
+
+test("agents: a terminal's name and task label, trimmed, or null", async () => {
+  const { nameOf, taskOf, FORK_SORTS, menuHeight } = await loadFork();
+  const all = [{ address: "t1", name: " fix-login ", labels: { task: "fix the login test" } }, { address: "t2", name: "", labels: { task: "  " } }];
+  expect(nameOf(all, "t1")).toBe("fix-login");
+  expect(taskOf(all, "t1")).toBe("fix the login test");
+  expect(nameOf(all, "t2")).toBeNull();
+  expect(taskOf(all, "t2")).toBeNull();
+  expect(nameOf(all, "t9")).toBeNull();
+  expect(menuHeight(140)).toBe(140 + 31 * FORK_SORTS.length);
+});
+
+test("agents: a label drawn on one line with control and bidi characters dropped, and capped", async () => {
+  const { nameOf, taskOf, groups } = await loadFork();
+  const all = [
+    { address: "t1", name: "n".repeat(500), labels: { task: "fake\n\u202eclaude \u00b7 blocked\u0000x", project: "p\u0000q" } },
+    { address: "t2", labels: { task: "x".repeat(10000) } },
+  ];
+  expect(taskOf(all, "t1")).toBe("fake claude \u00b7 blocked x");
+  expect(nameOf(all, "t1")).toHaveLength(80);
+  expect(nameOf(all, "t1").endsWith("\u2026")).toBe(true);
+  expect(taskOf(all, "t2")).toHaveLength(200);
+  const out = groups("project", [], [], [{ address: "t1", space: "s1" }], all);
+  expect(out[0].label).toBe("p q");
+  expect(out[0].id).not.toContain("\u0000");
+});
+
+test("agents: a cut never splits an emoji", async () => {
+  const { nameOf, groups } = await loadFork();
+  const all = [{ address: "t1", name: `${"a".repeat(78)}\u{1F600}\u{1F600}\u{1F600}`, labels: { project: `${"a".repeat(78)}\u{1F600}\u{1F600}\u{1F600}` } }];
+  const name = nameOf(all, "t1");
+  expect(name).toBe(`${"a".repeat(78)}\u{1F600}\u2026`);
+  expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(name)).toBe(false);
+  expect(() => groups("project", [], [], [{ address: "t1", space: "s1" }], all)).not.toThrow();
 });
