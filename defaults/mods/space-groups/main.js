@@ -13,6 +13,8 @@
 import { View, div } from "gpui-kit";
 import { spaces, panes, run, exec, nextCommand, notify, checking } from "herdr";
 
+const AT_ONCE = 6;
+
 // Where a space is now: its first terminal's live folder, else where it was made
 // (the spaces list's rule).
 function place(s, ps) {
@@ -92,7 +94,11 @@ export default class SpaceGroups extends View {
     const ps = panes();
     const mine = all.filter((s) => (s.machine ?? null) === (shown.machine ?? null));
     const git = {};
-    await Promise.all(mine.map(async (s) => { git[s.id] = await repo(place(s, ps), s.machine); }));
+    // A few at a time, as the spaces list does: hundreds at once run out of open
+    // files or a machine core's running execs, and a failed look reads as no repo.
+    for (let i = 0; i < mine.length; i += AT_ONCE) {
+      await Promise.all(mine.slice(i, i + AT_ONCE).map(async (s) => { git[s.id] = await repo(place(s, ps), s.machine); }));
+    }
     // The list may have changed while git answered: plan against the current one.
     for (const call of moves(spaces(), git, shown.id, by)) run("space.move", call);
   }

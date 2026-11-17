@@ -1315,7 +1315,6 @@ impl AppWindow {
                 }
             }
         }
-        mods.extend(fork_mods::background(&self.folders)); // FORK(background-mods)
         (terms, mods)
     }
 
@@ -1485,6 +1484,7 @@ impl AppWindow {
         let (model, live) = (&self.model, &self.live);
         self.swapped.retain(|p, a| model.address_of(p).is_some() && live.contains_key(a));
         let (mut terms, mods_visible) = self.visible();
+        let mods_visible = fork_mods::with_background(mods_visible, &self.folders); // FORK(background-mods): not in visible(), which telemetry reads
         let covered: HashSet<&str> = terms.iter().filter_map(|(slot, _)| slot.strip_suffix(SWAP)).collect();
         let mut displayed: HashSet<String> = terms.iter().filter(|(slot, _)| !covered.contains(slot.as_str())).map(|(slot, _)| slot.clone()).collect();
         // Agent blocks reuse their agent's pane view even when its tab isn't shown.
@@ -3894,6 +3894,7 @@ impl AppWindow {
     /// Which copies are on screen, for `<mod>.<command>` (`mods::send_command`).
     fn publish_shown_copies(&self) {
         let (_, shown) = self.visible();
+        let shown = fork_mods::with_background(shown, &self.folders); // FORK(background-mods)
         mods::set_shown_copies(shown.iter().filter_map(|(s, i)| self.copies.get(s).filter(|c| c.inst == *i)).map(|c| c.id).collect());
     }
 

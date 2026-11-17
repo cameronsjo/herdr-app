@@ -9,8 +9,10 @@
 //! `cx.timer` tasks run, `nextCommand()` gets its commands; `render()` is not
 //! called (live data changes don't wake it: poll with `cx.timer` if it watches).
 //!
-//! `src/window.rs` carries one `FORK(background-mods)` line in `visible()` and one
-//! in `owned_mods()`; everything else is here.
+//! `src/window.rs` adds them where `sync()` loads copies, where
+//! `publish_shown_copies()` names the shown ones, and in `owned_mods()` (one
+//! `FORK(background-mods)` line each). Not in `visible()`: telemetry reads that,
+//! and these mods are never on screen.
 
 use super::*;
 
@@ -34,6 +36,12 @@ pub(super) fn background(folders: &BTreeMap<String, Found>) -> Vec<(String, Inst
         .filter(|name| folders.contains_key(**name))
         .map(|name| (format!("{SLOT}{name}"), Instance { name: (*name).to_owned(), props: json!({ "background": true }) }))
         .collect()
+}
+
+/// `shown` with the background copies added.
+pub(super) fn with_background(mut shown: Vec<(String, Instance)>, folders: &BTreeMap<String, Found>) -> Vec<(String, Instance)> {
+    shown.extend(background(folders));
+    shown
 }
 
 #[cfg(test)]

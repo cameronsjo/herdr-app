@@ -59,13 +59,18 @@ export default class OpenFolder extends View {
           notify({ title: "open-folder", body: `Unknown command ${JSON.stringify(command)}: use open:<folder> or pick.`, level: "error" });
           continue;
         }
-        const folder = asked.pick ? await pickFolder({ prompt: "Open" }) : asked.open;
-        if (!folder) continue;
-        if (!absolute(normal(folder, home()))) {
-          notify({ title: "open-folder", body: `Give a whole path (/... or ~/...), not ${JSON.stringify(folder)}.`, level: "error" });
-          continue;
+        // One failure must not end the loop: later commands would go nowhere.
+        try {
+          const folder = asked.pick ? await pickFolder({ prompt: "Open" }) : asked.open;
+          if (!folder) continue;
+          if (!absolute(normal(folder, home()))) {
+            notify({ title: "open-folder", body: `Give a whole path (/... or ~/...), not ${JSON.stringify(folder)}.`, level: "error" });
+            continue;
+          }
+          this.open(folder);
+        } catch (e) {
+          notify({ title: "Can't open the folder", body: String(e?.message ?? e), level: "error" });
         }
-        this.open(folder);
       }
     });
   }
