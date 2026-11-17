@@ -53,7 +53,7 @@ function parse(id, text, seenAt) {
   if (!/^[\w.-]{1,64}$/.test(id) || typeof text !== "string" || text.length > MAX_TEXT) return null;
   let v;
   try { v = JSON.parse(text); } catch { return null; }
-  const status = Object.hasOwn(STATUS, v?.status) ? STATUS[v.status] : null;
+  const status = Object.prototype.hasOwnProperty.call(STATUS, v?.status) ? STATUS[v.status] : null;
   if (!status) return null;
   const ttl = Math.min(TTL.max, Math.max(TTL.min, Number.isFinite(v.ttl) ? v.ttl : TTL.def));
   // Seconds or milliseconds; a time ahead of now counts as now.
