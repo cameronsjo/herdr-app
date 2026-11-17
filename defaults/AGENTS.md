@@ -967,6 +967,10 @@ has 124 programs (agents, editors, runtimes, tools, databases, infra);
 - Extra environment variables for one agent (macOS and Linux): put `env` first in its
   argv, `tab.new {argv: ["env", "API_MODE=dev", "claude"]}`. Values show in the terminal's
   argv (`hc ls`), so keep secrets out.
+- The agents list reads two labels: `hc label <terminal> task="fix the login test"` puts a
+  one-line task under the agent's row (`task=` clears it), and `project=<name>` groups agents
+  under that name in its "Grouped by project" sort. Its "Needs you" sort lists only agents
+  that need the person. A terminal's name (`hc run --name`) is its row's detail.
 
 ### Check before you finish
 

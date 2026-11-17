@@ -1,4 +1,6 @@
 //! Shipped JS descriptions and native rendering regressions.
+// FORK(agents): the fork's agents-list cases, in render_tests/fork_agents.rs.
+mod fork_agents;
 use super::*;
 use gpui::TestAppContext;
 use gpui_shell::{ShellRuntime, plugin::DescriptionSession, policy::Policy};
