@@ -112,8 +112,16 @@ build_state() {
 # Called as `fetch_release … || rc=$?`, so set -e is off in here: every
 # step that matters checks its own result.
 fetch_release() {
-  local sha=$1 tag="browser-$1" dir="$state_dir/download" state
-  if ! gh release view "$tag" -R "$repo_url_fork" >/dev/null 2>&1; then
+  local sha=$1 tag="browser-$1" dir="$state_dir/download" state draft
+  if draft=$(gh release view "$tag" -R "$repo_url_fork" --json isDraft --jq .isDraft 2>/dev/null) && [[ $draft == true ]]; then
+    state=$(build_state "$sha")
+    case $state in
+      queued|in_progress|waiting|requested|pending) say "${sha:0:8}: $tag is still being published"; return 2 ;;
+    esac
+    say "${sha:0:8}: $tag was left a draft (Actions build: $state)"
+    return 1
+  fi
+  if [[ -z ${draft:-} ]]; then
     state=$(build_state "$sha")
     case $state in
       queued|in_progress|waiting|requested|pending) say "${sha:0:8}: its Actions build is $state"; return 2 ;;

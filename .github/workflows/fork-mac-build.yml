@@ -113,9 +113,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="browser-$GITHUB_SHA"
-          if gh release view "$tag" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "$tag is already published"
-            exit 0
+          if draft=$(gh release view "$tag" -R "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [ "$draft" != true ]; then echo "$tag is already published"; exit 0; fi
+            # An earlier run stopped part-way: start that release again.
+            gh release delete "$tag" -R "$GITHUB_REPOSITORY" --yes
           fi
           # A draft first, published once both files are up, so a reader never
           # sees a release whose files are still uploading.
