@@ -137,12 +137,7 @@ impl AppWindow {
         {
             let socket = crate::mods::app_dir().join("herdr-app.sock").to_string_lossy().into_owned();
             let label = crate::browser::agent::SOCKET_LABEL;
-            let local = self.model.spaces.iter().filter(|s| s.machine.is_none()).flat_map(|s| &s.tabs).flat_map(|t| crate::model::addresses(&t.root));
-            let todo: Vec<String> = local
-                .filter(|a| !a.contains('/') && !self.fork.claimed.contains(a))
-                .filter(|a| self.live.get(a).is_some_and(|r| r.pointer("/labels").and_then(|l| l.get(label)).and_then(Value::as_str) != Some(socket.as_str())))
-                .collect();
-            for addr in todo {
+            for addr in crate::browser::agent::claim_todo(&self.model, &self.live, &self.fork.claimed, &socket) {
                 self.fork.claimed.insert(addr.clone());
                 let core = self.core.clone();
                 let params = json!({ "terminal": addr, "labels": { (label): socket } });
