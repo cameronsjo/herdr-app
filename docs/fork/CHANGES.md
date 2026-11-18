@@ -41,7 +41,7 @@ No upstream renames or deletions of fork-touched files. 5 conflicted files, one 
 |---|---|---|---|
 | `src/window.rs` | `pane.rename` and `pane.resize` are structural commands | `fork_browser::structural(name)` on the same line | upstream's list plus the fork's check |
 | `src/main.rs` | `herdr-app check` checks a `link.js`-only mod first | `main_with_components(browser::element::components())` | upstream's link check, then the fork's components call in place of upstream's default registry |
-| `defaults/mods/pane/main.js` | a pane's `name` comes first in its header | header split into `head` + `terminal()` | upstream's `p.name ||` moved into the fork's `terminal()` |
+| `defaults/mods/pane/main.js` | a pane's `name` comes first in its header | header split into `head` + `terminal()` | upstream's `p.name \|\|` moved into the fork's `terminal()` |
 | `defaults/herdr.d.ts` | `PaneInfo` doc lists `name` | browser-pane note on the same comment | both |
 | `justfile` | `scripts/changes.test.ts` in the Bun line | the `fork-mods.test.ts` line | both |
 | `src/window/fork_browser.rs` (fork-only, no conflict) | every `panes()` entry gains `name` (the pane's own name, from `pane.rename`) | the browser pane's entry, built before upstream's | `"name": p.title` added, so a renamed browser pane reports its name like any other |
@@ -67,6 +67,13 @@ No upstream renames or deletions of fork-touched files. 18 conflict hunks in 10 
 | `defaults/herdr.d.ts` | `terminal.scroll` | browser commands | both |
 | `Cargo.lock` | | | upstream's, then `cargo metadata` |
 | `THIRD-PARTY-NOTICES` | | | upstream's, then `bun scripts/notices.ts` (cargo-about 0.9.3 needs `--features cli` to install the binary) |
+
+## README
+
+Added 2026-11-18 (Linear CAM-945). `README.md` opens with a fork section: what the fork is, how to run it, and a plain-English list of what it changes, ending in a `---` rule. Everything after the rule is upstream's README, untouched, so upstream's edits there merge cleanly.
+
+- Seam: the block from the `FORK(readme)` HTML comment down to the `---` rule above upstream's `# Herdr` heading. A sync that conflicts at the top of the file keeps the fork block and upstream's new text below it.
+- A feature PR that changes what the fork does updates its line in that list.
 
 ## Font picker
 
