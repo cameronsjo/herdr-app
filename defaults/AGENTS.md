@@ -595,6 +595,7 @@ The main ones:
   in beside it like any tab), `tab.close {id?, confirmed?}` (closing the last tab
   closes its space and asks first unless confirmed),
   `tab.rename {id?, name}` ("": its number again), `tab.move {id?, index | by}` (by: places left (-) or right (+), skipping settled tabs as `tab.next` does, wrapping),
+  `tab.move_to_space {id?, space, index?}` (to another space on the same machine, last by default; a space's last tab takes the space away, its terminals still running), `space.merge {id?, into}` (every tab, in order, to the end of `into`) <!-- FORK(spaces) -->,
   `tab.select {index | id}`, `tab.next`, `tab.prev`,
   `tab.settle {id?}`, `tab.unsettle {id?}` (index, next and prev
   skip settled tabs).

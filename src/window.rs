@@ -9,6 +9,7 @@ mod floats;
 mod fork_attention; // FORK(attention): the attention queue's part of the window
 mod fork_browser; // FORK(browser): the browser pane's part of the window
 mod fork_mods; // FORK(background-mods): fork mods with no block of their own
+mod fork_spaces; // FORK(spaces): moving a tab to another space, merging spaces
 mod movable;
 mod pane_drag;
 mod pane_size;
@@ -2346,6 +2347,9 @@ impl AppWindow {
     /// shown. A space or tab the app doesn't know is made under the label's
     /// id, unnamed (called Herdr's way).
     fn adopt(&mut self, addr: &str, space: &str, ctx: Option<&str>) {
+        // FORK(spaces): a labeled tab that moved to another space is joined where it is now.
+        let space = crate::fork::spaces::space_for_adoption(&self.model, space, ctx);
+        let space = space.as_str();
         let machine = addr.split_once('/').map(|(m, _)| m.to_owned());
         let pane = self.model.fresh_id_on("p", machine.as_deref());
         let ctx_id = ctx.map(str::to_owned).unwrap_or_else(|| self.model.fresh_id_on("tb", machine.as_deref()));
@@ -3380,6 +3384,7 @@ impl AppWindow {
                 return;
             }
             n if n.starts_with("browser.") => if self.fork_dispatch(n, a, person, window, cx) { return }, // FORK(browser)
+            "tab.move_to_space" | "space.merge" => self.fork_spaces(name, a, active_ctx, cx), // FORK(spaces)
             "terminal.select_all" => {
                 let view = match Self::owned(a, "terminal") {
                     Some(address) => self.shown_terminal_view(&address, window, cx),
