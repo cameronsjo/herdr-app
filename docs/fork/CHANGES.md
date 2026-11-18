@@ -24,7 +24,6 @@ Upstream files the fork changes that can't carry a `FORK(` comment. A sync resol
 
 Exceptions to `CLAUDE.md` rule 4, each with its reason.
 
-- `Content::Browser` (`src/layout.rs`): the browser block. cameronsjo/herdr-app#18 tracks saving it as a mod block instead.
 - `Snapshot.browsers` (`src/mods.rs`): the mods' `browsers()` list. `Snapshot` is the one store every mod read goes through, and a parallel fork store would duplicate its revision tracking.
 
 ## Upstream syncs
@@ -50,14 +49,38 @@ No upstream renames or deletions of fork-touched files. 18 conflict hunks in 10 
 | `Cargo.lock` | | | upstream's, then `cargo metadata` |
 | `THIRD-PARTY-NOTICES` | | | upstream's, then `bun scripts/notices.ts` (cargo-about 0.9.3 needs `--features cli` to install the binary) |
 
+## Font picker
+
+Added 2026-11-17 (Linear CAM-923). Upstream's settings font picker lists only the first 200 font families (`.slice(0, 200)`), so on a Mac with more families than that, fonts late in the alphabet never show unless you search for them. The fork lists every family through a `uniform_list`, which draws only the rows on screen; each row is drawn in its own font, which is why a plain scroll area of every font would be slow to open. Rows live in the fork-only `defaults/frame/settings/fork-font-list.js`.
+
+- Seams: `defaults/frame/settings/main.js` the `fontRows` import, the `matches` line (no cap) and the `fontRows(...)` call that replaces upstream's scroll area (upstream's `item` helper, used only there, is removed); `src/mods/render_tests.rs` `font_pickers_contain_scroll_on_the_wrapper` expects `uniform_list` in place of `overflow_y_scrollbar`, plus the fork test `font_picker_lists_every_installed_font`. All marked `FORK(font-picker)`.
+- If upstream lifts the cap or virtualizes its list, drop the fork file and take upstream's.
+
+## Attention queue
+
+Added 2026-11-17 (cameronsjo/herdr-app#16, Linear CAM-921). What it does: `docs/fork/attention.md`. Rules in `src/fork/attention.rs`, the window's part in `src/window/fork_attention.rs`.
+
+- Seams: `src/main.rs` `mod fork`; `src/window.rs` `mod fork_attention`, the shown word in `tend_terminals` (`Queue::word`), the `looking` line after it (a label cleared while the agent rested raises no Done alert), the tick call there, and `fork_agent_fields` on each `agents()` entry; `defaults/mods/agents/main.js` the badge text (`needsYou`) and the Stalled badge; `defaults/herdr.d.ts` the three `AgentInfo` fields. All marked `FORK(attention)`.
+- The label is `herdr.attention`, in Herdr's shared label namespace on purpose, so other clients can learn it. If upstream ever gives that label another meaning, rename the fork's.
+- `stall_minutes` lives in `<app home>/fork.json`, not `settings.json`, so upstream's settings struct stays as it is.
+
+## Answering approvals
+
+Added 2026-11-17 (cameronsjo/herdr-app#17, Linear CAM-921). What it does: `docs/fork/approval.md`. All of it is in `src/fork/approval.rs`.
+
+- Seam: `src/main.rs` routes `herdr-app approval ...` to `fork::approval::main` before the shell commands (`FORK(approval)`). It is not listed in upstream's `HELP`, so that text stays upstream's.
+- It talks to the core directly (`terminal.get`, `terminal.read`, `terminal.keys`), not to the window, so it works with the app closed.
+
 ## Browser pane
 
 Built 2026-10-30 to 2026-11-01 on `browser-prototype`. Design and security model: `docs/browser-prototype.md`; dev loop: `docs/browser-dev.md`; moving to upstream's official browser mod when it ships: `docs/browser-transition.md`.
 
 - Engines behind cargo features: `browser` (CEF) and `browser-webkit` (WKWebView), both on the macOS-only `browser-pane`.
 - Panes save as a `browser-prototype` mod block, so a stock app shows one unloaded pane instead of failing the layout, and upstream's future browser mod never reads this fork's blocks.
-- Seams (upstream-owned files touched): see the footprint table. The window's browser code is in `src/window/fork_browser.rs`, the saved form of a browser block in `src/layout/fork_browser.rs`, and the control socket's owner-only checks in `src/browser/socket.rs`; `src/window.rs` (33 lines), `src/layout.rs` (6) and `src/control.rs` (2) keep only `FORK(browser)` call lines.
-- `Content::Browser` still widens upstream's `Content` enum, and `Content` (de)serializes through the fork's `Saved`, which must mirror upstream's serde attributes. cameronsjo/herdr-app#18 tracks removing the variant.
+- Seams (upstream-owned files touched): see the footprint table. The window's browser code is in `src/window/fork_browser.rs`, reading a browser block in `src/browser/block.rs`, and the control socket's owner-only checks in `src/browser/socket.rs`; `src/window.rs` and `src/control.rs` keep only `FORK(browser)` call lines.
+- A browser block is a `Content::Mod` named `browser-prototype` in memory too (cameronsjo/herdr-app#18, 2026-11-17), so upstream's `Content` enum and its serde attributes are untouched and `src/layout.rs` has no fork lines. The fork reads one through `browser::block::block`. Since cameronsjo/herdr-app#4 (below) a browser block runs the shipped `browser-prototype` mod like any mod block, so upstream's `visible`, `owned_mods` and `missing_mods` no longer skip it. Two `FORK(browser)` seams in `src/window.rs` still check for one: `render_block` (the window draws the block's frame around the mod) and the mods' `panes` list (`fork_pane_json` runs first). After a sync, grep upstream's new `Content::Mod` sites for another place that draws or lists mods.
+- The browser pane is an ordinary mod (cameronsjo/herdr-app#4, 2026-11-17). `defaults/mods/browser-prototype/` draws the placeholder (the page's title and address while it opens or while an overlay covers it) and `nativeView("browser", id)` from `herdr-native`, a fork component (`src/browser/element.rs`) registered through gpui-shell's public `ComponentRegistry`. The element only says where the page goes. The window still owns the rest: `render_block` wraps the mod copy in the block's frame, which keeps the agent header (so only the person can turn agent access on) and paints a canvas after the mod every frame that places the page (`browser::place`). That canvas exists because gpui-shell caches a mod's view: on a frame where the mod didn't change, its paint is replayed and the element's own paint doesn't run, so the frame reuses the mod's last report, kept relative to the block, and ignores any report outside the block that owns the page. The window draws the block itself when the page can't show there (the browser didn't start, another block owns the page, an id that can't open, and every build without browsers). Seams: the mods' VM is created with the catalog (`ShellRuntime::new_with_components` in `with_file_events`, `replace_default_with_components` in `restart_mods`, `src/window.rs`), `mods.rs` declares it in `gpui-kit.d.ts`, and `vendor/gpui-kit/crates/shell/src/engine/quickjs/mod.rs` gains `replace_default_with_components` (a new function beside upstream's `HERDR:` `replace_default`, so `restart_mods` keeps the catalog). Removed: the three skips in `visible`, `owned_mods` and `missing_mods`. Net footprint: +18 lines in upstream files (906/93 against 888/85 before, measured with `scripts/fork/seams upstream/master`), most of it the 9-line vendor function; `src/mods/render_tests.rs` gives its shipped-mod VM the same catalog. `herdr-app check` and `types` get it too (`src/main.rs`), so a mod that imports `herdr-native` checks. The mod copy's props are `{ browser, profile? }` (`browser::block::mod_props`, a `FORK(browser)` call wherever `visible` and `owned_mods` build a copy's instance, `float_mod` included): the url follows every navigation, so with it each page would be a new mod instance and the copy would reload, and the full url (sign-in codes) would reach mod JS. `browser-prototype` now counts in `visible()`, which telemetry reads, as any shown pane mod does.
+- agent-browser's provider asks the app that holds the caller's terminal now, not the one that started it (cameronsjo/herdr-app#6, 2026-11-17): the app labels its local terminals `herdr-app-fork.socket` (one `FORK(browser)` call in `tend_terminals`), and the provider tries that socket, then the pinned one, then the default home's (`docs/browser-dev.md`).
 
 ## Updates and automation
 
@@ -67,14 +90,17 @@ Added 2026-11-15; setup order and the routine's prompt: `docs/fork/weekly-sync.m
 - `.github/workflows/fork-browser.yml` (fork-only): the WebKit browser build's tests on macOS, the check upstream's CI can't run.
 - `.github/dependabot.yml`: `tungstenite` only (the fork's one stand-alone crate); upstream's Actions entry kept, its version PRs off on the fork (one `FORK(browser)` line). Syncs copy `ci.yml`'s action pins into `fork-browser.yml`.
 - `src/update.rs` `checks_core`: the fork's browser builds offer `herdr-core` updates as release builds do, except in an isolated dev run with its own app home (one `FORK(browser)` line).
-- `scripts/fork/daily-update`: a launchd agent on Cameron's Mac builds each new `fork/master` that is a PR merge with `ci.yml` and `fork-browser.yml` green and installs it as the everyday browser build, never quitting a running one.
+- `.github/workflows/fork-mac-build.yml` (fork-only, added 2026-11-17, Linear CAM-913): each push to master builds the WebKit dev bundle on macOS with a read-only token, and a separate job attests it (`actions/attest-build-provenance`) and publishes it as the prerelease `browser-<sha>`, keeping the newest 10. Upstream's `release.yml` never publishes on the fork: it publishes only upstream's own tags, to upstream's storage.
+- `scripts/fork/daily-update`: a launchd agent on Cameron's Mac checks hourly for a new `fork/master` that is a PR merge with `ci.yml` and `fork-browser.yml` green, downloads its `browser-<sha>` release (checksum and `gh attestation verify` against `fork-mac-build.yml` on master), and installs it as the everyday browser build, never quitting a running one. With no release and no build running for it, or a download that fails a check, it builds the commit locally instead (on AC power).
 
 ## Artificer theme
 
 Added 2026-11-16 (Linear CAM-875). A layout without its own theme shows Artificer: `artificer-dark` in dark appearance, `artificer-light` in light (upstream: `graphite` / `paper`).
 
 - `defaults/themes/artificer-{dark,light}.json` (fork-only files): copied verbatim from `cameronsjo/artificer-design-system` `themes/herdr-app/` at `79d8170c`. That repo stays the source. When it changes the theme, copy both files again and add the old text to `PREVIOUS_THEMES`, or existing installs keep the old colors; `shipped_theme_upgrades_preserve_personal_edits` then needs an edit that changes an Artificer file too (it only replaces `#abb2bf` and `#c0c0c0`). A shipped theme file that someone edited is never overwritten (`install_theme`), and neither is a copy its `install.sh` already placed, so this only fills a missing file.
-- `src/settings.rs`: `DEFAULT_DARK` / `DEFAULT_LIGHT`, and the two `THEMES` and one `SHIPPED_THEMES` entries (six lines under four `FORK(artificer)` markers), and in `palette()` one line that reads a shipped theme's embedded copy when its file is missing, so the default pair never depends on `themes/` being written. If upstream adds a shipped theme, keep both sides' entries.
+- `src/settings.rs`: `DEFAULT_DARK` / `DEFAULT_LIGHT`, the two `THEMES` entries and the two `SHIPPED_THEMES` names (one line), the `mod fork_artificer` line, and in `palette()` one call to `fork_artificer::theme_text`, which reads a shipped theme's embedded copy when its file is missing or can't be read, so the default pair never depends on `themes/` being written (six `FORK(artificer)` markers). The helper and its tests are in the fork-only `src/settings/fork_artificer.rs`. If upstream adds a shipped theme, keep both sides' entries.
+- `defaults/frame/palette/main.js` and `defaults/mods/menu/main.js`: the palette's and the menu's theme lists offer the Artificer pair (one and two `FORK(artificer)` lines). `defaults/AGENTS.md` names the fork's default in its `theme` note.
+- Not changed: the in-memory theme starts as graphite until settings load (`resolve(&GRAPHITE, ..)` in `src/settings.rs`), which is never drawn. In `artificer-light.json`, ANSI black equals the background, so black text is invisible; artificer-design-system defers that on purpose until light mode has a real user (`themes/_palette.json` `lightElevationDeferral`).
 - Layouts that name a theme keep it: the shipped `terminals` layout still says `graphite`, and `win98` says `win98`.
 
 ## Decisions pane
@@ -105,3 +131,65 @@ Gap check 2026-11-15 against herdr-app `ce9a3cf` and herdr-core. To port: camero
 | Palette recents and keywords, confirm destructive actions, type-submit, skill directory | built in |
 
 TUI-only (server, renderer, or fork tooling): cold-restore labels, `rows_by_agent` warning, Codex hooks, sync and release scripts.
+
+### Background mods (the host for the ports below)
+
+Added 2026-11-17 (Linear CAM-922). A mod copy normally lives only while a layout block, pane, float or overlay names it, and `<mod>.<command>` reaches only shown copies, so a command or watcher with no screen had nowhere to run, and the shipped layouts are upstream's files. The window now loads one copy of each mod in `BACKGROUND` (`src/window/fork_mods.rs`, fork-only) on every layout, counts it as shown, and never draws it: `init()`, `cx.spawn`, `cx.timer` and `nextCommand()` work; `render()` is not called. There is no off switch: Herdr restores a deleted shipped mod folder at start (`sync_defaults`), and a copy whose folder is missing while the app runs is skipped. open-folder and space-groups act only when called; name-sync acts on its own every two seconds. In tests, background copies are off except in `fork_mods`'s own, so upstream's window tests keep their copy counts.
+
+- Seams: `src/window.rs`, the `mod fork_mods` line plus one line each in `sync()` (where copies load), `publish_shown_copies()` and `owned_mods()` (four `FORK(background-mods)` markers), and `window::tests::open_window` is `pub(super)` for the fork's window test (one more). Not in `visible()`, which the daily telemetry report reads: these mods are never on screen. `justfile`'s `test` recipe runs `scripts/fork-mods.test.ts` (one marked line). `defaults/AGENTS.md` lists the background mods' commands in one `FORK(background-mods)` block.
+- Upstream CI runs no mod tests (`ci.yml` runs only `scripts/docs.test.ts`), so the fork-only `.github/workflows/fork-mods.yml` runs `scripts/fork-mods.test.ts`.
+
+### Open a folder's existing space (cameronsjo/herdr-app#9)
+
+TUI: cameronsjo/herdr PR #64 (`workspace open` focused the workspace already in a folder). Shipped as the background mod `defaults/mods/open-folder/`: `herdr-app do open-folder.open:<folder>` (or `run("open-folder.open:<folder>")` from a mod, `~` expanded) selects this computer's first space made in that folder or whose first terminal is there now, else makes a space there; `open-folder.pick` asks with the folder picker first. No key is bound: `keys.json` is upstream's file. Upstream's worktree dialog already goes to a shown checkout; plain `space.new {folder}` still always makes a new space.
+
+### Move a worktree group as one block (cameronsjo/herdr-app#13)
+
+TUI: cameronsjo/herdr PR #79 (issue cameronsjo/herdr#48). Upstream's spaces list already keeps each repo's worktree spaces under its main checkout after a drag (`ordered()` in `defaults/mods/spaces/main.js`), but has no key or command to move a space by one place. Shipped as the background mod `defaults/mods/space-groups/`: `space-groups.up` and `space-groups.down` move the shown space's group (its repo's main checkout and the worktree spaces after it, found with `git rev-parse`) past one neighbouring group or lone space on the same machine. Unlike the TUI, on a worktree space the whole group moves instead of nothing.
+
+### One name follows one agent onto its tab (cameronsjo/herdr-app#10)
+
+TUI: cameronsjo/herdr PR #149 (issue cameronsjo/herdr#97). Shipped as the background mod `defaults/mods/name-sync/`: a live terminal with a core name (`hc run --name`) names its tab when it is the tab's only named terminal and nobody named the tab; when its name changes, a tab still called by the old name follows. A tab renamed to anything else is left alone. It looks every two seconds (background copies aren't redrawn) and keeps each terminal's name and tab in its `localStorage`, so a change while a machine was offline still follows. It decides only once the terminal's tab is shown and the terminal is the tab's only named one, so a tab still loading, or a second named terminal that later ends, is named once it can be; a terminal moved to another tab counts as new there. Not ported: the TUI's pane border label, because upstream's pane header already shows the agent's title. The sidebar `name` token (cameronsjo/herdr PR #146) is part of cameronsjo/herdr-app#8.
+
+### Extra environment variables for an agent (cameronsjo/herdr-app#11)
+
+TUI: cameronsjo/herdr PR #124 (`agent start --env`). No code: the app passes `argv` to the core as separate arguments (`src/hc.rs` `run`, wrapped by `unix_agent_argv` in `src/window.rs`), so `tab.new {argv: ["env", "K=V", "claude"]}` reaches the agent with no shell quoting to get wrong, which is what most of the TUI port was about. `src/SKILL.md` and `defaults/AGENTS.md` say so in their `FORK(background-mods)` blocks. Limits: Unix only (Windows agents start under PowerShell, which has no `env`); the values are in the terminal's argv for `hc ls` to show; the TUI's per-shell refusals don't apply because nothing is typed into a shell.
+
+### The agents list's task line, name, needs-you sort and project groups (cameronsjo/herdr-app#8)
+
+TUI: cameronsjo/herdr PR #86 (group by a project token), issues cameronsjo/herdr#97 (`name` token) and #98 (task line, location token, needs-me filter). Shipped in upstream's `defaults/mods/agents/` as a fork-only `fork.js` plus thin seams in its `main.js` (ten `FORK(agents)` markers: the import, the two sorts, the needs-you list's priority order, its filter, the task line, the name, the project groups, the sort menu's height, the empty message and the row naming its space). A clone of the mod would need the shipped layouts, upstream's files, to name it, and would stop getting upstream's fixes.
+
+- Task line: `hc label <terminal> task="…"` draws a dim line under the agent's row; an empty value clears it. The TUI's `herdr agent task` verb is not ported: `hc label` already sets it from anywhere, and `$HC_TERMINAL_ID` names the calling agent.
+- Name: a terminal's core name (`hc run --name`) is its row's detail (after the space in priority order, the row's name under a space header).
+- Needs you: a third sort, priority order with only the agents that need the person (one of their sub-agents counts); the empty list says "No agents need you." when agents run. No key yet: cameronsjo/herdr-app#12 (the palette) adds commands.
+- Grouped by project: a fourth sort, one header per `project` label (`hc label <terminal> project=herdr`), else per space, each group gathered behind its first agent. The TUI's workspace-level token fallback has no equivalent: spaces carry no labels.
+- Location: not ported, upstream already names a row's space wherever no space header is above it. Under a project header, which can span spaces, each row names its space too (a tenth `FORK(agents)` seam, on the row's `full` check).
+- Label text: any process can set a label or a name, so each value drops control, bidi and invisible characters and is cut to 200 characters (task) or 80 (name, project), counted by code point. The keys are plain `task` and `project`, as the TUI's tokens were and as `hc label` users type them, not `herdr.`-prefixed like Herdr's own labels.
+- Seams: `defaults/mods/agents/main.js` (above); `src/mods/render_tests.rs`, one `mod fork_agents` line (marked) for the render cases in `src/mods/render_tests/fork_agents.rs`. `src/SKILL.md` and `defaults/AGENTS.md` name the labels in their `FORK(background-mods)` blocks.
+- Sync: an upstream rewrite of the agents mod's `render()` means re-placing each marked line by hand; `fork_agents`' render cases and `scripts/fork-mods.test.ts` fail if one goes missing.
+
+### Agents running outside Herdr's terminals (cameronsjo/herdr-app#14)
+
+TUI: cameronsjo/herdr PR #91 (`agent register`, a heartbeat TTL). Shipped as the background mod `defaults/mods/outside-agents/` plus rows in the agents mod's `fork.js`, with no core verb: each outside agent keeps one `<id>.json` in the app home's `outside-agents/` folder (`{"name", "status", "title", "task", "ttl", "at"}`, only `status` needed) and rewrites it as its heartbeat. The mod writes the folder's `README.md`, lists it at start, follows it with `watchFolder`, and publishes the live ones as shared `fork.outside-agents`. A record drops out `ttl` seconds (1 to 86400, default 60) after its last write, counted from its `at` when it gives one and otherwise from when the mod saw the file change, or as soon as the file is deleted. The list is cleared at start, so the last run's rows never outlive it. The folder is read with `fs.readdir` (`ls` or `dir` when the app home sits outside the home folder); a file over 4 KiB or with an unknown `status` is ignored, and at most 128 records are kept. At most 64 show; text is cleaned as the agents list cleans labels (control, bidi and invisible characters dropped), with names cut to 80 code points and the rest to 200.
+
+- The agents list draws them last, under "Elsewhere", with upstream's status marks and the task line; "Needs you" keeps the blocked ones. Rows do nothing on click (no pane), and the narrow rail leaves them out.
+- The TUI's `source`/`name` key becomes the file name. Not ported: a CLI verb (`echo … > file` is the API), and the multi-machine list (only this computer's folder is read).
+- Files present at start without `at` show for one `ttl` before they expire. The first look waits two seconds after start, which also keeps its file reads, on real threads, out of the window tests' scheduler.
+- Seams: one more `FORK(outside-agents)` line in `defaults/mods/agents/main.js` (the rows after the list) and the shared list passed to its empty message; `BACKGROUND` gains `outside-agents`.
+
+### Mod commands and a direction chooser in the palette (cameronsjo/herdr-app#12)
+
+TUI: the palette listed plugin commands and chose a direction in one step. Shipped in upstream's frame palette, `defaults/frame/palette/`, as a fork-only `fork.js` behind five `FORK(palette)` seams in its `main.js` (the import, the "Mods" group, the read of mods' commands when it opens, the entries it ranks, and the chooser in `go`), plus the fork-only `defaults/mods/pick-direction/`. The issue suggested a separate palette mod rebound in `keys.json`. The shipped frame is the fork's to change, though, and a copy would stop getting upstream's palette fixes, so this is a seam in place.
+
+- Mod commands: a mod lists its own commands in its `mod.json`, `"commands": [{"command", "title", "words"}]`, read from every folder under the app home's `mods/` each time the palette opens. A command must be `<that folder>.<command>` (one plain word after the dot), at most 20 per mod and 200 folders; a folder named like an app command namespace (`app`, `pane`, ..., or the `project` and `context` aliases) lists none, so a row can never run an app command. Titles drop control and format characters. Rows show under "Mods" with their keys from `keys.json`. `open-folder` lists `open-folder.pick`, `space-groups` lists `up` and `down`. Herdr ignores the extra field.
+- Direction chooser: with nothing typed, the four "Focus pane …" rows, the four "Swap pane …" rows and the two "Split …" rows become "Focus pane…", "Swap pane…" and "Split pane…". Choosing one opens `pick-direction`, where an arrow key or a tile runs the command that way (only `pane.split`, `pane.go` or `pane.swap`, whoever opened it); Esc closes. Typing still finds each direction's own row ("split right").
+- A direction row used before this change ("Split right") drops out of Recent; choosing a family row puts that row there instead.
+- The mods folder is listed with `fs.readdir`, falling back to `ls` or `dir` when the app home sits outside the home folder (as `outside-agents` does). Each direction tile shows its own key from `keys.json`, as the palette's rows did.
+- Seams: `src/mods/render_tests.rs` gets two `FORK(palette)` lines, the `mod fork_palette` line for `src/mods/render_tests/fork_palette.rs` and an `ls` reply in the fixture host. Sync: an upstream rewrite of the palette's `entries()`, `rows()` or `go()` means re-placing each marked line; `scripts/fork-mods.test.ts` and `fork_palette` fail if one goes missing.
+
+### Move a tab to another space, and merge spaces (cameronsjo/herdr-app#15)
+
+TUI: cameronsjo/herdr#107 (a tab moves to another space; moving the last one closes it) and cameronsjo/herdr#53 (`workspace.merge`). Shipped as app Rust, because a mod can't write the layout document (`defaults/herdr.d.ts` has `layout.set` for the person's layout tree, nothing for spaces or tabs). Upstream's `tab.move` still orders a tab inside its space only.
+
+- `tab.move_to_space {id?, space, index?}` moves a tab with its panes, splits and terminals; `space.merge {id?, into}` moves every tab of a space to the end of another, in order. Both refuse a space on another machine (its terminals run there). The emptied space goes away without joining the recent spaces: nothing in it closed. A shown tab stays shown in its new space. The tab keeps its id, so the moved terminals get only a new `herdr.space` label, which puts one that loses its pane back in the right space; terminals labeled for a moved tab that have no pane yet are relabeled too, so they never bring the old space back. Until its label is written, a moved terminal counts as changing (as during `terminal.park`): a park, a second move or an adoption waits, and a command that would move it refuses.
+- Code: `src/fork/spaces.rs` (the model change, with tests) and `src/window/fork_spaces.rs` (the commands). Seams, each marked `FORK(spaces)`: `src/fork/mod.rs` and `src/window.rs` (`mod` lines), one `dispatch` arm and two lines at the top of `adopt()` in `src/window.rs` (a terminal still labeled for a moved tab, because its label write failed or a quit cut it off, joins the tab where it is instead of making a second tab with that id in a new copy of the old space), the two command rows in `src/commands.rs`, and one line in `defaults/AGENTS.md`. `docs/commands.md` is regenerated.

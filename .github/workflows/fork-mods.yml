@@ -1,6 +1,7 @@
-# FORK(decisions): Bun tests for the fork's own mods (scripts/fork/*.test.ts).
-# Upstream's ci.yml runs only its own Bun tests. Fork-only file: upstream syncs
-# never conflict on it.
+# FORK(background-mods): the fork's own mod tests. Upstream's ci.yml runs no mod
+# tests (only scripts/docs.test.ts), so these would otherwise run only in a local
+# `just test`. Fork-only file: upstream syncs never conflict on it.
+# FORK(decisions): also runs the Decisions pane tests in scripts/fork/.
 name: fork-mods
 
 on:
@@ -16,14 +17,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  bun-tests:
-    runs-on: ubuntu-22.04
+  fork-mods:
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install Bun
-        run: curl -fsSL https://bun.sh/install | bash -s "bun-v1.4.4"
-      - name: Fork mod tests
-        run: ~/.bun/bin/bun test scripts/fork/
+      # Pinned by commit, not `curl bun.sh/install | bash`: a master job can write
+      # caches the Mac build restores (docs/fork/weekly-sync.md § Trust).
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4
+      - name: Test the fork's mods
+        run: bun test scripts/fork-mods.test.ts scripts/fork/

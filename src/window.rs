@@ -6,7 +6,10 @@
 
 use crate::hc::Core;
 mod floats;
+mod fork_attention; // FORK(attention): the attention queue's part of the window
 mod fork_browser; // FORK(browser): the browser pane's part of the window
+mod fork_mods; // FORK(background-mods): fork mods with no block of their own
+mod fork_spaces; // FORK(spaces): moving a tab to another space, merging spaces
 mod movable;
 mod pane_drag;
 mod pane_size;
@@ -251,7 +254,7 @@ fn missing_mods(name: &str) -> Vec<String> {
     walk(&layout, &mut used);
     used.sort();
     used.dedup();
-    used.retain(|m| !m.starts_with("frame-") && m != crate::layout::BROWSER_MOD && !mods::mods_dir().join(m).is_dir()); // FORK(browser): a browser block is no mod folder
+    used.retain(|m| !m.starts_with("frame-") && !mods::mods_dir().join(m).is_dir());
     used
 }
 
@@ -511,7 +514,8 @@ impl AppWindow {
     }
 
     fn with_file_events(core: Arc<Core>, requests: async_channel::Receiver<Request>, file_events: Option<crate::files::FileEvents>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let runtime = ShellRuntime::new(cx).map_err(|e| tracing::error!("script runtime failed, mods are off: {e:#}")).ok();
+        // FORK(browser): mods get herdr-native's nativeView.
+        let runtime = ShellRuntime::new_with_components(cx, crate::browser::element::components()).map_err(|e| tracing::error!("script runtime failed, mods are off: {e:#}")).ok();
         if let (Some(runtime), Some(events)) = (&runtime, &file_events) {
             runtime.set_source_revision_provider(events.revision_provider());
         }
@@ -1253,7 +1257,7 @@ impl AppWindow {
         let mut mods = Vec::new();
         let visit = |n: &Node, terms: &mut Vec<(String, String)>, mods: &mut Vec<(String, Instance)>| match n.content() {
             Some(Content::Terminal { terminal }) => terms.push((n.id.clone(), terminal.clone())),
-            Some(Content::Mod { name, props }) => mods.push((n.id.clone(), Instance { name: name.clone(), props: props.clone() })),
+            Some(Content::Mod { name, props }) => mods.push((n.id.clone(), Instance { name: name.clone(), props: crate::browser::block::mod_props(name, props) })), // FORK(browser): a page's url stays out of its mod
             _ => {}
         };
         let stacks = |root: &Node, mods: &mut Vec<(String, Instance)>| {
@@ -1261,7 +1265,7 @@ impl AppWindow {
                 if let Kind::Stack { header: Some(h), .. } = &n.kind
                     && let HeaderContent::Mod { name, props } = &h.content
                 {
-                    mods.push((format!("{}#header", n.id), Instance { name: name.clone(), props: props.clone() }));
+                    mods.push((format!("{}#header", n.id), Instance { name: name.clone(), props: crate::browser::block::mod_props(name, props) })); // FORK(browser): same as owned_mods
                 }
             }
         };
@@ -1322,7 +1326,7 @@ impl AppWindow {
     /// tab (zoomed or not shown), and the overlays.
     fn owned_mods(&self) -> HashMap<String, Instance> {
         let mut out = HashMap::new();
-        let inst = |name: &String, props: &Value| Instance { name: name.clone(), props: props.clone() };
+        let inst = |name: &String, props: &Value| Instance { name: name.clone(), props: crate::browser::block::mod_props(name, props) }; // FORK(browser): a page's url stays out of its mod
         for n in self.chrome.walk() {
             if let Some(Content::Mod { name, props }) = n.content() {
                 out.insert(n.id.clone(), inst(name, props));
@@ -1377,6 +1381,7 @@ impl AppWindow {
                 }
             }
         }
+        out.extend(fork_mods::background(&self.folders)); // FORK(background-mods)
         out
     }
 
@@ -1482,6 +1487,7 @@ impl AppWindow {
         let (model, live) = (&self.model, &self.live);
         self.swapped.retain(|p, a| model.address_of(p).is_some() && live.contains_key(a));
         let (mut terms, mods_visible) = self.visible();
+        let mods_visible = fork_mods::with_background(mods_visible, &self.folders); // FORK(background-mods): not in visible(), which telemetry reads
         let covered: HashSet<&str> = terms.iter().filter_map(|(slot, _)| slot.strip_suffix(SWAP)).collect();
         let mut displayed: HashSet<String> = terms.iter().filter(|(slot, _)| !covered.contains(slot.as_str())).map(|(slot, _)| slot.clone()).collect();
         // Agent blocks reuse their agent's pane view even when its tab isn't shown.
@@ -1867,12 +1873,12 @@ impl AppWindow {
                 for p in ctx.root.panes() {
                     let focused = m.active.as_deref() == Some(pr.id.as_str()) && focused_pane.as_deref() == Some(p.id.as_str());
                     let zoomed = ctx.zoomed.as_deref() == Some(p.id.as_str());
+                    if let Some(v) = self.fork_pane_json(p, &ctx.id, focused, zoomed) { panes.push(v); continue; } // FORK(browser): before mods (a browser is a mod block)
                     // A mod pane: what it shows, no terminal.
                     if let Some(Content::Mod { name, .. }) = p.content() {
                         panes.push(json!({ "pane": p.id, "terminal": null, "mod": name, "tab": ctx.id, "title": name, "focused": focused, "zoomed": zoomed, "movable": self.pane_movable(&p.id) }));
                         continue;
                     }
-                    if let Some(v) = self.fork_pane_json(p, &ctx.id, focused, zoomed) { panes.push(v); continue; } // FORK(browser)
                     let Some(addr) = p.terminal() else { continue };
                     let a = m.agents.get(addr);
                     let title = self.terms.get(&p.id).map(|t| t.view.read(cx).title.clone()).or_else(|| {
@@ -1893,6 +1899,7 @@ impl AppWindow {
                         "pinned": self.live.get(addr).and_then(|r| r.pointer("/labels/herdr.pinned")).and_then(Value::as_str).is_some_and(|v| !v.is_empty()),
                         "focused": m.active.as_deref() == Some(pr.id.as_str()) && focused_pane.as_deref() == Some(p.id.as_str()),
                     }));
+                    self.fork_agent_fields(agents.last_mut(), addr); // FORK(attention): reason, attention, stalled
                 }
             }
         }
@@ -2196,9 +2203,10 @@ impl AppWindow {
         let visible: HashSet<String> = self.visible_addresses().into_iter().collect();
         let mut alerts = Vec::new();
         for (addr, rec) in &self.live {
-            let word = rec.get("status").and_then(Value::as_str).map(str::to_owned);
+            let word = crate::fork::attention::queue(|q| q.word(addr, rec)); // FORK(attention): the attention label shows as blocked
             let app = rec.get("report").and_then(|r| r.get("app")).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned);
             let looking = visible.contains(addr) && self.window_active;
+            let looking = looking || crate::fork::attention::queue(|q| q.handled(addr)); // FORK(attention): a label that went while the agent rested was dealt with: no Done alert
             let prev = self.model.agents.get(addr).and_then(|a| a.word.clone());
             let child = rec.get("parent").and_then(Value::as_str).is_some_and(|p| !p.is_empty());
             if let Some(alert) = self.model.alert_for(addr, child, prev.as_deref(), word.as_deref(), looking) {
@@ -2210,6 +2218,8 @@ impl AppWindow {
             changed |= self.model.set_turn(addr, turn, label.max(self.written_seen.get(addr).copied()));
         }
         self.written_seen.retain(|a, _| self.live.contains_key(a));
+        self.fork_claim_terminals(cx); // FORK(browser): agent-browser finds the app holding a terminal
+        self.fork_attention_tick(cx); // FORK(attention)
         changed |= self.share_seen(cx);
         // Changes already made before Herdr started aren't news.
         if self.listed_once {
@@ -2337,6 +2347,9 @@ impl AppWindow {
     /// shown. A space or tab the app doesn't know is made under the label's
     /// id, unnamed (called Herdr's way).
     fn adopt(&mut self, addr: &str, space: &str, ctx: Option<&str>) {
+        // FORK(spaces): a labeled tab that moved to another space is joined where it is now.
+        let space = crate::fork::spaces::space_for_adoption(&self.model, space, ctx);
+        let space = space.as_str();
         let machine = addr.split_once('/').map(|(m, _)| m.to_owned());
         let pane = self.model.fresh_id_on("p", machine.as_deref());
         let ctx_id = ctx.map(str::to_owned).unwrap_or_else(|| self.model.fresh_id_on("tb", machine.as_deref()));
@@ -3371,6 +3384,7 @@ impl AppWindow {
                 return;
             }
             n if n.starts_with("browser.") => if self.fork_dispatch(n, a, person, window, cx) { return }, // FORK(browser)
+            "tab.move_to_space" | "space.merge" => self.fork_spaces(name, a, active_ctx, cx), // FORK(spaces)
             "terminal.select_all" => {
                 let view = match Self::owned(a, "terminal") {
                     Some(address) => self.shown_terminal_view(&address, window, cx),
@@ -3891,6 +3905,7 @@ impl AppWindow {
     /// Which copies are on screen, for `<mod>.<command>` (`mods::send_command`).
     fn publish_shown_copies(&self) {
         let (_, shown) = self.visible();
+        let shown = fork_mods::with_background(shown, &self.folders); // FORK(background-mods)
         mods::set_shown_copies(shown.iter().filter_map(|(s, i)| self.copies.get(s).filter(|c| c.inst == *i)).map(|c| c.id).collect());
     }
 
@@ -4212,7 +4227,7 @@ impl AppWindow {
     /// dialogs and windows too (toasts close). Hidden copies start fresh when
     /// shown. Terminals, the core and the layout stay.
     fn restart_mods(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let fresh = match ShellRuntime::replace_default(cx) {
+        let fresh = match ShellRuntime::replace_default_with_components(cx, crate::browser::element::components()) { // FORK(browser): mods get nativeView
             Ok(fresh) => fresh,
             Err(e) => {
                 tracing::error!("could not start a new script runtime: {e:#}");
@@ -4432,6 +4447,7 @@ impl AppWindow {
     }
 
     fn render_block(&self, n: &Node, content: &Content, focused: &HashSet<String>, cx: &mut Context<Self>) -> AnyElement {
+        if let Some(b) = crate::browser::block::block(content) { return self.fork_render_browser(n, &b.browser, &b.url, cx); } // FORK(browser): a mod block the fork draws
         match content {
             Content::Terminal { .. } => match self.pane_term(&n.id) {
                 Some(t) => {
@@ -4457,7 +4473,6 @@ impl AppWindow {
                 None => div().into_any_element(),
             },
             Content::Mod { .. } => self.render_slot(&n.id, cx),
-            Content::Browser { browser, url, .. } => self.fork_render_browser(n, browser, url, cx), // FORK(browser)
             Content::Agent { .. } => match self.shown_agent() {
                 Some(addr) => match self.agent_view(&n.id, &addr) {
                     Some(t) => div().size_full().child(shown_terminal(&t.view, cx)).into_any_element(),
@@ -5060,7 +5075,7 @@ fn num_in(v: &Value, k: &str) -> f32 {
 /// A floating mod's slot and copy (it's told its float id). `visible` and
 /// `owned_mods` must build the same, or a kept copy is dropped.
 fn float_mod(id: &str, name: &str, props: &Value) -> (String, Instance) {
-    let mut props = if props.is_object() { props.clone() } else { json!({}) };
+    let mut props = if props.is_object() { crate::browser::block::mod_props(name, props) } else { json!({}) }; // FORK(browser): a page's url stays out of its mod
     props["float"] = json!(id);
     (floats::slot(id), Instance { name: name.to_owned(), props })
 }
@@ -6129,7 +6144,8 @@ mod tests {
     /// welcome (it lists machines through the core). No other mods: the
     /// shipped ones run programs on threads of their own, which the test
     /// executor refuses.
-    fn open_window<'a>(cx: &'a mut gpui::TestAppContext, mod_name: &str, main_js: &str, layout: serde_json::Value) -> (gpui::Entity<super::AppWindow>, &'a mut gpui::VisualTestContext) {
+    // FORK(background-mods): pub(super) for src/window/fork_mods.rs's window test.
+    pub(super) fn open_window<'a>(cx: &'a mut gpui::TestAppContext, mod_name: &str, main_js: &str, layout: serde_json::Value) -> (gpui::Entity<super::AppWindow>, &'a mut gpui::VisualTestContext) {
         open_window_on(cx, crate::hc::offline(), mod_name, main_js, layout)
     }
 

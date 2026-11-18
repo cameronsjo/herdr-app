@@ -148,7 +148,10 @@ into the agent's console. It writes your answers to a results file.
   after a restart) or as a block in a layout. It is saved as a mod block so
   a herdr-app without this prototype, sharing the same core, shows that one
   pane as a mod that didn't load instead of failing to read the whole
-  layout. The name isn't `browser`, which Herdr's own browser mod will
+  layout. In this build it is an ordinary mod: the shipped
+  `browser-prototype` mod draws the placeholder and says where the page goes
+  with `nativeView` (`src/browser/element.rs`); Herdr draws the agent header
+  above it and places the page each frame. The name isn't `browser`, which Herdr's own browser mod will
   likely use: neither reads the other's blocks. In a floating block it
   never opens: a native view can't float over GPUI's drawing.
 - Each frame the page's view takes its block's bounds; a block that isn't
@@ -304,6 +307,22 @@ daemon idles for agent-browser's own default (60 minutes) before exiting.
 Terminal ids are per core, so the provider also reads the caller's core id
 (`hc` from the caller's environment), and the window attaches only a
 terminal of its own core.
+
+Which app the provider asks: the one that holds the caller's terminal now.
+Each app with browser panes labels its local terminals
+`herdr-app-fork.socket=<its control socket>`, once per terminal per run,
+so the app started last holds the terminals it shows. The provider reads
+that label from the core (`terminal.get`) and tries it first, but only if
+the socket and its folder are this user's and nobody else may write to the
+folder. Then it tries the socket pinned in the terminal's
+`AGENT_BROWSER_PLUGINS` when it started, then the default app home's. It
+skips a socket whose listener runs as another user (`getpeereid`, which a
+swapped symlink can't fake). An app that doesn't hold the terminal (it
+doesn't know it, has it parked, or is on another core) passes it on; the
+first app that holds it answers, and its refusal (agent access off, no
+browser, two browsers) is the answer. So a terminal started by one build
+keeps working after you switch to another build on another app home
+(cameronsjo/herdr-app#6).
 
 How it works: Herdr gives its local terminals `AGENT_BROWSER_PROVIDER=herdr`,
 `AGENT_BROWSER_PLUGINS` (Herdr's own provider, `herdr-app

@@ -228,7 +228,9 @@ A layout is a tree of nodes. Four types:
   terminal, full size: the one chosen with `agent.focus` / `agent.next`, else
   the focused pane's agent, else the first agent), or `{ "mod": "browser-prototype",
   "props": { "browser": "b1", "url": "...", "profile"?: "agent" } }` (a web
-  page the app draws, not a mod folder; it never opens in `floating`). <!-- FORK(browser) -->
+  page: the shipped `browser-prototype` mod draws it, and the page itself is a
+  native view the app places with `nativeView` from `herdr-native`; it never
+  opens in `floating`). <!-- FORK(browser) -->
 - `row` / `column`: children side by side / stacked.
 - `stack`: shows one child (`"active": "<child id>"`), with an optional
   `"header"` (a mod that draws tabs, or `"tabs"` for a plain built-in strip).
@@ -329,7 +331,8 @@ layout's look and a block can differ:
   `"theme": { "light": "paper", "dark": "graphite" }` follows the system's
   light or dark mode (or the person's `appearance`). `app.theme {name}`
   sets the half of the name's lightness. A layout without a theme shows
-  settings.json's theme, else graphite or paper. `colors` overrides any theme color by name (see
+  settings.json's theme, else graphite or paper (in this build, `artificer-dark`
+  or `artificer-light`, shipped files in `themes/` <!-- FORK(artificer) -->). `colors` overrides any theme color by name (see
   `theme()` below), for terminals and panels alike: overrides apply in
   both appearances, so name theme colors (`chrome`, `canvas`) rather than
   writing hex when a layout should work light and dark.
@@ -592,6 +595,7 @@ The main ones:
   in beside it like any tab), `tab.close {id?, confirmed?}` (closing the last tab
   closes its space and asks first unless confirmed),
   `tab.rename {id?, name}` ("": its number again), `tab.move {id?, index | by}` (by: places left (-) or right (+), skipping settled tabs as `tab.next` does, wrapping),
+  `tab.move_to_space {id?, space, index?}` (to another space on the same machine, last by default; a space's last tab takes the space away, its terminals still running), `space.merge {id?, into}` (every tab, in order, to the end of `into`) <!-- FORK(spaces) -->,
   `tab.select {index | id}`, `tab.next`, `tab.prev`,
   `tab.settle {id?}`, `tab.unsettle {id?}` (index, next and prev
   skip settled tabs).
@@ -953,6 +957,34 @@ has 124 programs (agents, editors, runtimes, tools, databases, infra);
   `spaces` sidebar nests worktree spaces under their repo's and shows each
   space's repo, branch, ahead/behind and uncommitted changes). Shipped mods
   are Herdr's; duplicate with `mod.clone` before editing.
+<!-- FORK(background-mods): this build's mods with no block of their own, in one block. -->
+- This build also runs mods with no block of their own, loaded on every layout:
+  `open-folder` (`open-folder.open:<folder>` goes to this computer's space already in that
+  folder, else makes one there; `open-folder.pick` asks for the folder first),
+  `space-groups` (`space-groups.up` / `space-groups.down` move the shown space and its git
+  worktree spaces as one block), and `name-sync` (a terminal started with a name names its
+  tab when nobody named the tab; a tab still called by the old name follows a new one).
+  Run the commands with `herdr-app do <mod>.<command>`, `run(...)` or a `keys.json`
+  binding. Herdr restores a deleted shipped mod at start. Only the shipped folders run
+  this way: a `mod.clone` copy runs where a layout block names it.
+- Extra environment variables for one agent (macOS and Linux): put `env` first in its
+  argv, `tab.new {argv: ["env", "API_MODE=dev", "claude"]}`. Values show in the terminal's
+  argv (`hc ls`), so keep secrets out.
+- The agents list reads two labels: `hc label <terminal> task="fix the login test"` puts a
+  one-line task under the agent's row (`task=` clears it), and `project=<name>` groups agents
+  under that name in its "Grouped by project" sort. Its "Needs you" sort lists only agents
+  that need the person. A terminal's name (`hc run --name`) is its row's detail.
+- `outside-agents` lists agents that run outside Herdr's terminals (cmux, a plain terminal,
+  CI) under "Elsewhere" in the agents list: each keeps one `<id>.json` file in
+  `~/.config/herdr-app/outside-agents/` (`$HERDR_APP_HOME/outside-agents/` when set), `{"name": "…", "status": "working", "title": "…",
+  "task": "…", "ttl": 60}`, and rewrites it as its heartbeat. It drops out `ttl` seconds (60 by
+  default) after its last write, or when its file is deleted. The folder's `README.md` says more.
+- The palette (`app.palette`) also lists mods' own commands: a mod names them in its
+  `mod.json`, `"commands": [{"command": "my-mod.refresh", "title": "Refresh my board", "words": "reload"}]`,
+  only `<its folder>.<command>`, and they show under "Mods" (read when the palette opens).
+  As with a `keys.json` binding, the mod must be loaded (shown, or a background mod) to run one.
+  "Split pane…", "Focus pane…" and "Swap pane…" are one row each until you type; choosing
+  one asks for the direction (an arrow key).
 
 ### Check before you finish
 

@@ -1,0 +1,213 @@
+//! FORK(browser): a browser block is a mod block named [`BROWSER_MOD`], in
+//! memory as on disk: `{ "mod": "browser-prototype", "props": { "browser":
+//! "b1", "url": "…", "profile"?: "agent" } }`. Upstream's `Content` enum and
+//! its serde shape stay exactly upstream's (cameronsjo/herdr-app#18), and a
+//! herdr-app without the browser shows that one pane as a mod that didn't
+//! load and keeps it.
+//!
+//! The fork reads a browser block through [`block`] (or [`BrowserNode`]).
+//! It is a real mod too (cameronsjo/herdr-app#4): the window starts the
+//! shipped `defaults/mods/browser-prototype/` for it like any mod, which
+//! draws the placeholder and places the page with `nativeView`
+//! (`super::element`). Two places upstream treats a mod block as a mod
+//! still check for a browser block first: the window's render arm (the
+//! block's frame, agent header and page placement are the window's) and
+//! the mods' `panes` list (a browser pane lists its page). Grep
+//! `Content::Mod` in upstream files after a sync for new ones that draw or
+//! list mods.
+//!
+//! `browser` is the app's id for the page (`b1`); `url` is where it was last,
+//! so a block whose browser isn't open (a restart, another screen) opens
+//! there again. `profile: "agent"`: a separate profile for test accounts;
+//! only such a browser can be driven by an agent. A browser in a floating
+//! block never opens: its native view can't float over GPUI's drawing, and
+//! browsers open only from blocks in the tree.
+
+use crate::layout::{Content, Node};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+/// The mod name a browser block is saved under. A mod block by this name
+/// whose props name a browser is a browser, not a mod. Not `browser`:
+/// Herdr's own browser mod will likely take that name, and neither should
+/// read the other's blocks.
+pub const BROWSER_MOD: &str = "browser-prototype";
+
+/// A browser block's fields: its mod block's props.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BrowserBlock {
+    pub browser: String,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+}
+
+/// The browser a block's content shows, if it is a browser block: a
+/// [`BROWSER_MOD`] mod block whose props name a browser.
+pub fn block(content: &Content) -> Option<BrowserBlock> {
+    let Content::Mod { name, props } = content else { return None };
+    of_mod(name, props)
+}
+
+/// [`block`] for a mod block's name and props.
+pub fn of_mod(name: &str, props: &Value) -> Option<BrowserBlock> {
+    // A props array would also deserialize (serde reads a struct from a
+    // sequence): only an object is a browser block.
+    if name != BROWSER_MOD || !props.is_object() {
+        return None;
+    }
+    // `render_block` asks this of every mod block every frame: the name
+    // check above comes first, and props are read in place, not cloned.
+    BrowserBlock::deserialize(props).ok().filter(|b| !b.browser.is_empty())
+}
+
+/// The props a mod block's copy gets. A browser block's lose `url`: it
+/// follows every navigation, so with it each new page would be a new mod
+/// instance (the copy reloads and the page blinks), and the whole url
+/// (sign-in codes, magic links) would reach mod JS, which sees the
+/// address only through `panes()` (no query) and `browsers()` (the query
+/// only while agent access is on). The tab document keeps it. Every place
+/// that builds a mod copy's instance (blocks, stack headers, floats) calls
+/// this, so `visible` and `owned_mods` agree.
+/// Every other block's props are unchanged.
+pub fn mod_props(name: &str, props: &Value) -> Value {
+    match (of_mod(name, props), props) {
+        (Some(_), Value::Object(o)) => Value::Object(o.iter().filter(|(k, _)| k.as_str() != "url").map(|(k, v)| (k.clone(), v.clone())).collect()),
+        _ => props.clone(),
+    }
+}
+
+/// Whether a block's content is a browser block (not a mod to load).
+pub fn is_browser(content: &Content) -> bool {
+    block(content).is_some()
+}
+
+/// A browser block's content.
+pub fn content(browser: &str, url: &str, profile: Option<&str>) -> Content {
+    let b = BrowserBlock { browser: browser.to_owned(), url: url.to_owned(), profile: profile.map(str::to_owned) };
+    // A struct of strings always converts.
+    Content::Mod { name: BROWSER_MOD.to_owned(), props: serde_json::to_value(b).unwrap_or_default() }
+}
+
+/// Points a browser block at a new url (what it reopens at). False if
+/// `content` is no browser block.
+pub fn set_url(content: &mut Content, url: &str) -> bool {
+    if !is_browser(content) {
+        return false;
+    }
+    let Content::Mod { props, .. } = content else { return false };
+    props["url"] = Value::String(url.to_owned());
+    true
+}
+
+/// Reading a node's browser.
+pub trait BrowserNode {
+    /// The browser a block shows (its id), if it is a browser block.
+    fn browser(&self) -> Option<&str>;
+}
+
+impl BrowserNode for Node {
+    fn browser(&self) -> Option<&str> {
+        let content = self.content()?;
+        if !is_browser(content) {
+            return None;
+        }
+        let Content::Mod { props, .. } = content else { return None };
+        props.get("browser").and_then(Value::as_str)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn browser_blocks_round_trip_as_mod_panes() {
+        let json = r#"{ "id": "p1", "type": "block", "content": { "mod": "browser-prototype", "props": { "browser": "b1", "url": "https://example.com/" } } }"#;
+        let n: Node = serde_json::from_str(json).unwrap();
+        let b = block(n.content().unwrap()).unwrap();
+        assert_eq!(b, BrowserBlock { browser: "b1".into(), url: "https://example.com/".into(), profile: None });
+        assert!(n.is_pane());
+        assert_eq!(n.browser(), Some("b1"));
+        let back: Node = serde_json::from_str(&serde_json::to_string(&n).unwrap()).unwrap();
+        assert_eq!(back, n);
+        // Props the window adds (`float_mod`'s `float`, `overlay_layout`'s
+        // `overlay`) don't stop it being a browser.
+        for extra in ["float", "overlay"] {
+            let props = serde_json::json!({ "browser": "b1", "url": "https://example.com/", (extra): "x" });
+            assert_eq!(of_mod(BROWSER_MOD, &props).map(|b| b.browser), Some("b1".into()), "{extra}");
+        }
+        // A block saved without a url still reads (it opens on a blank page).
+        let bare: Node = serde_json::from_str(r#"{ "id": "p2", "type": "block", "content": { "mod": "browser-prototype", "props": { "browser": "b2" } } }"#).unwrap();
+        assert_eq!(block(bare.content().unwrap()).map(|b| b.url), Some(String::new()));
+        // The other kinds are no browsers.
+        let t: Node = serde_json::from_str(r#"{ "id": "t", "type": "block", "content": { "terminal": "x" } }"#).unwrap();
+        assert_eq!(t.terminal(), Some("x"));
+        assert_eq!(t.browser(), None);
+    }
+
+    #[test]
+    fn browser_blocks_are_saved_under_a_name_herdr_s_own_browser_mod_wont_use() {
+        let n = Node::block("p1", content("b1", "https://example.com/", Some("agent")));
+        let saved = serde_json::to_value(&n).unwrap();
+        // The shape a herdr-app without the browser reads as one mod pane.
+        assert_eq!(
+            saved["content"],
+            serde_json::json!({ "mod": "browser-prototype", "props": { "browser": "b1", "url": "https://example.com/", "profile": "agent" } })
+        );
+        assert_eq!(serde_json::from_value::<Node>(saved).unwrap(), n);
+        // A `browser` mod block, however its props look, is a mod: a
+        // future official browser mod's blocks are never taken over.
+        for props in [serde_json::json!(null), serde_json::json!({ "browser": "b1", "url": "https://example.com/" })] {
+            let c: Content = serde_json::from_value(serde_json::json!({ "mod": "browser", "props": props })).unwrap();
+            assert!(!is_browser(&c), "{props}");
+        }
+        // A prototype block that names no browser is a mod by that name, and
+        // so is one whose props aren't an object.
+        for props in [serde_json::json!({ "browser": "" }), serde_json::json!(["b1", "https://example.com/"])] {
+            let c: Content = serde_json::from_value(serde_json::json!({ "mod": "browser-prototype", "props": props })).unwrap();
+            assert!(!is_browser(&c), "{props}");
+            let n = Node::block("p", c.clone());
+            assert_eq!(n.browser(), None);
+            let mut c = c;
+            assert!(!set_url(&mut c, "https://b.test/"));
+        }
+    }
+
+    #[test]
+    fn a_browser_blocks_mod_never_sees_its_url_so_navigating_keeps_the_copy() {
+        let mut page = content("b1", "https://example.test/cb?code=42", Some("agent"));
+        let Content::Mod { name, props } = &page else { unreachable!() };
+        let seen = mod_props(name, props);
+        assert_eq!(seen, serde_json::json!({ "browser": "b1", "profile": "agent" }));
+        assert!(set_url(&mut page, "https://example.test/next"));
+        let Content::Mod { name, props } = &page else { unreachable!() };
+        assert_eq!(mod_props(name, props), seen, "a navigation must not make a new mod instance");
+        // Any other mod block keeps every prop, url included.
+        let other = serde_json::json!({ "url": "https://example.test/?q=1", "x": 1 });
+        assert_eq!(mod_props("files", &other), other);
+        assert_eq!(mod_props(BROWSER_MOD, &serde_json::json!([1])), serde_json::json!([1]));
+    }
+
+    #[test]
+    fn set_url_moves_only_a_browser_block() {
+        let mut c = content("b1", "https://a.test/", None);
+        assert!(set_url(&mut c, "https://b.test/"));
+        assert_eq!(block(&c).map(|b| b.url), Some("https://b.test/".into()));
+        let mut m = Content::Mod { name: "notes".into(), props: serde_json::json!({ "url": "x" }) };
+        assert!(!set_url(&mut m, "https://b.test/"));
+        assert_eq!(m, Content::Mod { name: "notes".into(), props: serde_json::json!({ "url": "x" }) });
+    }
+
+    #[test]
+    fn a_browser_in_a_floating_block_never_fails_the_layout() {
+        let json = r#"{ "id": "root", "type": "block", "content": {"agent": "focused"},
+          "floating": [ { "id": "f", "content": { "mod": "browser-prototype", "props": { "browser": "b1" } } },
+                        { "id": "g", "content": { "mod": "team" } } ] }"#;
+        let n: Node = serde_json::from_str(json).unwrap();
+        assert_eq!(n.floating.len(), 2);
+        // Browsers open only from blocks in the tree, which never includes floats.
+        assert!(n.walk().iter().all(|x| x.browser().is_none()));
+    }
+}

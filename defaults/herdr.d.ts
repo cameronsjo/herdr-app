@@ -192,6 +192,13 @@ export interface AgentInfo {
   /** Pinned with `terminal.pin`, on any Herdr client. */
   pinned: boolean;
   focused: boolean;
+  // FORK(attention): the attention queue (docs/fork/attention.md).
+  /** Why it needs you: "error", the program's blocked kind ("permission", "question", "auth"), "attention" (the `herdr.attention` label), or null. */
+  reason?: "error" | "permission" | "question" | "auth" | "attention" | null;
+  /** The `herdr.attention` label's text (at most 40 characters), or null. */
+  attention?: string | null;
+  /** Working, with no new screen or report for `stall_minutes` (fork.json). */
+  stalled?: boolean;
 }
 
 /** Terminals whose program reports a status (agents), in space, tab, pane order. Live. */

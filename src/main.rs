@@ -35,6 +35,7 @@ mod spawn;
 mod sprites;
 mod telemetry;
 mod feedback;
+mod fork; // FORK(attention): fork features beside the browser (src/fork/)
 mod terminal;
 mod update;
 mod update_notes;
@@ -105,8 +106,12 @@ fn main() {
     // `herdr-app check <mod>` / `herdr-app types <mod>`: gpui-shell's own checker, with Herdr's module installed.
     if matches!(args.get(1).map(String::as_str), Some("check" | "types")) {
         mods::install_check_policy();
-        gpui_shell::host::main_with_components(gpui_shell::FrozenComponentRegistry::default());
+        gpui_shell::host::main_with_components(browser::element::components()); // FORK(browser): mods may import herdr-native's nativeView
         return;
+    }
+    // FORK(approval): `herdr-app approval show|answer` answers a blocked agent's prompt from outside its pane.
+    if args.get(1).map(String::as_str) == Some("approval") {
+        std::process::exit(fork::approval::main(&args[2..]));
     }
     if matches!(args.get(1).map(String::as_str), Some("do" | "status" | "ls" | "commands" | "feedback" | "shot")) {
         std::process::exit(control::client(&args[1..]));

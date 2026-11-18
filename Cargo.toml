@@ -50,7 +50,7 @@ browser-pane = [
 # with CEF's helper apps (`just browser-dev`). Building it needs CEF_PATH
 # outside the repo (build.rs refuses otherwise; `just browser-build` sets it).
 browser = ["browser-pane", "dep:cef"]
-# Engine: the system's WKWebView (src/browser/webkit/). Nothing is shipped
+# Engine: the system's WKWebView (src/browser/webkit.rs). Nothing is shipped
 # or downloaded: WebKit is part of macOS. `scripts/browser-dev-bundle --webkit`.
 browser-webkit = [
     "browser-pane", "dep:objc2-web-kit",

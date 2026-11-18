@@ -101,6 +101,25 @@ Move a tab (the active one if no id) to a position in its space (1 = first), or 
 | `index` | no |
 | `by` | no |
 
+## `tab.move_to_space`
+
+Move a tab (the active one if no id) with its panes and terminals to another space on the same machine, at a position (1 = first; default: last). Moving a space's last tab takes the space away; its terminals keep running. A shown tab stays shown.
+
+| Argument | Required |
+|---|---|
+| `id` | no |
+| `space` | yes |
+| `index` | no |
+
+## `space.merge`
+
+Move every tab of a space (default: the shown one) to the end of another space on the same machine, in order, and take the emptied space away; its terminals keep running.
+
+| Argument | Required |
+|---|---|
+| `id` | no |
+| `into` | yes |
+
 ## `pane.split`
 
 Split a pane (default: the focused one) "right" or "down" with a new terminal, or with a mod (`mod`, its `props`) beside it.

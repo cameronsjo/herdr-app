@@ -2030,6 +2030,15 @@ impl ShellRuntime {
         Ok(runtime)
     }
 
+    /// FORK(browser): [`Self::replace_default`] with a component catalog, as
+    /// [`Self::new_with_components`] is to [`Self::new`]: the new VM keeps
+    /// the catalog the first one had.
+    pub fn replace_default_with_components(cx: &mut App, components: FrozenComponentRegistry) -> Result<Rc<Self>> {
+        let runtime = Self::new_isolated_with_components(components)?;
+        runtime.set_global(cx);
+        Ok(runtime)
+    }
+
     /// HERDR: how much of its heap ceiling this VM holds, from 0 to 1.
     ///
     /// Each reload evaluates the application again in the same context, and
