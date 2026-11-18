@@ -22,7 +22,6 @@ const RUN = /^[A-Za-z0-9_-]{1,64}$/;
 export default class Decisions extends View {
   init(_props, cx) {
     this.handle = cx.focus_handle();
-    this.timer = (ms, fn) => cx.timer.after(ms, fn);
     this.typing = 0;
     this.slate = null;
     this.error = null;
@@ -34,8 +33,11 @@ export default class Decisions extends View {
     this.dir = parseDir(raw);
     // No folder: an empty pane that says how one opens. A folder that isn't a slate folder
     // (an absolute path ending in .claude/decisions/<slug>) is refused before any read.
-    this.phase = raw === undefined || raw === null ? "empty" : this.dir === null ? "error" : "loading";
-    if (this.phase === "error") this.error = "This pane was opened on a folder that isn't a slate folder.";
+    this.phase = raw === undefined || raw === null ? "empty" : this.dir === null || this.run === null ? "error" : "loading";
+    if (this.phase === "error")
+      this.error = this.dir === null
+        ? "This pane was opened on a folder that isn't a slate folder."
+        : "This pane was opened without a run id, so it can't send answers. Ask Claude to open the slate again.";
 
     // One field of each kind, reused across cards: a page change loads that card's text into it.
     this.notes = InputState.new({ placeholder: "Anything Claude should know about this pick" });
@@ -63,7 +65,7 @@ export default class Decisions extends View {
       field.on("blur", (_e, cx) => { this.typing = Math.max(0, this.typing - 1); cx.notify(); });
     }
 
-    if (this.phase === "loading") cx.spawn(async (cx) => { await this.load(); cx.notify(); });
+    if (this.phase === "loading") cx.spawn(async (cx) => { await this.load(cx); cx.notify(); });
     // "focusable" in mod.json: pane.go lands here and sends "focus".
     cx.spawn(async (cx) => {
       for (;;) {
@@ -74,48 +76,49 @@ export default class Decisions extends View {
     });
   }
 
-  async load() {
+  async load(cx) {
     try {
       const [spec, sent] = await Promise.all([readTextFile(`${this.dir}/slate.json`), readTextFile(`${this.dir}/response.json`)]);
       if (this.closing) return;
-      if (spec === null) return this.fail("There's no slate.json in this pane's folder.");
+      if (spec === null) return this.fail("There's no slate.json in this pane's folder.", cx);
       let json;
-      try { json = JSON.parse(spec); } catch { return this.fail("slate.json isn't valid JSON."); }
+      try { json = JSON.parse(spec); } catch { return this.fail("slate.json isn't valid JSON.", cx); }
       const parsed = parseSlate(json);
-      if (!parsed.ok) return this.fail(`The slate can't be shown: ${parsed.error}.`);
+      if (!parsed.ok) return this.fail(`The slate can't be shown: ${parsed.error}.`, cx);
       this.slate = new Slate(parsed.spec, this.dir);
       // Only this run's answer counts as sent; the script moves an older one aside.
       let sentRun;
       try { sentRun = sent === null ? undefined : JSON.parse(sent)?.run; } catch { sentRun = undefined; }
-      if (sent !== null && sentRun === this.run) { this.phase = "sent"; return; }
+      if (sent !== null && this.run !== null && sentRun === this.run) { this.phase = "sent"; return; }
       try { this.slate.restore(JSON.parse(localStorage.getItem(this.draftKey) ?? "null")); } catch { /* no draft */ }
       this.phase = "open";
       this.loadFields();
     } catch (err) {
-      this.fail(`The slate couldn't be read: ${err?.message ?? err}.`);
+      this.fail(`The slate couldn't be read: ${err?.message ?? err}.`, cx);
     }
   }
 
-  fail(message) {
+  fail(message, cx) {
     if (this.closing) return; // the pane is going away; close() has already written its marker
     this.phase = "error";
     this.error = clean(message, 400);
     // Tell the waiting script, so it opens the browser instead of waiting out its timeout.
-    this.mark({ error: this.error });
+    this.mark({ error: this.error }, cx);
   }
 
   /**
    * Writes closed.json once: create-only, so it never replaces a marker or a response. True when
    * it is written (now or before); false when the write failed, so the caller can say so and
    * the next attempt tries again. A failure can be an older run's closed.json the script has not
-   * moved aside yet, so it retries once a second later.
+   * moved aside yet, so it retries once a second later, unless the pane is closing (`retry`
+   * false): teardown gives unfinished work only a moment. `cx` is the calling callback's own.
    */
-  async mark(extra) {
+  async mark(extra, cx, retry = true) {
     if (this.marked) return true;
-    if (this.dir === null) return false;
+    if (this.dir === null || this.run === null) return false;
     const text = `${JSON.stringify({ run: this.run, closedAt: new Date().toISOString(), ...extra })}\n`;
-    for (const wait of [0, 1000]) {
-      if (wait) await new Promise((done) => this.timer(wait, done));
+    for (const wait of retry ? [0, 1000] : [0]) {
+      if (wait) await new Promise((done) => cx.timer.after(wait, done));
       try {
         await writeTextFile(`${this.dir}/closed.json`, text, null);
         this.marked = true;
@@ -126,11 +129,11 @@ export default class Decisions extends View {
   }
 
   /** The pane is going away (its header's close, pane.close): unsent, it counts as closed. */
-  async close() {
-    if ((this.phase === "open" || this.phase === "loading") && !this.saving) {
-      this.closing = true;
-      await this.mark({ reason: "pane closed" });
-    }
+  async close(cx) {
+    if (this.phase !== "open" && this.phase !== "loading") return;
+    this.closing = true;
+    // Mid-send: the send's outcome decides. Saved, it needs no marker; failed, send() writes it.
+    if (!this.saving) await this.mark({ reason: "pane closed" }, cx, false);
   }
 
   saveDraft() {
@@ -169,7 +172,7 @@ export default class Decisions extends View {
 
   async send(cx) {
     const s = this.slate;
-    if (!s || this.phase !== "open" || this.saving) return;
+    if (!s || this.phase !== "open" || this.saving || this.run === null) return;
     this.saving = true;
     this.error = null;
     cx.notify();
@@ -180,6 +183,8 @@ export default class Decisions extends View {
       try { localStorage.removeItem(this.draftKey); } catch { /* storage is a convenience */ }
     } catch (err) {
       this.error = clean(`Couldn't save your answers: ${err?.message ?? err}. Nothing was sent.`, 400);
+      // The pane closed while this was saving: nobody sees the error, so tell the script instead.
+      if (this.closing) await this.mark({ reason: "pane closed" }, cx, false);
     } finally {
       this.saving = false;
       cx.notify();
@@ -191,10 +196,13 @@ export default class Decisions extends View {
     this.saving = true;
     cx.notify();
     this.error = null;
-    if (await this.mark({ reason: "closed without sending" })) this.phase = "closed";
-    else this.error = "Couldn't tell Claude you closed this slate. Try again, or close the pane.";
-    this.saving = false;
-    cx.notify();
+    try {
+      if (await this.mark({ reason: "closed without sending" }, cx)) this.phase = "closed";
+      else this.error = "Couldn't tell Claude you closed this slate. Try again, or close the pane.";
+    } finally {
+      this.saving = false;
+      cx.notify();
+    }
   }
 
   key(e, cx) {

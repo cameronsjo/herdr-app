@@ -107,22 +107,22 @@ function field() {
     fire(ev: string, cx: any) { handlers[ev]?.({}, cx); }, node: element() };
 }
 
-async function harness(dir: unknown, files: Record<string, string | null>, opts: { holdRead?: boolean; failRead?: boolean; holdWrite?: boolean; failWrite?: boolean } = {}) {
+async function harness(dir: unknown, files: Record<string, string | null>, opts: { holdRead?: boolean; failRead?: boolean; holdWrite?: boolean; failWrite?: boolean; store?: Map<string, string>; run?: string | null } = {}) {
   let release = () => {};
   let releaseWrite = () => {};
   const writeGate = opts.holdWrite ? new Promise<void>((r) => { releaseWrite = r; }) : Promise.resolve();
   const gate = opts.holdRead ? new Promise<void>((r) => { release = r; }) : Promise.resolve();
   const reads: string[] = [];
   const writes: [string, string, string | null][] = [];
-  const store = new Map<string, string>();
+  const store = opts.store ?? new Map<string, string>();
   const fields: any[] = [];
   const pending: Promise<unknown>[] = [];
   const herdr = {
-    props: () => (dir === undefined ? { pane: "p1" } : { dir, run: "run-1" }),
+    props: () => (dir === undefined ? { pane: "p1" } : { dir, ...(opts.run === null ? {} : { run: opts.run ?? "run-1" }) }),
     readTextFile: async (p: string) => { reads.push(p); await gate; if (opts.failRead) throw new Error("read failed"); return files[p] ?? null; },
     writeTextFile: async (p: string, text: string, expected: string | null) => {
       await writeGate;
-      if (opts.failWrite) throw new Error("disk full");
+      if (opts.failWrite && p.endsWith("/response.json")) throw new Error("disk full");
       if (expected === null && files[p] != null) throw new Error("exists");
       files[p] = text; writes.push([p, text, expected]); return null;
     },
@@ -223,6 +223,40 @@ test("the draft survives a reload of the pane", async () => {
   h.press("b");
   const saved = [...h.store.values()][0];
   expect(JSON.parse(saved).picks.db.choice).toBe("lite");
+  const again = await harness(DIR, files(), { store: h.store });
+  expect(again.view.slate.pick("db").choice).toBe("lite");
+});
+
+test("a pane opened without a run id never writes or shows an answer as sent", async () => {
+  const f = files();
+  f[`${DIR}/response.json`] = JSON.stringify({ run: null });
+  const h = await harness(DIR, f, { run: null });
+  expect(h.view.phase).toBe("error");
+  expect(h.reads.length).toBe(0);
+  await h.view.close();
+  expect(h.writes.length).toBe(0);
+});
+
+for (const fails of [false, true]) {
+  test(`closing the pane during a send that ${fails ? "fails writes the close marker" : "succeeds writes no marker"}`, async () => {
+    const h = await harness(DIR, files(), { holdWrite: true, failWrite: fails });
+    h.view.slate.goTo(3);
+    const sending = h.click("send");
+    await h.view.close(h.cx);
+    h.releaseWrite();
+    await sending;
+    const closed = h.files[`${DIR}/closed.json`];
+    if (fails) expect(JSON.parse(closed ?? "{}").reason).toBe("pane closed");
+    else expect(closed ?? null).toBeNull();
+  });
+}
+
+test("an answer of only hidden characters doesn't count as answered", async () => {
+  const h = await harness(DIR, files());
+  await h.click("next");
+  await h.click("next");
+  h.fields[1].type("\u200b", h.cx);
+  expect(h.view.slate.isDecided(h.view.slate.card())).toBe(false);
 });
 
 test("a slate the pane can't show tells the script, so it opens the browser", async () => {

@@ -251,7 +251,7 @@ export class Slate {
   isDecided(d) {
     const p = this.pick(d.id);
     if (d.type === "text")
-      return p.response.trim() !== "";
+      return clean(p.response, SLATE_MAX.notes, true).trim() !== ""; // as response() exports it
     return d.multi ? p.choices.length > 0 : p.choice !== null;
   }
   isSkipped(d) {
