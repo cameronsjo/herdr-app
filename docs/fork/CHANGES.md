@@ -11,6 +11,7 @@ Output of `scripts/fork/seams` at each sync, so growth is visible.
 | 2026-11-15 | `b6546ce1` (before revival) | 1506 | 23 | 37 | 0 |
 | 2026-11-15 | `b6546ce1` (seams extracted, `06f37e1`) | 769 | 23 | 45 | 46 |
 | 2026-11-15 | `8e1208d` (synced, `bf9b67c`) | 761 | 23 | 45 | 51 |
+| 2026-11-18 | `5b32e12` (synced) | 951 | 30 | 85 | 148 |
 
 ## Unmarked seams
 
@@ -29,6 +30,24 @@ Exceptions to `CLAUDE.md` rule 4, each with its reason.
 ## Upstream syncs
 
 Conflict decisions per sync, under a dated heading: file, what each side changed, what was kept and why.
+
+### 2026-11-18: `8e1208d` → `5b32e12` (8 commits)
+
+Run by hand from a cloud thread (Linear CAM-945), not the weekly routine. Supply-chain review: CLEAN. Upstream added the `regex` crate (already in the lock as a transitive dependency; no new download), one Bun test to `justfile`'s `test` recipe, and terminal-link handlers (`link.js` mods, `src/links.rs`, `ShellRuntime::check_module` and `call_module` in vendored gpui-kit) that open URLs and files through the existing `links::open`. No workflow, build-script or installer changes.
+
+No upstream renames or deletions of fork-touched files. 5 conflicted files, one hunk each; `log_safe`, `log_escaped` and `public_url` call sites: 106 before, 106 after. Every fork line in each upstream file both sides touched was checked against the merged tree; the only fork lines no longer present verbatim are the three below that were edited to carry upstream's change.
+
+| File | Upstream | Fork | Kept |
+|---|---|---|---|
+| `src/window.rs` | `pane.rename` and `pane.resize` are structural commands | `fork_browser::structural(name)` on the same line | upstream's list plus the fork's check |
+| `src/main.rs` | `herdr-app check` checks a `link.js`-only mod first | `main_with_components(browser::element::components())` | upstream's link check, then the fork's components call in place of upstream's default registry |
+| `defaults/mods/pane/main.js` | a pane's `name` comes first in its header | header split into `head` + `terminal()` | upstream's `p.name ||` moved into the fork's `terminal()` |
+| `defaults/herdr.d.ts` | `PaneInfo` doc lists `name` | browser-pane note on the same comment | both |
+| `justfile` | `scripts/changes.test.ts` in the Bun line | the `fork-mods.test.ts` line | both |
+| `src/window/fork_browser.rs` (fork-only, no conflict) | every `panes()` entry gains `name` (the pane's own name, from `pane.rename`) | the browser pane's entry, built before upstream's | `"name": p.title` added, so a renamed browser pane reports its name like any other |
+| `Cargo.lock`, `THIRD-PARTY-NOTICES` | | | upstream's, then regenerated |
+
+Not a regression: 34 of upstream's Bun tests in `scripts/agents.test.ts` fail before and after this sync, because the harness evaluates the agents mod's source with `new Function`, which can't parse the fork's `import * as` line (cameronsjo/herdr-app#39). Upstream's CI doesn't run them.
 
 ### 2026-11-15: `b6546ce1` → `8e1208d` (262 commits, first sync)
 

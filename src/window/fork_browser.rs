@@ -591,7 +591,7 @@ impl AppWindow {
         let field = |k: &str| info.as_ref().and_then(|i| i.get(k)).and_then(Value::as_str).filter(|v| !v.is_empty()).map(str::to_owned);
         let title = field("title").or_else(|| field("url")).unwrap_or_else(|| url.clone());
         Some(json!({ "pane": p.id, "terminal": null, "browser": browser, "url": field("url").unwrap_or_else(|| url.clone()),
-            "tab": tab, "title": title, "focused": focused, "zoomed": zoomed, "movable": self.pane_movable(&p.id) }))
+            "tab": tab, "title": title, "name": p.title, "focused": focused, "zoomed": zoomed, "movable": self.pane_movable(&p.id) }))
     }
 
     /// A tab in `herdr-app status`, with its browser blocks.

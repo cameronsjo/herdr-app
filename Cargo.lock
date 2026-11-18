@@ -1070,9 +1070,9 @@ dependencies = [
 
 [[package]]
 name = "cef-dll-sys"
-version = "156.5.0+156.0.28"
+version = "156.6.0+156.0.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cd128040b848a5e22cfc528cfcb6d74af251e45620b1ac9770eeba64a8c3ec60"
+checksum = "d35a4bcb237ea9c8cb88f2e66f63394fd0321ece6f1a74be7c0354f115e1a096"
 dependencies = [
  "anyhow",
  "cc",
@@ -3838,6 +3838,7 @@ dependencies = [
  "objc2-web-kit",
  "png 0.17.16",
  "raw-window-handle",
+ "regex",
  "serde",
  "serde_json",
  "sha2 0.10.9",
