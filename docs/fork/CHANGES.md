@@ -44,6 +44,7 @@ No upstream renames or deletions of fork-touched files. 5 conflicted files, one 
 | `defaults/mods/pane/main.js` | a pane's `name` comes first in its header | header split into `head` + `terminal()` | upstream's `p.name ||` moved into the fork's `terminal()` |
 | `defaults/herdr.d.ts` | `PaneInfo` doc lists `name` | browser-pane note on the same comment | both |
 | `justfile` | `scripts/changes.test.ts` in the Bun line | the `fork-mods.test.ts` line | both |
+| `src/window/fork_browser.rs` (fork-only, no conflict) | every `panes()` entry gains `name` (the pane's own name, from `pane.rename`) | the browser pane's entry, built before upstream's | `"name": p.title` added, so a renamed browser pane reports its name like any other |
 | `Cargo.lock`, `THIRD-PARTY-NOTICES` | | | upstream's, then regenerated |
 
 Not a regression: 34 of upstream's Bun tests in `scripts/agents.test.ts` fail before and after this sync, because the harness evaluates the agents mod's source with `new Function`, which can't parse the fork's `import * as` line (cameronsjo/herdr-app#39). Upstream's CI doesn't run them.
