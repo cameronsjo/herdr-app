@@ -1,6 +1,7 @@
 # FORK(background-mods): the fork's own mod tests. Upstream's ci.yml runs no mod
 # tests (only scripts/docs.test.ts), so these would otherwise run only in a local
 # `just test`. Fork-only file: upstream syncs never conflict on it.
+# FORK(decisions): also runs the Decisions pane tests in scripts/fork/.
 name: fork-mods
 
 on:
@@ -29,4 +30,4 @@ jobs:
         with:
           bun-version: 1.4.4
       - name: Test the fork's mods
-        run: bun test scripts/fork-mods.test.ts
+        run: bun test scripts/fork-mods.test.ts scripts/fork/
