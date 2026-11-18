@@ -86,6 +86,12 @@ fn attach_console() {
     }
 }
 
+fn link_check_path(args: &[String]) -> Option<&std::path::Path> {
+    let mut paths = args.iter().filter(|arg| !matches!(arg.as_str(), "--print-spec" | "--watch" | "--dev"));
+    let path = paths.next()?;
+    (!path.starts_with('-') && paths.next().is_none()).then(|| std::path::Path::new(path))
+}
+
 fn main() {
     // FORK(browser): debug builds read the dev-only agent-access switch and remove it from
     // the environment before anything else (terminals never inherit it).
@@ -106,6 +112,20 @@ fn main() {
     // `herdr-app check <mod>` / `herdr-app types <mod>`: gpui-shell's own checker, with Herdr's module installed.
     if matches!(args.get(1).map(String::as_str), Some("check" | "types")) {
         mods::install_check_policy();
+        if args[1] == "check" && let Some(path) = link_check_path(&args[2..]) {
+            let dir = if path.is_file() { path.parent().unwrap_or(path) } else { path };
+            match mods::check_link_mod(dir) {
+                Ok(true) if dir.join("link.js").is_file() && !dir.join("main.js").is_file() => {
+                    println!("check passed: {}", dir.display());
+                    return;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    eprintln!("herdr-app check: {error:#}");
+                    std::process::exit(1);
+                }
+            }
+        }
         gpui_shell::host::main_with_components(browser::element::components()); // FORK(browser): mods may import herdr-native's nativeView
         return;
     }

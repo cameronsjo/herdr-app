@@ -91,7 +91,7 @@ export default class Pane extends View {
 
   // FORK(browser): the terminal header, split out of render so a browser pane can draw its bar instead.
   terminal(head, t, p) {
-    const name = ((p.program?.agent || p.program?.shell) && p.program.name) || p.title || p.program?.name || "shell";
+    const name = p.name || ((p.program?.agent || p.program?.shell) && p.program.name) || p.title || p.program?.name || "shell";
     const pic = icon(p.program, 14, t.dim);
     const st = p.status;
     return head
