@@ -5,14 +5,14 @@ This is a personal fork of [Herdr](https://github.com/herdrdev/herdr-app), the d
 
 The fork adds a browser pane, features carried over from the archived fork of the Herdr terminal app ([cameronsjo/herdr](https://github.com/cameronsjo/herdr)), and a few fixes and extras. Nothing here goes back upstream.
 
-The install commands in upstream's README install upstream's app, not this one. To run the fork, build it from source on a Mac: `just browser-build --webkit` builds the app with the browser pane, and `bash scripts/browser-daily on` makes it the everyday app ([details](docs/browser-dev.md)).
+The install commands in upstream's README install upstream's app, not this one. To run the fork on a Mac, install upstream's Herdr first (the fork's build switches back to it when you turn it off). Then build from source as [CLAUDE.md § Building](CLAUDE.md#building) describes (the `vendor/ghostty` submodule and Zig 0.16): `just browser-build --webkit` builds the app with the browser pane, and `bash scripts/browser-daily on` makes it the everyday app ([details](docs/browser-dev.md)).
 
 ## What the fork changes
 
 ### A web page in a pane (macOS)
 
-- **Browser pane.** Open a real web page beside your terminals, using the Mac's own WebKit engine (a Chromium build is also there, off by default). It is built as an ordinary mod, so a stock Herdr shows an empty pane instead of failing to load the layout.
-- **Agents can drive it, with your say-so.** A coding agent in a Herdr terminal can read and click the page through [agent-browser](https://github.com/vercel-labs/agent-browser), but only after you click **Allow agent…** and confirm. **Stop agent** cuts it off. The agent always reaches the window that holds its terminal now, even after the terminal moves.
+- **Browser pane.** Open a real web page beside your terminals, using the Mac's own WebKit engine (a Chromium build is also there, off by default). It saves as an ordinary mod block, so a stock Herdr shows it as a mod that didn't load instead of failing to load the layout.
+- **Agents can drive it, with your say-so.** A coding agent in a Herdr terminal can read and click a page in a separate test profile through [agent-browser](https://github.com/vercel-labs/agent-browser), but only after you click **Allow agent…** and confirm. **Stop agent** cuts it off. The agent always reaches the window that holds its terminal now, even after the terminal moves.
 - Details: [design and security model](docs/browser-prototype.md), [building and running it](docs/browser-dev.md), [moving to upstream's browser when it ships](docs/browser-transition.md).
 
 ### Knowing which agents need you
@@ -52,7 +52,7 @@ The install commands in upstream's README install upstream's app, not this one. 
 
 - **Background mods.** A mod can run with nothing on screen, which is what the folder, worktree-group, tab-name and outside-agent features above use.
 - **Release on merge.** Each change merged to `master` is built on GitHub's Mac runners and published as an attested prerelease. A small job on Cameron's Mac checks hourly, verifies the build came from this repo's workflow, and installs it, never quitting a running app.
-- **Weekly upstream sync.** A scheduled Claude session reviews upstream's new code for supply-chain risk before running any of it, then merges it in. A clean sync merges itself once tests pass; one with conflicts waits for a person. [How it works](docs/fork/weekly-sync.md).
+- **Weekly upstream sync.** A scheduled Claude session reviews upstream's new code for supply-chain risk before running any of it, then merges it in. A clean sync merges itself once tests pass. One with conflicts or a workflow change waits for a person, and a security concern stops the sync and opens an issue. [How it works](docs/fork/weekly-sync.md).
 - **Extra CI** for what upstream's doesn't test: the WebKit browser build on macOS and the fork's own mods.
 
 Every difference from upstream, with the exact files it touches, is in the [fork ledger](docs/fork/CHANGES.md). The rules for keeping syncs easy are in [CLAUDE.md](CLAUDE.md).
