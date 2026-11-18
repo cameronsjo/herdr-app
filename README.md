@@ -19,7 +19,7 @@ The install commands in upstream's README install upstream's app, not this one. 
 
 - **Why an agent needs you.** The "Needs you" badge says why when the agent reports it: Approval, Question, Sign in or Error.
 - **Flag a turn that ends with a question.** A hook or script can mark an agent that finished but is waiting on you in words, so it doesn't sink among the done ones. An agent stuck on the same screen for too long can show as Stalled (off until you turn it on). [More](docs/fork/attention.md).
-- **Answer approvals from outside the pane.** `herdr-app approval show t3` prints the prompt a blocked agent is showing, and `herdr-app approval answer t3 approve --token …` answers it, from a shell, a script or another device, without pressing keys blind. [More](docs/fork/approval.md).
+- **Answer approvals from outside the pane.** The fork's `herdr-app` command gains `approval show t3`, which prints the prompt a blocked agent is showing, and `approval answer t3 approve --token …`, which answers it, from a shell, a script or another device, without pressing keys blind. [More](docs/fork/approval.md).
 - **Decisions pane.** When Claude asks a batch of questions through cadence's ask-questions flow, the cards open in a Herdr pane beside its terminal instead of a browser tab. Pick options, compare, add notes, review and send.
 
 ### The agents list
@@ -33,7 +33,7 @@ The install commands in upstream's README install upstream's app, not this one. 
 ### Spaces and tabs
 
 - **Move a tab to another space**, panes and running terminals included, and **merge two spaces** into one (`tab.move_to_space`, `space.merge`).
-- **Open a folder's existing space.** `herdr-app do open-folder.open:<folder>` goes to the space already working in that folder instead of making a second one.
+- **Open a folder's existing space.** The `open-folder.open:<folder>` command (run with `herdr-app do`) goes to the space already working in that folder instead of making a second one.
 - **Move a repo's worktree spaces as one group** with `space-groups.up` and `space-groups.down`.
 - **A named agent names its tab**, and the tab follows when the agent's name changes. A tab you renamed yourself is left alone.
 - **Extra environment variables for an agent**: start it with `argv: ["env", "KEY=value", "claude"]`; no shell quoting involved.
