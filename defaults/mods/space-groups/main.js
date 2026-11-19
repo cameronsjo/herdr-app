@@ -88,19 +88,35 @@ export default class SpaceGroups extends View {
   }
 
   async move(by) {
-    const all = spaces();
-    const shown = all.find((s) => s.active);
-    if (!shown) return;
-    const ps = panes();
-    const mine = all.filter((s) => (s.machine ?? null) === (shown.machine ?? null));
     const git = {};
-    // A few at a time, as the spaces list does: hundreds at once run out of open
-    // files or a machine core's running execs, and a failed look reads as no repo.
-    for (let i = 0; i < mine.length; i += AT_ONCE) {
-      await Promise.all(mine.slice(i, i + AT_ONCE).map(async (s) => { git[s.id] = await repo(place(s, ps), s.machine); }));
+    const looked = new Map(); // JSON [machine, folder] -> its lookup, shared by spaces in one folder
+    // The list may change while git answers (a worktree space made meanwhile has
+    // no lookup and would land out of its group): plan only once every space on
+    // the machine has one, looking again for the new ones a few times.
+    for (let round = 0; round <= 3; round++) {
+      const all = spaces();
+      const shown = all.find((s) => s.active);
+      if (!shown) return;
+      const ps = panes();
+      const mine = all.filter((s) => (s.machine ?? null) === (shown.machine ?? null));
+      const missing = mine.filter((s) => !(s.id in git));
+      if (!missing.length) {
+        for (const call of moves(all, git, shown.id, by)) run("space.move", call);
+        return;
+      }
+      if (round === 3) break; // three rounds of lookups, each checked
+      // A few at a time, as the spaces list does: hundreds at once run out of open
+      // files or a machine core's running execs.
+      for (let i = 0; i < missing.length; i += AT_ONCE) {
+        await Promise.all(missing.slice(i, i + AT_ONCE).map(async (s) => {
+          const where = place(s, ps);
+          const k = JSON.stringify([s.machine ?? null, where]);
+          if (!looked.has(k)) looked.set(k, repo(where, s.machine));
+          git[s.id] = await looked.get(k);
+        }));
+      }
     }
-    // The list may have changed while git answered: plan against the current one.
-    for (const call of moves(spaces(), git, shown.id, by)) run("space.move", call);
+    throw new Error("The spaces kept changing; try again.");
   }
 
   render() {
@@ -108,19 +124,26 @@ export default class SpaceGroups extends View {
   }
 }
 
-// The repo a folder is in ({ repo: its common .git, linked: a worktree }), or null.
+// The repo a folder is in ({ repo: its common .git, linked: a worktree }), or
+// null when it is in none or is gone (git's exit 128, in any language). Throws
+// when git couldn't answer (timed out, not installed, unreachable machine):
+// reading that as "no repo" would split a group.
 async function repo(cwd, on) {
   if (!cwd) return null;
-  const opts = { cwd, on: on ?? null, timeout: 5000 };
+  let r;
   try {
-    const [top, common] = await Promise.all([
-      exec("git", ["rev-parse", "--path-format=absolute", "--show-toplevel"], opts),
-      exec("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], opts),
-    ]);
-    if (top.code !== 0 || common.code !== 0) return null;
-    const t = top.stdout.replace(/\n$/, ""), c = common.stdout.replace(/\n$/, "");
-    return { repo: c, linked: c !== `${t}/.git` };
-  } catch {
-    return null;
+    // One call: the git dir and the common dir differ only in a linked worktree
+    // (a submodule's are the same, so it isn't taken for one). `-C`, not `cwd`:
+    // a deleted folder is then git's "cannot change to", not a failed start.
+    r = await exec("git", ["-C", cwd, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"], { on: on ?? null, timeout: 5000 });
+  } catch (e) {
+    throw new Error(`git couldn't look at ${cwd}: ${e?.message ?? e}`);
   }
+  if (r.code !== 0) {
+    if (r.code === 128 && !r.stdout.trim()) return null;
+    throw new Error(`git couldn't look at ${cwd}: ${r.stderr.trim() || `exit ${r.code}`}`);
+  }
+  const [dir, common] = r.stdout.split("\n");
+  if (!dir || !common) throw new Error(`git couldn't look at ${cwd}: unexpected answer`);
+  return { repo: common, linked: dir !== common };
 }

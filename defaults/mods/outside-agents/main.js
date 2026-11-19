@@ -13,15 +13,22 @@
 // (src/window/fork_mods.rs).
 
 import { View, div } from "gpui-kit";
-import { appHome, readTextFile, writeTextFile, watchFolder, exec, setShared, window, checking } from "herdr";
-import * as fs from "fs/promises";
+import { appHome, readTextFile, writeTextFile, watchFolder, exec, shared, setShared, window, checking } from "herdr";
 
 const DIR = "outside-agents";
 const KEY = "fork.outside-agents";
 const MAX = 64;
 // A heartbeat is a few lines; a bigger file is not one.
 const MAX_TEXT = 4096;
+// The first look waits this long after start, which also keeps its file reads
+// (on real threads) out of the window tests' scheduler.
 const START = 2000;
+// The most file names one listing keeps.
+const LISTED = 1024;
+// How often expired records drop out, in ms.
+const TICK = 1000;
+// Old texts of records dropped for room: a relist that reads one again is not a heartbeat.
+const MAX_DROPPED = 1024;
 const TTL = { min: 1, def: 60, max: 86400 };
 const STATUS = { working: "working", blocked: "blocked", error: "blocked", done: "done", idle: "idle" };
 const README = `# Agents outside Herdr
@@ -37,20 +44,38 @@ ttl: seconds after the last write before it drops out (1 to 86400, 60 if unset).
 at: when it was written, in seconds or milliseconds since 1970, if the writer
 knows; otherwise Herdr counts from when it saw the file change.
 Delete the file to take the agent off the list at once.
+
+A sandboxed agent needs write access to this folder only. Never grant it the
+folder above (the app home): that holds mods, which run code in Herdr.
 `;
 
 // Any process can write a heartbeat, so text is drawn on one line with control,
-// bidi and invisible characters dropped, cut to `n` code points (as agents/fork.js does).
+// bidi and invisible characters dropped (the set agents/fork.js drops: ZWJ, ZWNJ
+// and variation selectors stay), cut to `n` code points.
+const INVISIBLE = /[\u0000-\u001f\u007f-\u009f\u00ad\u034f\u061c\u115f\u1160\u180e\u200b\u200e\u200f\u2028-\u202e\u2060-\u2064\u2066-\u206f\u3164\ufeff\uffa0\ufff9-\ufffb\u{e0000}-\u{e007f}]+/gu;
 const clip = (v, n = 200) => {
   if (typeof v !== "string") return null;
-  const s = v.replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]+/g, " ").trim();
+  const s = v.replace(INVISIBLE, " ").trim();
   return s ? Array.from(s).slice(0, n).join("").trimEnd() : null;
 };
 const fileId = (path) => path.split(/[\\/]/).pop().replace(/\.json$/, "");
+const validId = (id) => /^[\w.-]{1,64}$/.test(id);
+
+// UTF-8 bytes in `text`, counting no further than `max + 1`.
+function bytes(text, max) {
+  if (text.length > max) return max + 1;
+  let n = 0;
+  for (const c of text) {
+    const cp = c.codePointAt(0);
+    n += cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4;
+    if (n > max) return n;
+  }
+  return n;
+}
 
 // One file's agent, or null: not JSON, no known status, or a bad id.
 function parse(id, text, seenAt) {
-  if (!/^[\w.-]{1,64}$/.test(id) || typeof text !== "string" || text.length > MAX_TEXT) return null;
+  if (!validId(id) || typeof text !== "string" || bytes(text, MAX_TEXT) > MAX_TEXT) return null;
   let v;
   try { v = JSON.parse(text); } catch { return null; }
   const status = typeof v?.status === "string" && Object.prototype.hasOwnProperty.call(STATUS, v.status) ? STATUS[v.status] : null;
@@ -58,107 +83,173 @@ function parse(id, text, seenAt) {
   const ttl = Math.min(TTL.max, Math.max(TTL.min, Number.isFinite(v.ttl) ? v.ttl : TTL.def));
   // Seconds or milliseconds; a time ahead of now counts as now.
   const at = Number.isFinite(v.at) && v.at > 0 ? (v.at < 1e12 ? v.at * 1000 : v.at) : seenAt;
-  return { id, name: clip(v.name, 80) ?? id, status, title: clip(v.title), task: clip(v.task), until: Math.min(at, seenAt) + ttl * 1000 };
+  // `reason`: an error keeps its own word on the pill ("Error", not "Needs you").
+  return { id, name: clip(v.name, 80) ?? id, status, reason: v.status === "error" ? "error" : null, title: clip(v.title), task: clip(v.task), until: Math.min(at, seenAt) + ttl * 1000 };
 }
 
-// The agents still alive at `now`, by name, at most MAX.
+// The agents still alive at `now`, by name, at most MAX. `until` stays on each,
+// so a reloaded copy of this mod can keep showing the live ones.
 function live(agents, now) {
   return [...agents.values()]
     .filter((a) => a.until > now)
     .sort((x, y) => x.name.localeCompare(y.name) || x.id.localeCompare(y.id))
     .slice(0, MAX)
-    .map(({ until, text, ...a }) => a);
+    .map(({ text, ...a }) => a);
 }
+
+// The names a folder event is about: `paths` (absolute) whose parent is the
+// watched folder itself, not a folder inside it. Null when the batch names the
+// folder itself: the watch overflowed, so every file may have changed.
+const changedNames = (paths) => {
+  // (A folder named like it inside it is just a folder in it.)
+  const parts = (p) => p.replace(/[\\/]+$/, "").split(/[\\/]/);
+  if (paths.some((p) => parts(p).at(-1) === DIR && parts(p).at(-2) !== DIR)) return null;
+  return new Set(paths.filter((p) => p.split(/[\\/]/).at(-2) === DIR).map((p) => p.split(/[\\/]/).pop()));
+};
+
+// Bare file names that are agent files, sorted, at most LISTED. A name with a
+// slash or backslash in it is no agent's.
+const pick = (names) => names.filter((n) => n.endsWith(".json") && validId(n.slice(0, -5))).sort().slice(0, LISTED);
+
+// Characters cmd.exe reads as syntax (or expands) in an unquoted argument.
+const CMD_UNSAFE = /[&|<>^%!"()]/;
 
 export default class OutsideAgents extends View {
   init(_props, cx) {
     if (checking()) return;
     this.dir = `${appHome().replace(/[\\/]+$/, "")}/${DIR}`;
     this.agents = new Map();
-    // Shared state outlives the app: clear the last run's list until this one reads.
-    this.sent = "[]";
-    setShared(KEY, []);
+    this.dropped = new Map();
+    // Shared state outlives the app: keep only what is still live, so the last
+    // run's rows never outlive their ttl, and a reloaded copy doesn't blink.
+    const kept = shared(KEY);
+    const now = Date.now();
+    const still = Array.isArray(kept) ? kept.filter((a) => a && Number.isFinite(a.until) && a.until > now) : [];
+    this.sent = JSON.stringify(still);
+    setShared(KEY, still);
+    // Until the first read, publish() keeps these (as their ttls run out).
+    this.kept = still;
+    this.ready = false;
     cx.spawn(async (cx) => {
-      // Start-up first: the first look waits two seconds.
       await new Promise((done) => cx.timer.after(START, done));
       for (;;) {
         // Makes the folder and reads it; again after any failure, five seconds on.
+        let watch = null;
         try {
           await this.start();
+          // Watching before the first read, so a write in between isn't missed.
+          watch = watchFolder(this.dir);
+          watch.catch(() => {});
+          await this.relist();
+          this.ready = true;
+          this.publish();
           for (;;) {
-            const paths = await watchFolder(this.dir);
-            // The folder itself (a batch too big to list, or its README) means look again.
-            const files = paths.filter((p) => p.endsWith(".json"));
-            if (files.length < paths.length || !paths.length) await this.relist();
-            // A changed file is a heartbeat even when a relist came with it (a temp-file rename).
-            if (files.length) await this.load(files);
+            const paths = await watch;
+            watch = watchFolder(this.dir);
+            watch.catch(() => {});
+            await this.changed(paths);
             this.publish();
           }
         } catch {
+          watch?.cancel();
           await new Promise((done) => cx.timer.after(5000, done));
         }
       }
     });
-    cx.timer.every(5000, () => this.publish());
+    cx.timer.every(TICK, () => this.publish());
   }
 
-  // Makes the folder (with its README) and reads what is there.
+  // Makes the folder with its README, unless the folder is a link: the README
+  // would then land wherever it points.
   async start() {
+    if (window()?.platform !== "windows" && (await exec("test", ["-L", this.dir])).code === 0) return;
     const readme = `${this.dir}/README.md`;
     if ((await readTextFile(readme)) == null) {
       try { await writeTextFile(readme, README, null); } catch {}
     }
-    await this.relist();
-    this.publish();
+  }
+
+  // A folder event: the files it names are heartbeats (a change event is one
+  // even when the agent wrote the same text); any other new file is read once.
+  async changed(paths) {
+    const names = await this.names();
+    const keep = new Set(names.map(fileId));
+    for (const id of this.agents.keys()) if (!keep.has(id)) this.agents.delete(id);
+    const hit = changedNames(paths) ?? new Set(names);
+    await this.load(names.filter((n) => hit.has(n)).map((n) => `${this.dir}/${n}`));
+    const fresh = names.filter((n) => !hit.has(n) && !this.agents.has(fileId(n)) && !this.dropped.has(fileId(n)));
+    await this.load(fresh.slice(0, MAX * 2).map((n) => `${this.dir}/${n}`), true);
   }
 
   async relist() {
-    const names = (await this.names()).filter((n) => n.endsWith(".json")).slice(0, MAX * 2);
+    const names = await this.names();
     const keep = new Set(names.map(fileId));
     for (const id of this.agents.keys()) if (!keep.has(id)) this.agents.delete(id);
-    await this.load(names.map((n) => `${this.dir}/${n}`), true);
+    await this.load(names.slice(0, MAX * 2).map((n) => `${this.dir}/${n}`), true);
   }
 
-  // The folder's file names. Mods may read only under the home folder, so an app
-  // home set elsewhere (HERDR_APP_HOME) is listed by `ls`, or `dir` on Windows.
+  // The folder's agent files: plain files right in it, with a valid id, at
+  // most LISTED (a relist reads the first MAX * 2; an event reads its own).
+  // Listed with `find` (or `dir` on Windows), since mods have no stat. That
+  // skips links, folders and pipes, but a name can be swapped for one before
+  // the read: the app refuses to read a pipe or device, and a link swapped in
+  // shows what it points at (to the person, never to the agent).
   async names() {
-    try {
-      return await fs.readdir(this.dir);
-    } catch (e) {
-      if (window()?.platform !== "windows") {
-        const out = await exec("ls", ["-1A", "--", this.dir]);
-        if (out.code === 0) return out.stdout.split("\n");
-      } else {
-        const out = await exec("cmd", ["/d", "/c", "dir", "/b", "/a-d", this.dir.replace(/\//g, "\\")]);
-        // An empty folder: "File Not Found", exit 1, no output.
-        if (out.code === 0 || !out.stdout.trim()) return out.stdout.split(/\r?\n/);
-      }
-      throw e;
+    let out;
+    if (window()?.platform !== "windows") {
+      // NUL-separated: a name can hold a newline.
+      out = await exec("find", [this.dir, "-mindepth", "1", "-maxdepth", "1", "-type", "f", "-name", "*.json", "-print0"]);
+      if (out.code !== 0) throw new Error(out.stderr.trim() || `find exited ${out.code}`);
+      return pick(out.stdout.split("\0").map((p) => p.slice(p.lastIndexOf("/") + 1)));
+    } else {
+      const dir = this.dir.replace(/\//g, "\\");
+      if (CMD_UNSAFE.test(dir)) throw new Error("the app home's path has characters cmd can't take as a plain argument");
+      // Files only, no reparse points (links).
+      out = await exec("cmd", ["/d", "/c", "dir", "/b", "/a-d-l", dir]);
+      // An empty folder: exit 1, no output ("File Not Found", in any language).
+      if (out.code !== 0 && !(out.code === 1 && !out.stdout.trim())) throw new Error(out.stderr.trim() || `dir exited ${out.code}`);
     }
+    return pick(out.stdout.split(/\r?\n/));
   }
 
-  // `relisting`: a file read again unchanged is not a heartbeat; a change event is,
-  // even when the agent wrote the same text.
+  // `relisting`: a file read again unchanged is not a heartbeat; nor is a
+  // record dropped for room read again with the same text.
   async load(paths, relisting = false) {
     const now = Date.now();
     for (const path of paths) {
       const id = fileId(path);
       const text = await readTextFile(path).catch(() => null);
-      if (relisting && text != null && this.agents.get(id)?.text === text) continue;
+      if (relisting && text != null && (this.agents.get(id)?.text === text || this.dropped.get(id) === text)) continue;
+      this.dropped.delete(id);
       const agent = parse(id, text, now);
       if (!agent) { this.agents.delete(id); continue; }
-      // An expired record stays (so an unchanged file isn't read as a new heartbeat)
-      // until room is needed: at most twice what shows are kept.
-      if (!this.agents.has(id) && this.agents.size >= MAX * 2) {
-        for (const [old, a] of this.agents) if (a.until <= now) this.agents.delete(old);
-        if (this.agents.size >= MAX * 2) continue;
-      }
+      if (!this.agents.has(id) && this.agents.size >= MAX * 2 && !this.makeRoom(agent, now)) continue;
       this.agents.set(id, { ...agent, text });
     }
   }
 
+  // Room for `agent` in a full map: the expired records go, else the one that
+  // expires soonest, if it goes before `agent` does. False when none can go.
+  makeRoom(agent, now) {
+    const drop = (id) => {
+      const a = this.agents.get(id);
+      this.agents.delete(id);
+      this.dropped.delete(id);
+      this.dropped.set(id, a.text);
+      while (this.dropped.size > MAX_DROPPED) this.dropped.delete(this.dropped.keys().next().value);
+    };
+    for (const [id, a] of [...this.agents]) if (a.until <= now) drop(id);
+    if (this.agents.size < MAX * 2) return true;
+    let soonest = null;
+    for (const [id, a] of this.agents) if (!soonest || a.until < soonest[1].until) soonest = [id, a];
+    if (!soonest || soonest[1].until >= agent.until) return false;
+    drop(soonest[0]);
+    return true;
+  }
+
   publish() {
-    const list = live(this.agents, Date.now());
+    const now = Date.now();
+    const list = this.ready ? live(this.agents, now) : this.kept.filter((a) => a.until > now);
     const json = JSON.stringify(list);
     if (json === this.sent) return;
     this.sent = json;

@@ -10,25 +10,28 @@
 // every two seconds: background copies aren't redrawn when terminals change.
 
 import { View, div } from "gpui-kit";
-import { terminals, spaces, run, checking } from "herdr";
+import { terminals, spaces, panes, run, checking } from "herdr";
 
 const EVERY = 2000;
 
-// The tab a terminal is in, as spaces() names it: its herdr.tab label, with the
-// machine prefix (`vps/`) its address carries.
-function tabOf(t) {
-  const label = t.labels?.["herdr.tab"];
-  if (!label) return null;
-  const slash = t.address.indexOf("/");
-  return slash === -1 ? label : `${t.address.slice(0, slash)}/${label}`;
+// Terminal address -> the tab whose pane shows it, from the app's own model.
+// Not the terminal's herdr.tab label: an agent can rewrite its labels, and
+// would then get another tab renamed.
+function tabsByTerminal(all) {
+  const where = new Map();
+  for (const p of all) if (p.terminal && !where.has(p.terminal)) where.set(p.terminal, p.tab);
+  return where;
 }
 
 const machineOf = (address) => (address.includes("/") ? address.slice(0, address.indexOf("/")) : "");
 
 // The tab.rename calls to make, and what each named terminal was called and
 // where. `all`: terminals(); `tabs`: id -> TabInfo; `last`: address ->
-// {name, tab} last decided on.
-function plan(all, tabs, last) {
+// {name, tab} last decided on (tab null: kept from a build that stored bare
+// names, so it matches whatever tab the terminal is in); `where`: address ->
+// tab id, from tabsByTerminal.
+function plan(all, tabs, last, where) {
+  const tabOf = (t) => where.get(t.address);
   const named = all.filter((t) => t.state === "live" && typeof t.name === "string" && t.name.trim() && tabOf(t));
   const perTab = new Map();
   for (const t of named) perTab.set(tabOf(t), (perTab.get(tabOf(t)) ?? 0) + 1);
@@ -47,13 +50,18 @@ function plan(all, tabs, last) {
       if (prev) seen[t.address] = prev;
       continue;
     }
-    seen[t.address] = { name, tab: id };
     // A terminal new to this tab counts as unseen.
-    const before = prev?.tab === id ? prev.name : undefined;
-    if (before === name) continue;
+    const before = prev && (prev.tab === id || prev.tab === null) ? prev.name : undefined;
     // New to us: only a tab nobody named. Renamed: a tab still called the old name too.
-    const follows = !tab.named || (before !== undefined && tab.name === before);
-    if (follows && tab.name !== name) renames.push({ id, name });
+    const follows = before !== name && (!tab.named || (before !== undefined && tab.name === before));
+    if (follows && tab.name !== name) {
+      renames.push({ id, name });
+      // Record nothing new until the tab shows the name: run() doesn't report a
+      // failed rename, so the next look decides (and renames) again.
+      if (prev) seen[t.address] = prev;
+      continue;
+    }
+    seen[t.address] = { name, tab: id };
   }
   return { renames, seen };
 }
@@ -63,15 +71,17 @@ export default class NameSync extends View {
     if (checking()) return;
     try { this.last = JSON.parse(localStorage.getItem("names") ?? "{}"); } catch { this.last = {}; }
     if (!this.last || typeof this.last !== "object" || Array.isArray(this.last)) this.last = {};
-    // Only {name, tab} entries: an older build kept bare names.
-    this.last = Object.fromEntries(Object.entries(this.last).filter(([, v]) => typeof v?.name === "string" && typeof v?.tab === "string"));
+    // {name, tab} entries; the first build kept bare names, which match any tab once.
+    this.last = Object.fromEntries(Object.entries(this.last)
+      .map(([k, v]) => [k, typeof v === "string" ? { name: v, tab: null } : v])
+      .filter(([, v]) => typeof v?.name === "string" && (typeof v?.tab === "string" || v?.tab === null)));
     cx.timer.every(EVERY, () => this.tick());
     this.tick();
   }
 
   tick() {
     const tabs = new Map(spaces().flatMap((s) => s.tabs ?? []).map((c) => [c.id, c]));
-    const { renames, seen } = plan(terminals(), tabs, this.last);
+    const { renames, seen } = plan(terminals(), tabs, this.last, tabsByTerminal(panes()));
     for (const r of renames) run("tab.rename", r);
     if (JSON.stringify(seen) === JSON.stringify(this.last)) return;
     this.last = seen;

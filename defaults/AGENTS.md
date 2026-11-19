@@ -970,10 +970,13 @@ has 124 programs (agents, editors, runtimes, tools, databases, infra);
   folder, else makes one there; `open-folder.pick` asks for the folder first),
   `space-groups` (`space-groups.up` / `space-groups.down` move the shown space and its git
   worktree spaces as one block), and `name-sync` (a terminal started with a name names its
-  tab when nobody named the tab; a tab still called by the old name follows a new one).
+  tab when it is the tab's only named terminal and nobody named the tab; a tab still called
+  by the old name follows a new one).
   Run the commands with `herdr-app do <mod>.<command>`, `run(...)` or a `keys.json`
   binding. Herdr restores a deleted shipped mod at start. Only the shipped folders run
-  this way: a `mod.clone` copy runs where a layout block names it.
+  this way: a `mod.clone` copy runs where a layout block names it. Don't also name one
+  of these in a layout block: that copy gets every command too, so `open-folder` would
+  make two spaces for one folder.
 - Extra environment variables for one agent (macOS and Linux): put `env` first in its
   argv, `tab.new {argv: ["env", "API_MODE=dev", "claude"]}`. Values show in the terminal's
   argv (`hc ls`), so keep secrets out.
@@ -986,6 +989,7 @@ has 124 programs (agents, editors, runtimes, tools, databases, infra);
   `~/.config/herdr-app/outside-agents/` (`$HERDR_APP_HOME/outside-agents/` when set), `{"name": "…", "status": "working", "title": "…",
   "task": "…", "ttl": 60}`, and rewrites it as its heartbeat. It drops out `ttl` seconds (60 by
   default) after its last write, or when its file is deleted. The folder's `README.md` says more.
+  A sandboxed agent needs write access to that folder only, never the app home above it.
 - The palette (`app.palette`) also lists mods' own commands: a mod names them in its
   `mod.json`, `"commands": [{"command": "my-mod.refresh", "title": "Refresh my board", "words": "reload"}]`,
   only `<its folder>.<command>`, and they show under "Mods" (read when the palette opens).

@@ -5,3 +5,4 @@
 pub mod approval;
 pub mod attention;
 pub mod spaces;
+pub mod untrusted;

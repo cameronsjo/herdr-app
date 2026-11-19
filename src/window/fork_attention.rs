@@ -9,17 +9,17 @@ impl AppWindow {
     /// Every tick: removes the attention label from agents that work again,
     /// and reads working agents' screens for the stall check.
     pub(super) fn fork_attention_tick(&mut self, cx: &mut Context<Self>) {
-        for addr in attention::queue(|q| q.labels_to_clear(&self.live)) {
+        let now = model::now_ms();
+        for addr in attention::queue(|q| q.labels_to_clear(&self.live, now)) {
             let core = self.core.clone();
             cx.spawn(async move |_, cx| {
                 let params = json!({ "terminal": addr, "labels": { (attention::LABEL): "" } });
                 let Err(e) = cx.background_executor().spawn(async move { core.call("terminal.label", params) }).await else { return };
                 tracing::warn!("attention label for {addr}: {e:#}");
-                attention::queue(|q| q.cleared_failed(&addr));
+                attention::queue(|q| q.cleared_failed(&addr, model::now_ms()));
             })
             .detach();
         }
-        let now = model::now_ms();
         let limit = attention::stall_limit_ms(now);
         for addr in attention::queue(|q| q.screens_to_read(&self.live, now, limit)) {
             let core = self.core.clone();
