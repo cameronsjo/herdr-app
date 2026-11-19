@@ -1,0 +1,105 @@
+#!/bin/bash
+# FORK(signing): notarize and staple a Developer ID signed Herdr .app.
+#
+#   mac-notarize <app>                            CI: APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD
+#   mac-notarize --keychain-profile <name> <app>  local: a profile stored once with
+#                                                 xcrun notarytool store-credentials <name>
+#
+# Refuses an app not signed by the fork's team. Submits a zip of it, waits up
+# to 30 minutes, always prints Apple's log (and adds it to the GitHub step
+# summary), then staples the ticket to the app and validates it. It does not
+# zip the stapled result; the caller does.
+# Exit: 0 accepted and stapled; 1 refused, rejected, timed out, or a step
+# failed; 2 usage.
+set -euo pipefail
+
+# The team in the Developer ID certificate's subject (OU). Public: anyone can
+# read it off a signed app with codesign -dvv.
+team=5H883FMW6H
+profile=
+usage() { echo "usage: mac-notarize [--keychain-profile <name>] <app>" >&2; exit 2; }
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --keychain-profile) [[ $# -ge 2 ]] || usage; profile=$2; shift 2 ;;
+    -h|--help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -*) usage ;;
+    *) break ;;
+  esac
+done
+[[ $# -eq 1 ]] || usage
+app=$1
+[[ -d $app && $app == *.app ]] || { echo "mac-notarize: $app is not an .app bundle" >&2; exit 2; }
+
+summary=${GITHUB_STEP_SUMMARY:-/dev/null}
+say() { printf 'mac-notarize: %s\n' "$*" >&2; }
+
+# Only the fork's own Developer ID signature goes to Apple under its account.
+requirement="=anchor apple generic and certificate leaf[subject.OU] = \"$team\""
+codesign --verify --strict -R "$requirement" "$app" ||
+  { say "$app is not signed by Developer ID team $team; refusing to submit it"; exit 1; }
+
+umask 077
+work=$(mktemp -d)
+keychain=
+cleanup() {
+  if [[ -n $keychain ]]; then security delete-keychain "$keychain" >/dev/null 2>&1 || true; fi
+  rm -rf "$work"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+if [[ -n $profile ]]; then
+  auth=(--keychain-profile "$profile")
+else
+  : "${APPLE_ID:?missing APPLE_ID (or pass --keychain-profile)}"
+  : "${APPLE_TEAM_ID:?missing APPLE_TEAM_ID}"
+  : "${APPLE_APP_PASSWORD:?missing APPLE_APP_PASSWORD}"
+  [[ $APPLE_TEAM_ID == "$team" ]] || { say "APPLE_TEAM_ID is not $team"; exit 1; }
+  # The password goes into a throwaway keychain once; every later call names
+  # the profile. notarytool reads it only from --password or a tty prompt, so
+  # it is in this one process's argv for the length of the call.
+  keychain="$work/notary.keychain-db"
+  kpw=$(openssl rand -hex 24)
+  security create-keychain -p "$kpw" "$keychain"
+  security set-keychain-settings -lut 3600 "$keychain"
+  security unlock-keychain -p "$kpw" "$keychain"
+  xcrun notarytool store-credentials fork-notary --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
+    --password "$APPLE_APP_PASSWORD" --keychain "$keychain" >/dev/null
+  auth=(--keychain-profile fork-notary --keychain "$keychain")
+fi
+
+name=$(basename "$app" .app)
+ditto -c -k --norsrc --keepParent "$app" "$work/$name.zip"
+started=$SECONDS
+xcrun notarytool submit "$work/$name.zip" "${auth[@]}" --output-format json > "$work/submission.json"
+id=$(jq -er '.id' "$work/submission.json") || { say "submit returned no id:"; cat "$work/submission.json" >&2; exit 1; }
+say "submitted $name as $id"
+
+# wait and its status separately, so a timeout still leaves time for the log.
+wait_rc=0
+xcrun notarytool wait "$id" "${auth[@]}" --timeout 30m --output-format json > "$work/wait.json" || wait_rc=$?
+status=$(jq -r '.status // "unknown"' "$work/wait.json" 2>/dev/null || echo unknown)
+{
+  echo "### Notarization: $name"
+  echo "- Submission: \`$id\`"
+  echo "- Status: \`$status\` (notarytool wait exit $wait_rc)"
+  echo "- Elapsed: $((SECONDS - started)) seconds"
+} >> "$summary"
+
+# Apple's report is the only explanation for a rejection; print it either way.
+if xcrun notarytool log "$id" "${auth[@]}" "$work/notary-log.json" >/dev/null 2>&1; then
+  jq . "$work/notary-log.json"
+  { echo '```json'; jq . "$work/notary-log.json"; echo '```'; } >> "$summary"
+else
+  echo 'Apple has no notary log for this submission yet.' | tee -a "$summary" >&2
+fi
+
+if [[ $status != Accepted ]]; then
+  say "notarization status is $status, not Accepted"
+  exit 1
+fi
+
+xcrun stapler staple "$app"
+xcrun stapler validate "$app"
+say "$name is notarized and stapled"
