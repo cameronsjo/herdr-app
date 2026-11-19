@@ -30,6 +30,20 @@ pub(super) struct ForkBrowser {
     /// take a terminal back and forth.
     #[cfg(all(target_os = "macos", feature = "browser-pane"))]
     claimed: std::collections::HashSet<String>,
+    /// When each terminal's last `terminal.label` write failed, so a retry
+    /// waits `agent::LABEL_RETRY` rather than every listing tick.
+    #[cfg(all(target_os = "macos", feature = "browser-pane"))]
+    label_failed: std::collections::HashMap<String, std::time::Instant>,
+    /// When this app last asked whether the apps that took its terminals
+    /// still serve their sockets (`agent::taken_by_others`).
+    #[cfg(all(target_os = "macos", feature = "browser-pane"))]
+    taken_checked: Option<std::time::Instant>,
+    /// Whether the shipped `browser-prototype` mod was edited (its files
+    /// differ from `installed.json`'s record): then the window draws browser
+    /// blocks itself and places the page whole, so an edited mod can't draw
+    /// over a page's area until the next start moves it aside
+    /// (cameronsjo/herdr-app#43). Read at start and when its files change.
+    prototype_edited: bool,
 }
 
 impl ForkBrowser {
@@ -42,8 +56,20 @@ impl ForkBrowser {
             page_keys: Vec::new(),
             #[cfg(all(target_os = "macos", feature = "browser-pane"))]
             claimed: Default::default(),
+            #[cfg(all(target_os = "macos", feature = "browser-pane"))]
+            label_failed: Default::default(),
+            #[cfg(all(target_os = "macos", feature = "browser-pane"))]
+            taken_checked: None,
+            prototype_edited: prototype_edited(),
         }
     }
+}
+
+/// Whether the shipped `browser-prototype` mod differs from what Herdr
+/// installed (`mods::kinds` counts it as edited). Never where browsers
+/// don't run: there the window draws every browser block anyway.
+fn prototype_edited() -> bool {
+    crate::browser::AVAILABLE && crate::mods::kinds(&std::collections::BTreeSet::from([block::BROWSER_MOD.to_owned()])).1 > 0
 }
 
 /// Whether a pane frame's header is drawn over the pane (`reveal: "hover"`)
@@ -122,6 +148,14 @@ impl AppWindow {
 
     /// Focus moved on purpose: a layout block's page, or a control the
     /// person pressed, stops holding the keyboard.
+    /// Mod folders whose files changed (`edited`, by name): re-reads whether
+    /// `browser-prototype` is still as installed.
+    pub(super) fn fork_mods_edited(&mut self, edited: &BTreeSet<String>) {
+        if edited.contains(block::BROWSER_MOD) {
+            self.fork.prototype_edited = prototype_edited();
+        }
+    }
+
     pub(super) fn fork_focus_moved(&mut self) {
         self.fork.layout_page = None;
         self.fork.control_focus = None;
@@ -132,25 +166,72 @@ impl AppWindow {
     /// holds it now, not the one that started it (cameronsjo/herdr-app#6).
     /// Each terminal once per run, when the core lists it with another
     /// socket or none: the app started last holds the terminals it shows.
+    /// Only while this app serves the socket it names; a failed write waits
+    /// `agent::LABEL_RETRY`; and a terminal another app took comes back once
+    /// that app's socket is gone (cameronsjo/herdr-app#31).
     pub(super) fn fork_claim_terminals(&mut self, cx: &mut Context<Self>) {
         #[cfg(all(target_os = "macos", feature = "browser-pane"))]
         {
+            use crate::browser::agent;
+            if !crate::browser::socket::serving() {
+                return;
+            }
             let socket = crate::mods::app_dir().join("herdr-app.sock").to_string_lossy().into_owned();
-            let label = crate::browser::agent::SOCKET_LABEL;
-            for addr in crate::browser::agent::claim_todo(&self.model, &self.live, &self.fork.claimed, &socket) {
+            let label = agent::SOCKET_LABEL;
+            let now = std::time::Instant::now();
+            for addr in agent::claim_todo(&self.model, &self.live, &self.fork.claimed, &socket) {
+                if !agent::label_retry_due(self.fork.label_failed.get(&addr).copied(), now) {
+                    continue;
+                }
                 self.fork.claimed.insert(addr.clone());
                 let core = self.core.clone();
                 let params = json!({ "terminal": addr, "labels": { (label): socket } });
                 cx.spawn(async move |this, cx| {
-                    let Err(e) = cx.background_executor().spawn(async move { core.call("terminal.label", params) }).await else { return };
-                    tracing::warn!("browser: cannot label terminal {}: {e:#}", crate::browser::log_safe(&addr));
-                    // Try again on a later listing.
-                    let _ = this.update(cx, |this, _| this.fork.claimed.remove(&addr));
+                    let result = cx.background_executor().spawn(async move { core.call("terminal.label", params) }).await;
+                    let _ = this.update(cx, |this, _| match result {
+                        Ok(_) => {
+                            this.fork.label_failed.remove(&addr);
+                        }
+                        Err(e) => {
+                            // One warning per run of failures; the rest wait and log quietly.
+                            if this.fork.label_failed.insert(addr.clone(), std::time::Instant::now()).is_none() {
+                                tracing::warn!("browser: cannot label terminal {}: {e:#}", crate::browser::log_safe(&addr));
+                            } else {
+                                tracing::debug!("browser: still cannot label terminal {}: {e:#}", crate::browser::log_safe(&addr));
+                            }
+                            // Try again on a listing after the pause.
+                            this.fork.claimed.remove(&addr);
+                        }
+                    });
                 })
                 .detach();
             }
             let live = &self.live;
             self.fork.claimed.retain(|a| live.contains_key(a));
+            self.fork.label_failed.retain(|a, _| live.contains_key(a));
+            // Terminals another app took: ask, off the main thread and at most
+            // every LABEL_RETRY, whether that app still serves its socket.
+            let taken = agent::taken_by_others(&self.live, &self.fork.claimed, &socket);
+            let due = self.fork.taken_checked.is_none_or(|at| now.saturating_duration_since(at) >= agent::LABEL_RETRY);
+            if !taken.is_empty() && due {
+                self.fork.taken_checked = Some(now);
+                cx.spawn(async move |this, cx| {
+                    let released = cx
+                        .background_executor()
+                        .spawn(async move { taken.into_iter().filter(|(s, _)| agent::socket_gone(s)).flat_map(|(_, t)| t).collect::<Vec<_>>() })
+                        .await;
+                    if released.is_empty() {
+                        return;
+                    }
+                    let _ = this.update(cx, |this, _| {
+                        for t in &released {
+                            this.fork.claimed.remove(t);
+                        }
+                        tracing::info!("browser: taking back {} terminal(s) whose app quit", released.len());
+                    });
+                })
+                .detach();
+            }
         }
         #[cfg(not(all(target_os = "macos", feature = "browser-pane")))]
         let _ = cx;
@@ -444,7 +525,7 @@ impl AppWindow {
         crate::browser::same_core(terminal, req.get("core").and_then(Value::as_str), crate::browser::core_id(&self.core.hello).as_deref())?;
         let pane = self.model.tabs().flat_map(|t| t.root.walk()).find(|n| n.terminal() == Some(terminal)).map(|n| n.id.clone());
         let Some(pane) = pane else {
-            return Err(if self.live.contains_key(terminal) { crate::browser::parked(terminal) } else { format!("no terminal {terminal} in Herdr") });
+            return Err(if self.live.contains_key(terminal) { crate::browser::parked(terminal) } else { crate::browser::no_terminal(terminal) });
         };
         let space = self.model.space_of(&pane).ok_or_else(|| crate::browser::parked(terminal))?;
         if space.machine.is_some() {
@@ -634,16 +715,21 @@ impl AppWindow {
         let id = n.id.clone();
         let bar = self.fork.browsers.agent_state(browser).map(|_| self.agent_bar(&n.id, browser, cx));
         let look = crate::browser::Look { surface: c("surface"), text: c("foreground"), dim: c("dim") };
-        let loaded = self.copies.get(&n.id).is_some_and(|c| c.root.is_some());
+        let root = self.copies.get(&n.id).and_then(|c| c.root.clone());
         let owns = self.fork.browsers.owns(&n.id, browser);
         let b = browser.to_owned();
-        let body = if self.fork.browsers.drawn_by_mod(&n.id, browser) && loaded {
+        let body = if let Some(root) = root.filter(|_| !self.fork.prototype_edited && self.fork.browsers.drawn_by_mod(&n.id, browser)) {
             let place = owns.then(|| canvas(|_, _, _| {}, move |bounds, _, window, _| crate::browser::place(&b, bounds, window)).absolute().size_full());
-            div().size_full().relative().child(self.render_slot(&n.id, cx)).children(place).into_any_element()
+            // The mod's root as `render_slot` draws a pane mod, without its
+            // click handler: that one focuses the pane as a mod that keeps the
+            // keyboard (publish, save), and the handler below would at once undo
+            // it, so one click wrote the session twice (cameronsjo/herdr-app#43).
+            let slot = div().size_full().key_context(super::key_context("Mod", "mod", block::BROWSER_MOD)).child(root);
+            div().size_full().relative().child(slot).children(place).into_any_element()
         } else {
             // The window's own placeholder. Also when the mod didn't load (the mods' VM
-            // failed, a broken edit): the page then fills the body, so it never depends on
-            // the mod runtime.
+            // failed, a broken edit) or was edited: the page then fills the body, so it
+            // never depends on the mod runtime or code Herdr didn't ship.
             let fill = owns.then(|| canvas(|_, _, _| {}, move |bounds, _, window, _| crate::browser::place_whole(&b, bounds, window)).absolute().size_full());
             div().size_full().relative().child(self.fork.browsers.element(&n.id, browser, url, look)).children(fill).into_any_element()
         };
@@ -658,9 +744,8 @@ impl AppWindow {
                     .min_h_0()
                     .relative()
                     // The page takes clicks itself once it shows; until then a click focuses the
-                    // pane and gives the page the keyboard. This runs after the mod slot's own
-                    // click handler, which focuses the pane as a mod that keeps the keyboard
-                    // (`focused_pane`): a browser pane's keyboard is its page's.
+                    // pane and gives the page the keyboard: a browser pane's keyboard is its
+                    // page's, never the mod's (`focused_pane` stays None).
                     .on_any_mouse_down(cx.listener(move |this, _, window, cx| {
                         if this.model.tab_of(&id).is_none() {
                             return;
@@ -770,10 +855,15 @@ mod window_tests {
         crate::mods::write_workspace().unwrap();
         std::fs::create_dir_all(home.join("layouts")).unwrap();
         // A browser block in the tree, a floating one (float_mod adds a
-        // `float` prop) and a real mod beside them.
+        // `float` prop), a stack header and a real mod beside them.
         let layout = json!({ "id": "root", "type": "row", "children": [
             { "id": "page", "type": "block", "content": { "mod": BROWSER_MOD, "props": { "browser": "b1", "url": "about:blank" } } },
-            { "id": "other", "type": "block", "content": { "mod": "frame-none" } } ],
+            { "id": "other", "type": "block", "content": { "mod": "frame-none" } },
+            // A stack whose header is a browser-prototype mod with a url: its
+            // copy goes through mod_props too.
+            { "id": "st", "type": "stack", "active": "s1",
+              "header": { "content": { "mod": BROWSER_MOD, "props": { "browser": "b3", "url": "https://example.test/h?code=7" } } },
+              "children": [ { "id": "s1", "type": "block", "content": { "mod": "frame-none" } } ] } ],
           "floating": [ { "id": "f", "content": { "mod": BROWSER_MOD, "props": { "browser": "b2", "url": "https://example.test/cb?code=42" } } } ] });
         std::fs::write(home.join("layouts/browsers.json"), layout.to_string()).unwrap();
         cx.update(crate::mods::init);
@@ -786,6 +876,7 @@ mod window_tests {
             assert_eq!(this.layout_name, "browsers");
             let (_, shown) = this.visible();
             assert!(shown.iter().any(|(s, i)| s == "page" && i.name == BROWSER_MOD), "visible: {:?}", shown.iter().map(|(s, _)| s).collect::<Vec<_>>());
+            assert!(shown.iter().any(|(s, i)| s == "st#header" && i.name == BROWSER_MOD), "the stack header's copy is visible");
             let page = this.copies.get("page").expect("the browser block's mod copy");
             assert_eq!(page.inst.name, BROWSER_MOD);
             // It loaded: `herdr-native` (nativeView) resolves in the mods' VM.
@@ -807,15 +898,43 @@ mod window_tests {
         });
     }
 
+    /// The body of `fn <name>(` in `source`: up to the next item at the same
+    /// four-space indent. Each source-order test reads one function, so a
+    /// match elsewhere in window.rs can't stand in for the seam.
+    fn fn_body<'a>(source: &'a str, name: &str) -> &'a str {
+        let start = source.find(&format!("\n    fn {name}(")).unwrap_or_else(|| panic!("fn {name} is in window.rs"));
+        let rest = &source[start + 1..];
+        let end = rest.find("\n    }\n").unwrap_or_else(|| panic!("fn {name} has an end"));
+        &rest[..end]
+    }
+
+    /// Where `needle` is in `body`, asserting it occurs exactly once.
+    fn once(body: &str, needle: &str, what: &str) -> usize {
+        assert_eq!(body.matches(needle).count(), 1, "{what} must occur exactly once");
+        body.find(needle).unwrap_or_default()
+    }
+
     /// The mods' `panes` list asks `fork_pane_json` before upstream's mod-pane
     /// branch, or a browser pane is listed as a mod named `browser-prototype`.
     /// A sync that moves the line back passes every other test, so this reads
     /// the order from the source.
     #[test]
     fn the_panes_list_asks_for_a_browser_before_a_mod() {
-        let source = include_str!("../window.rs");
-        let browser = source.find("if let Some(v) = self.fork_pane_json(").expect("the panes-list seam is in window.rs");
-        let mod_pane = source.find("if let Some(Content::Mod { name, .. }) = p.content() {").expect("upstream's mod-pane branch");
+        let publish = fn_body(include_str!("../window.rs"), "publish");
+        let browser = once(publish, "if let Some(v) = self.fork_pane_json(", "the panes-list seam in fn publish");
+        let mod_pane = once(publish, "if let Some(Content::Mod { name, .. }) = p.content() {", "upstream's mod-pane branch in fn publish");
         assert!(browser < mod_pane, "fork_pane_json must come before the mod-pane branch in the panes list");
+    }
+
+    /// `render_block` draws a browser block before upstream's `match content`,
+    /// whose mod arm would draw the mod copy alone: the frame, agent header
+    /// and page placement are the window's, so the pane would show only the
+    /// placeholder. A sync that drops the early return passes every other test.
+    #[test]
+    fn render_block_draws_a_browser_before_matching_its_content() {
+        let render = fn_body(include_str!("../window.rs"), "render_block");
+        let browser = once(render, "if let Some(b) = crate::browser::block::block(content) { return self.fork_render_browser(", "the browser early return in fn render_block");
+        let matched = once(render, "match content {", "upstream's content match in fn render_block");
+        assert!(browser < matched, "the browser early return must come before `match content` in render_block");
     }
 }

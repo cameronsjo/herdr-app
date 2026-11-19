@@ -93,10 +93,10 @@ pub fn content(browser: &str, url: &str, profile: Option<&str>) -> Content {
 /// Points a browser block at a new url (what it reopens at). False if
 /// `content` is no browser block.
 pub fn set_url(content: &mut Content, url: &str) -> bool {
-    if !is_browser(content) {
+    let Content::Mod { name, props } = content else { return false };
+    if of_mod(name, props).is_none() {
         return false;
     }
-    let Content::Mod { props, .. } = content else { return false };
     props["url"] = Value::String(url.to_owned());
     true
 }
@@ -109,11 +109,8 @@ pub trait BrowserNode {
 
 impl BrowserNode for Node {
     fn browser(&self) -> Option<&str> {
-        let content = self.content()?;
-        if !is_browser(content) {
-            return None;
-        }
-        let Content::Mod { props, .. } = content else { return None };
+        let Content::Mod { name, props } = self.content()? else { return None };
+        of_mod(name, props)?;
         props.get("browser").and_then(Value::as_str)
     }
 }

@@ -4387,6 +4387,7 @@ impl AppWindow {
             // An incomplete scan cannot prove that the source is unchanged.
             stamp.is_none() || self.mod_stamps.borrow_mut().insert(name.clone(), stamp.clone()).as_ref() != Some(&stamp)
         }).collect();
+        self.fork_mods_edited(&edited); // FORK(browser): an edited browser-prototype stops drawing over pages
         if edited.is_empty() {
             return;
         }
