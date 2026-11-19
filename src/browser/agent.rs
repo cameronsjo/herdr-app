@@ -743,9 +743,39 @@ pub fn taken_by_others(
     out
 }
 
+/// The terminals in `released` (quit app's socket → its terminals) that the
+/// core still lists with that socket: a terminal relabeled meanwhile (by
+/// this app or a newer one) is not taken back.
+pub fn still_labeled(live: &std::collections::HashMap<String, Value>, released: &[(String, Vec<String>)]) -> Vec<String> {
+    released
+        .iter()
+        .flat_map(|(socket, terminals)| {
+            terminals.iter().filter(move |t| {
+                live.get(*t).and_then(|r| r.pointer("/labels")).and_then(|l| l.get(SOCKET_LABEL)).and_then(Value::as_str) == Some(socket.as_str())
+            })
+        })
+        .cloned()
+        .collect()
+}
+
+/// Whether the app a label names quit: its socket file is gone, or it is a
+/// private socket ([`private_socket`]: this user's, in a folder only they
+/// can write to) that nobody listens on. A label pointing anywhere else is
+/// never connected to.
+#[cfg(unix)]
+pub fn app_quit(socket: &str) -> bool {
+    let path = std::path::Path::new(socket);
+    match std::fs::symlink_metadata(path) {
+        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+        Ok(_) => private_socket(path) && socket_gone(socket),
+    }
+}
+
 /// Whether no app serves `socket` any more: the file is gone, or nothing
 /// listens on it (an app that quit leaves its socket file). Any other error
-/// (another user's socket, say) is not taken as gone.
+/// (another user's socket, say) is not taken as gone. A live app whose
+/// connection queue is full also refuses: it then loses its terminals to
+/// this app until its own next listing labels them again.
 #[cfg(unix)]
 pub fn socket_gone(socket: &str) -> bool {
     match std::os::unix::net::UnixStream::connect(socket) {
@@ -1045,7 +1075,9 @@ pub fn provider_main(args: &[String]) -> i32 {
                 }
                 ask_app(&stream, &attach, &terminal)
             })
-            .map_err(|e| e.unwrap_or_else(|| no_app(&sockets.join(", "))))
+            // The sockets this app chose (pinned, default), not a labeled one:
+            // that path is the core's text and stays out of the agent's context.
+            .map_err(|e| e.unwrap_or_else(|| no_app(&sockets.iter().filter(|s| Some(s.as_str()) != labeled.as_deref()).cloned().collect::<Vec<_>>().join(", "))))
         }),
         Err(e) => json!({ "protocol": PROTOCOL, "success": false, "error": e }),
     };
@@ -1122,6 +1154,29 @@ mod tests {
         let taken = taken_by_others(&live, &claimed, mine);
         assert_eq!(taken.len(), 1);
         assert_eq!(taken[other], ["t2", "t3"]);
+    }
+
+    #[test]
+    fn only_terminals_still_labeled_with_the_quit_app_come_back() {
+        let (gone, mine) = ("/me/b/herdr-app.sock", "/me/a/herdr-app.sock");
+        let labeled = |s: &str| json!({ "labels": { (SOCKET_LABEL): s } });
+        let live: std::collections::HashMap<String, Value> = [("t2".to_owned(), labeled(gone)), ("t3".to_owned(), labeled(mine))].into();
+        // t3 was relabeled while the check ran; t4 left the core.
+        let released = vec![(gone.to_owned(), vec!["t2".to_owned(), "t3".to_owned(), "t4".to_owned()])];
+        assert_eq!(still_labeled(&live, &released), ["t2"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_label_naming_a_missing_socket_is_an_app_that_quit() {
+        assert!(app_quit(&format!("/nonexistent-herdr-{}/herdr-app.sock", std::process::id())));
+        // A file that exists but is no private socket is never connected to.
+        let dir = std::env::temp_dir().join(format!("herdr-quit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("herdr-app.sock");
+        std::fs::write(&file, "").unwrap();
+        assert!(!app_quit(&file.to_string_lossy()));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(unix)]

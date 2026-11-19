@@ -41,9 +41,9 @@ pub fn bind_private<L>(path: &Path, bind: impl FnOnce(&Path) -> io::Result<L>) -
 static SERVING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// [`bind_private`] for the app's control socket, remembering whether it
-/// bound. An app labels its terminals with its socket only while it serves
-/// it ([`serving`]), so a label never points agent-browser at a socket
-/// another app holds or nobody does.
+/// bound. An app labels its terminals with its socket only if it bound it
+/// ([`serving`]), so a second app on the same home, which binds nothing,
+/// never labels terminals with the first one's socket.
 pub fn bind_control<L>(path: &Path, bind: impl FnOnce(&Path) -> io::Result<L>) -> io::Result<L> {
     let bound = bind_private(path, bind);
     SERVING.store(bound.is_ok(), std::sync::atomic::Ordering::Relaxed);

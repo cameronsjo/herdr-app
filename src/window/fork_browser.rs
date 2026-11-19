@@ -146,8 +146,6 @@ impl AppWindow {
         self.fork.browsers.set_bindings(crate::browser::keys::page_bindings(&self.fork.page_keys, &self.layout_name));
     }
 
-    /// Focus moved on purpose: a layout block's page, or a control the
-    /// person pressed, stops holding the keyboard.
     /// Mod folders whose files changed (`edited`, by name): re-reads whether
     /// `browser-prototype` is still as installed.
     pub(super) fn fork_mods_edited(&mut self, edited: &BTreeSet<String>) {
@@ -156,6 +154,8 @@ impl AppWindow {
         }
     }
 
+    /// Focus moved on purpose: a layout block's page, or a control the
+    /// person pressed, stops holding the keyboard.
     pub(super) fn fork_focus_moved(&mut self) {
         self.fork.layout_page = None;
         self.fork.control_focus = None;
@@ -164,11 +164,12 @@ impl AppWindow {
     /// Labels each of this app's local terminals with its control socket
     /// (`agent::SOCKET_LABEL`), so agent-browser in it finds the app that
     /// holds it now, not the one that started it (cameronsjo/herdr-app#6).
-    /// Each terminal once per run, when the core lists it with another
-    /// socket or none: the app started last holds the terminals it shows.
-    /// Only while this app serves the socket it names; a failed write waits
-    /// `agent::LABEL_RETRY`; and a terminal another app took comes back once
-    /// that app's socket is gone (cameronsjo/herdr-app#31).
+    /// A terminal is labeled when the core lists it with another socket or
+    /// none, and then not again while another app holds it: the app started
+    /// last holds the terminals it shows. Only while this app serves the
+    /// socket it names; a failed write waits `agent::LABEL_RETRY`; and a
+    /// terminal another app took comes back once that app quit
+    /// (`agent::app_quit`, cameronsjo/herdr-app#31).
     pub(super) fn fork_claim_terminals(&mut self, cx: &mut Context<Self>) {
         #[cfg(all(target_os = "macos", feature = "browser-pane"))]
         {
@@ -218,16 +219,22 @@ impl AppWindow {
                 cx.spawn(async move |this, cx| {
                     let released = cx
                         .background_executor()
-                        .spawn(async move { taken.into_iter().filter(|(s, _)| agent::socket_gone(s)).flat_map(|(_, t)| t).collect::<Vec<_>>() })
+                        .spawn(async move { taken.into_iter().filter(|(s, _)| agent::app_quit(s)).collect::<Vec<_>>() })
                         .await;
                     if released.is_empty() {
                         return;
                     }
                     let _ = this.update(cx, |this, _| {
-                        for t in &released {
+                        // Only terminals the core still lists with the quit app's
+                        // socket: one this app labeled meanwhile stays claimed, or
+                        // a newer app's label would be taken from it at once.
+                        let back = agent::still_labeled(&this.live, &released);
+                        for t in &back {
                             this.fork.claimed.remove(t);
                         }
-                        tracing::info!("browser: taking back {} terminal(s) whose app quit", released.len());
+                        if !back.is_empty() {
+                            tracing::info!("browser: taking back {} terminal(s) whose app quit", back.len());
+                        }
                     });
                 })
                 .detach();
@@ -724,7 +731,15 @@ impl AppWindow {
             // click handler: that one focuses the pane as a mod that keeps the
             // keyboard (publish, save), and the handler below would at once undo
             // it, so one click wrote the session twice (cameronsjo/herdr-app#43).
-            let slot = div().size_full().key_context(super::key_context("Mod", "mod", block::BROWSER_MOD)).child(root);
+            let slot = div()
+                .size_full()
+                .key_context(super::key_context("Mod", "mod", block::BROWSER_MOD))
+                // A layout block (not a tab's pane): as `render_slot` does, a bare
+                // click leaves the keyboard with the focused pane.
+                .when(self.model.tab_of(&n.id).is_none(), |d| {
+                    d.capture_any_mouse_down(cx.listener(|_, _, window, cx| cx.defer_in(window, |this, window, cx| this.refocus_pane(window, cx))))
+                })
+                .child(root);
             div().size_full().relative().child(slot).children(place).into_any_element()
         } else {
             // The window's own placeholder. Also when the mod didn't load (the mods' VM
@@ -924,6 +939,17 @@ mod window_tests {
         let browser = once(publish, "if let Some(v) = self.fork_pane_json(", "the panes-list seam in fn publish");
         let mod_pane = once(publish, "if let Some(Content::Mod { name, .. }) = p.content() {", "upstream's mod-pane branch in fn publish");
         assert!(browser < mod_pane, "fork_pane_json must come before the mod-pane branch in the panes list");
+    }
+
+    /// An edited `browser-prototype` stops drawing over pages only if
+    /// `files_changed` tells the fork which mods changed. A sync that drops
+    /// the call passes every other test (it only matters on macOS).
+    #[test]
+    fn files_changed_tells_the_fork_which_mods_were_edited() {
+        let changed = fn_body(include_str!("../window.rs"), "files_changed");
+        let stamps = once(changed, "let edited: BTreeSet<String> =", "upstream's edited-mods set in fn files_changed");
+        let fork = once(changed, "self.fork_mods_edited(&edited);", "the fork_mods_edited seam in fn files_changed");
+        assert!(stamps < fork, "fork_mods_edited must follow the edited set");
     }
 
     /// `render_block` draws a browser block before upstream's `match content`,
