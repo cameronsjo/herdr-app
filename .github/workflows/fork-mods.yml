@@ -26,6 +26,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:
+      # The tests strip `import` lines matched up to "\n"; a CRLF checkout leaves them in.
+      - if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
