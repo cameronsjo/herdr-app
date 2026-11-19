@@ -924,6 +924,11 @@ mod window_tests {
         &rest[..end]
     }
 
+    /// window.rs with `\n` line ends: a Windows checkout has `\r\n`.
+    fn window_rs() -> String {
+        include_str!("../window.rs").replace("\r\n", "\n")
+    }
+
     /// Where `needle` is in `body`, asserting it occurs exactly once.
     fn once(body: &str, needle: &str, what: &str) -> usize {
         assert_eq!(body.matches(needle).count(), 1, "{what} must occur exactly once");
@@ -936,7 +941,8 @@ mod window_tests {
     /// the order from the source.
     #[test]
     fn the_panes_list_asks_for_a_browser_before_a_mod() {
-        let publish = fn_body(include_str!("../window.rs"), "publish");
+        let source = window_rs();
+        let publish = fn_body(&source, "publish");
         let browser = once(publish, "if let Some(v) = self.fork_pane_json(", "the panes-list seam in fn publish");
         let mod_pane = once(publish, "if let Some(Content::Mod { name, .. }) = p.content() {", "upstream's mod-pane branch in fn publish");
         assert!(browser < mod_pane, "fork_pane_json must come before the mod-pane branch in the panes list");
@@ -947,7 +953,8 @@ mod window_tests {
     /// the call passes every other test (it only matters on macOS).
     #[test]
     fn files_changed_tells_the_fork_which_mods_were_edited() {
-        let changed = fn_body(include_str!("../window.rs"), "files_changed");
+        let source = window_rs();
+        let changed = fn_body(&source, "files_changed");
         let stamps = once(changed, "let edited: BTreeSet<String> =", "upstream's edited-mods set in fn files_changed");
         let fork = once(changed, "self.fork_mods_edited(&edited);", "the fork_mods_edited seam in fn files_changed");
         assert!(stamps < fork, "fork_mods_edited must follow the edited set");
@@ -959,7 +966,8 @@ mod window_tests {
     /// placeholder. A sync that drops the early return passes every other test.
     #[test]
     fn render_block_draws_a_browser_before_matching_its_content() {
-        let render = fn_body(include_str!("../window.rs"), "render_block");
+        let source = window_rs();
+        let render = fn_body(&source, "render_block");
         let browser = once(render, "if let Some(b) = crate::browser::block::block(content) { return self.fork_render_browser(", "the browser early return in fn render_block");
         let matched = once(render, "match content {", "upstream's content match in fn render_block");
         assert!(browser < matched, "the browser early return must come before `match content` in render_block");
