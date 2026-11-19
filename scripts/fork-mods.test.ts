@@ -117,9 +117,14 @@ test("space-groups tells a worktree from a submodule and stops when git can't an
     "/tmp": { code: 128, stdout: "", stderr: "fatal: not a git repository (or any of the parent directories): .git\n" },
     "/slow": new Error("git took longer than 5 s and was stopped"),
     "/odd": { code: 1, stdout: "", stderr: "fatal: unsafe repository\n" },
+    // A deleted folder, or git speaking another language: no repo.
+    "/gone": { code: 128, stdout: "", stderr: "fatal: cannot change to '/gone': No such file or directory\n" },
+    "/de": { code: 128, stdout: "", stderr: "fatal: kein Git-Repository\n" },
   };
   const calls: string[] = [];
-  const exec = async (_cmd: string, _args: string[], { cwd }: { cwd: string }) => {
+  const exec = async (_cmd: string, args: string[], opts: { cwd?: string }) => {
+    expect(opts.cwd).toBeUndefined();
+    const cwd = args[1];
     calls.push(cwd);
     const a = answers[cwd];
     if (a instanceof Error) throw a;
@@ -130,6 +135,8 @@ test("space-groups tells a worktree from a submodule and stops when git can't an
   expect(await repo("/r/a1")).toEqual({ repo: "/r/a/.git", linked: true });
   expect(await repo("/r/a/sub")).toEqual({ repo: "/r/a/.git/modules/sub", linked: false });
   expect(await repo("/tmp")).toBeNull();
+  expect(await repo("/gone")).toBeNull();
+  expect(await repo("/de")).toBeNull();
   await expect(repo("/slow")).rejects.toThrow("git couldn't look at /slow");
   await expect(repo("/odd")).rejects.toThrow("unsafe repository");
   // One git call per folder.
@@ -143,7 +150,8 @@ test("space-groups looks again when a space appears while git answers, and once 
   let list = lists[0];
   const calls: string[] = [];
   const moved: unknown[] = [];
-  const exec = async (_c: string, _a: string[], { cwd }: { cwd: string }) => {
+  const exec = async (_c: string, a: string[]) => {
+    const cwd = a[1];
     calls.push(cwd);
     // A worktree space of a appears while git answers the first look.
     if (calls.length === 1) list = [...list, { id: "a1", machine: null, active: false, folder: "/r/a1", tabs: [] }, { id: "a2", machine: null, active: false, folder: "/r/a1", tabs: [] }];
@@ -444,9 +452,11 @@ test("outside-agents counts bytes, and drops every invisible character", async (
   const pad = (c: string, n: number) => JSON.stringify({ status: "idle", pad: c.repeat(n) });
   expect(parse("x", pad("a", 4000), now)).not.toBeNull();
   expect(parse("x", pad("\u00e9", 2100), now)).toBeNull();
-  for (const c of ["\u00ad", "\u034f", "\u115f", "\u1160", "\u3164", "\uffa0", "\u180e", "\u2060", "\u2064", "\u206a", "\u206f", "\ufe0f", "\u{e0100}", "\ufff9", "\ufffb", "\u{e0041}"]) {
+  for (const c of ["\u00ad", "\u034f", "\u115f", "\u1160", "\u3164", "\uffa0", "\u180e", "\u2060", "\u2064", "\u206a", "\u206f", "\ufff9", "\ufffb", "\u{e0041}"]) {
     expect(clip(`a${c}b`)).toBe("a b");
   }
+  // Joiners and variation selectors stay, as in the agents panel.
+  for (const c of ["\u200c", "\u200d", "\ufe0f", "\u{e0100}"]) expect(clip(`a${c}b`)).toBe(`a${c}b`);
 });
 
 // The mod's file handling with the folder stood in for: `files` maps a name in
@@ -458,7 +468,8 @@ async function outsideMod(files: Record<string, string>, extra: Record<string, u
       if (cmd === "test") return { code: 1, stdout: "", stderr: "" };
       if (cmd !== "find") throw new Error(cmd);
       const listed = Object.keys(files).filter((n) => n.endsWith(".json") && !n.startsWith("link:")).map((n) => `${args[0]}/${n}`);
-      return { code: 0, stdout: `${listed.join("\n")}\n`, stderr: "" };
+      const sep = args.includes("-print0") ? "\0" : "\n";
+      return { code: 0, stdout: listed.map((l) => `${l}${sep}`).join(""), stderr: "" };
     },
     readTextFile: async (path: string) => { reads.push(path.split("/").pop()!); return files[path.split("/").pop()!] ?? null; },
     writeTextFile: async () => null,
@@ -478,6 +489,31 @@ test("outside-agents reads only the plain files right in its folder", async () =
   const dir = mod.dir;
   const { changedNames } = await load("outside-agents", ["changedNames"]);
   expect([...changedNames([`${dir}/x.json`, `${dir}/sub/y.json`, `${dir}/x.json.tmp`])]).toEqual(["x.json", "x.json.tmp"]);
+
+  // The folder itself in a batch: the watch overflowed, so everything is news.
+  expect(changedNames([`${dir}/x.json`, dir])).toBeNull();
+  expect(changedNames([`${dir}/`])).toBeNull();
+});
+
+test("outside-agents never takes part of a strange name for an agent file", async () => {
+  // A plain file named "a<newline>b.json" beside a pipe named b.json: only the
+  // plain file is listed, and its name is no valid id, so nothing is read.
+  const { mod, reads } = await outsideMod({ "a\nb.json": '{"status":"idle"}', "q\\b.json": '{"status":"idle"}' });
+  await mod.relist();
+  expect(reads).toEqual([]);
+  expect(mod.agents.size).toBe(0);
+});
+
+test("outside-agents keeps the last run's live rows until its first read", async () => {
+  const now = Date.now();
+  let sent: unknown = null;
+  const { OutsideAgents } = await load("outside-agents", ["OutsideAgents"], { setShared: (_k: string, v: unknown) => { sent = v; } });
+  const m = Object.assign(Object.create(OutsideAgents.prototype), { agents: new Map(), ready: false, sent: "", kept: [{ id: "a", until: now + 60000 }, { id: "b", until: now - 1 }] });
+  m.publish();
+  expect(sent).toEqual([{ id: "a", until: now + 60000 }]);
+  m.ready = true;
+  m.publish();
+  expect(sent).toEqual([]);
 });
 
 test("outside-agents takes a temp-file rename batch as a heartbeat, unchanged text too", async () => {
@@ -640,6 +676,12 @@ test("palette: direction families are one row until you type", async () => {
   expect(empty[1]).toMatchObject({ title: "Split pane…", dirs: ["right", "down"] });
   expect(entries(list, "split r").map((e: any) => e.id)).toContain('pane.split:{"direction":"right"}');
   expect(entries([...list, mod], "").filter((e: any) => e.id === mod.id)).toHaveLength(1);
+  // A picked direction in Recent stays listed, so Recent can show it.
+  const picked = 'pane.split:{"direction":"down"}';
+  const withRecent = entries(list, "", [picked]).map((e: any) => e.id);
+  expect(withRecent).toContain(picked);
+  expect(withRecent).toContain("pane.split:family");
+  expect(entries(list, "", ["a", "b", "c", "d", "e", picked]).map((e: any) => e.id)).not.toContain(picked);
   expect(go(list[0])).toBe(false);
   expect(go(empty[1])).toBe(true);
   expect(opened.at(-1)).toMatchObject({ mod: "pick-direction", props: { command: "pane.split", title: "Split pane", dirs: ["right", "down"] } });

@@ -167,7 +167,7 @@ export default class Palette extends View {
 
   // The rows to show: grouped when empty, ranked while typing.
   rows() {
-    const all = fork.entries(entries(), this.query); // FORK(palette)
+    const all = fork.entries(entries(), this.query, this.recent); // FORK(palette)
     const q = this.query.trim().toLowerCase().replace(/\s+/g, "");
     if (!q) {
       const recent = this.recent.map((id) => all.find((e) => e.id === id)).filter(Boolean).slice(0, 5);

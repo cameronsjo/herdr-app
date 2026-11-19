@@ -232,7 +232,11 @@ mod linux {
 
     /// Git supplies its own ignore semantics, including global and nested rules.
     fn ignored_directories(root: &Path) -> HashSet<PathBuf> {
-        // FORK(outside-agents): a watched folder an agent can write (outside-agents/) could plant a .git/config whose core.fsmonitor ls-files runs.
+        // FORK(outside-agents): git reads the folder's own config and ignore files, which an agent that can write it may plant (a pipe hangs git).
+        if crate::fork::untrusted::untrusted_folder(root) {
+            return HashSet::new();
+        }
+        // FORK(outside-agents): nor may any watched repo's core.fsmonitor run. (Before git 2.36 the setting was a hook path, so `false` runs /usr/bin/false: harmless.)
         let Ok(output) = std::process::Command::new("git").args(["-c", "core.fsmonitor=false"]).arg("-C").arg(root).args(["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"]).output() else {
             return HashSet::new();
         };
@@ -251,8 +255,9 @@ mod linux {
         let ignored = ignored_directories(root);
         let mut paths = HashSet::from([root.to_path_buf()]);
         let mut git_roots = HashSet::new();
-        // FORK(outside-agents): core.fsmonitor off, as above.
-        if let Ok(output) = std::process::Command::new("git").args(["-c", "core.fsmonitor=false"]).arg("-C").arg(root).args(["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"]).output()
+        // FORK(outside-agents): no git in the agents' folder, and core.fsmonitor off, as above.
+        if !crate::fork::untrusted::untrusted_folder(root)
+            && let Ok(output) = std::process::Command::new("git").args(["-c", "core.fsmonitor=false"]).arg("-C").arg(root).args(["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"]).output()
             && output.status.success()
         {
             for line in output.stdout.split(|b| *b == b'\n').filter(|p| !p.is_empty()) {

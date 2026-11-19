@@ -117,14 +117,18 @@ export function withPicked(recent) {
 }
 
 // The palette's entries with the mods' commands added and, with nothing typed,
-// each direction family as one row in place of its first member.
-export function entries(list, query) {
+// each direction family as one row in place of its first member. A direction
+// row among the first five `recent` ids stays too, so Recent can show it; Recent
+// shows those five, so it never also lands in its group.
+export function entries(list, query, recent = []) {
   const all = [...list, ...listed.filter((m) => !list.some((e) => e.name === m.name))];
   if (query.trim()) return all;
+  const shown = recent.slice(0, 5);
   const out = [];
   for (const e of all) {
     const f = FAMILIES.find((f) => f.name === e.name && e.args?.direction);
     if (!f) { out.push(e); continue; }
+    if (shown.includes(e.id)) out.push(e);
     if (out.some((o) => o.family === f.name)) continue;
     out.push({ name: f.name, args: {}, group: f.group, title: f.title, words: "", family: f.name, dirs: f.dirs, id: `${f.name}:family` });
   }

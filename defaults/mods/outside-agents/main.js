@@ -50,8 +50,9 @@ folder above (the app home): that holds mods, which run code in Herdr.
 `;
 
 // Any process can write a heartbeat, so text is drawn on one line with control,
-// bidi and invisible characters dropped, cut to `n` code points (as agents/fork.js does).
-const INVISIBLE = /[\u0000-\u001f\u007f-\u009f\u00ad\u034f\u061c\u115f\u1160\u180e\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff9-\ufffb\u{e0000}-\u{e007f}\u{e0100}-\u{e01ef}]+/gu;
+// bidi and invisible characters dropped (the set agents/fork.js drops: ZWJ, ZWNJ
+// and variation selectors stay), cut to `n` code points.
+const INVISIBLE = /[\u0000-\u001f\u007f-\u009f\u00ad\u034f\u061c\u115f\u1160\u180e\u200b\u200e\u200f\u2028-\u202e\u2060-\u2064\u2066-\u206f\u3164\ufeff\uffa0\ufff9-\ufffb\u{e0000}-\u{e007f}]+/gu;
 const clip = (v, n = 200) => {
   if (typeof v !== "string") return null;
   const s = v.replace(INVISIBLE, " ").trim();
@@ -97,8 +98,16 @@ function live(agents, now) {
 }
 
 // The names a folder event is about: `paths` (absolute) whose parent is the
-// watched folder itself, not a folder inside it.
-const changedNames = (paths) => new Set(paths.filter((p) => p.split(/[\\/]/).at(-2) === DIR).map((p) => p.split(/[\\/]/).pop()));
+// watched folder itself, not a folder inside it. Null when the batch names the
+// folder itself: the watch overflowed, so every file may have changed.
+const changedNames = (paths) => {
+  if (paths.some((p) => p.replace(/[\\/]+$/, "").split(/[\\/]/).pop() === DIR)) return null;
+  return new Set(paths.filter((p) => p.split(/[\\/]/).at(-2) === DIR).map((p) => p.split(/[\\/]/).pop()));
+};
+
+// Bare file names that are agent files, sorted, at most LISTED. A name with a
+// slash or backslash in it is no agent's.
+const pick = (names) => names.filter((n) => n.endsWith(".json") && validId(n.slice(0, -5))).sort().slice(0, LISTED);
 
 // Characters cmd.exe reads as syntax (or expands) in an unquoted argument.
 const CMD_UNSAFE = /[&|<>^%!"()]/;
@@ -116,23 +125,31 @@ export default class OutsideAgents extends View {
     const still = Array.isArray(kept) ? kept.filter((a) => a && Number.isFinite(a.until) && a.until > now) : [];
     this.sent = JSON.stringify(still);
     setShared(KEY, still);
+    // Until the first read, publish() keeps these (as their ttls run out).
+    this.kept = still;
+    this.ready = false;
     cx.spawn(async (cx) => {
       await new Promise((done) => cx.timer.after(START, done));
       for (;;) {
         // Makes the folder and reads it; again after any failure, five seconds on.
+        let watch = null;
         try {
           await this.start();
           // Watching before the first read, so a write in between isn't missed.
-          let watch = watchFolder(this.dir);
+          watch = watchFolder(this.dir);
+          watch.catch(() => {});
           await this.relist();
+          this.ready = true;
           this.publish();
           for (;;) {
             const paths = await watch;
             watch = watchFolder(this.dir);
+            watch.catch(() => {});
             await this.changed(paths);
             this.publish();
           }
         } catch {
+          watch?.cancel();
           await new Promise((done) => cx.timer.after(5000, done));
         }
       }
@@ -156,7 +173,7 @@ export default class OutsideAgents extends View {
     const names = await this.names();
     const keep = new Set(names.map(fileId));
     for (const id of this.agents.keys()) if (!keep.has(id)) this.agents.delete(id);
-    const hit = changedNames(paths);
+    const hit = changedNames(paths) ?? new Set(names);
     await this.load(names.filter((n) => hit.has(n)).map((n) => `${this.dir}/${n}`));
     const fresh = names.filter((n) => !hit.has(n) && !this.agents.has(fileId(n)) && !this.dropped.has(fileId(n)));
     await this.load(fresh.slice(0, MAX * 2).map((n) => `${this.dir}/${n}`), true);
@@ -169,28 +186,28 @@ export default class OutsideAgents extends View {
     await this.load(names.slice(0, MAX * 2).map((n) => `${this.dir}/${n}`), true);
   }
 
-  // The folder's agent files: plain files only, right in it, with a valid id,
-  // at most LISTED (a relist reads the first MAX * 2; an event reads its own). Not links, folders, pipes or devices: reading a pipe would
-  // hang, and a link reads a file outside the folder. Listed with `find` (or
-  // `dir` on Windows), since mods have no stat.
+  // The folder's agent files: plain files right in it, with a valid id, at
+  // most LISTED (a relist reads the first MAX * 2; an event reads its own).
+  // Listed with `find` (or `dir` on Windows), since mods have no stat. That
+  // skips links, folders and pipes, but a name can be swapped for one before
+  // the read: the app refuses to read a pipe or device, and a link swapped in
+  // shows what it points at (to the person, never to the agent).
   async names() {
     let out;
     if (window()?.platform !== "windows") {
-      out = await exec("find", [this.dir, "-mindepth", "1", "-maxdepth", "1", "-type", "f", "-name", "*.json"]);
+      // NUL-separated: a name can hold a newline.
+      out = await exec("find", [this.dir, "-mindepth", "1", "-maxdepth", "1", "-type", "f", "-name", "*.json", "-print0"]);
       if (out.code !== 0) throw new Error(out.stderr.trim() || `find exited ${out.code}`);
+      return pick(out.stdout.split("\0").map((p) => p.slice(p.lastIndexOf("/") + 1)));
     } else {
       const dir = this.dir.replace(/\//g, "\\");
       if (CMD_UNSAFE.test(dir)) throw new Error("the app home's path has characters cmd can't take as a plain argument");
       // Files only, no reparse points (links).
       out = await exec("cmd", ["/d", "/c", "dir", "/b", "/a-d-l", dir]);
-      // An empty folder: "File Not Found" on stderr, exit 1, no output.
-      if (out.code !== 0 && !/File Not Found/i.test(out.stderr)) throw new Error(out.stderr.trim() || `dir exited ${out.code}`);
+      // An empty folder: exit 1, no output ("File Not Found", in any language).
+      if (out.code !== 0 && !(out.code === 1 && !out.stdout.trim())) throw new Error(out.stderr.trim() || `dir exited ${out.code}`);
     }
-    return out.stdout.split(/\r?\n/)
-      .map((p) => p.split(/[\\/]/).pop())
-      .filter((n) => n.endsWith(".json") && validId(fileId(n)))
-      .sort()
-      .slice(0, LISTED);
+    return pick(out.stdout.split(/\r?\n/));
   }
 
   // `relisting`: a file read again unchanged is not a heartbeat; nor is a
@@ -229,7 +246,8 @@ export default class OutsideAgents extends View {
   }
 
   publish() {
-    const list = live(this.agents, Date.now());
+    const now = Date.now();
+    const list = this.ready ? live(this.agents, now) : this.kept.filter((a) => a.until > now);
     const json = JSON.stringify(list);
     if (json === this.sent) return;
     this.sent = json;

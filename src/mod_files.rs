@@ -8,7 +8,8 @@ pub const LIMIT: u64 = 1024 * 1024;
 static WRITES: Mutex<()> = Mutex::new(());
 
 pub fn read(path: &Path) -> Result<Option<String>, String> {
-    let file = match std::fs::File::open(path) {
+    // FORK(outside-agents): plain files only, and the open never waits on a pipe.
+    let file = match crate::fork::untrusted::open_plain(path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e.to_string()),

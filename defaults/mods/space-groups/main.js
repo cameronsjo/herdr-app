@@ -93,7 +93,7 @@ export default class SpaceGroups extends View {
     // The list may change while git answers (a worktree space made meanwhile has
     // no lookup and would land out of its group): plan only once every space on
     // the machine has one, looking again for the new ones a few times.
-    for (let round = 0; round < 3; round++) {
+    for (let round = 0; round <= 3; round++) {
       const all = spaces();
       const shown = all.find((s) => s.active);
       if (!shown) return;
@@ -104,6 +104,7 @@ export default class SpaceGroups extends View {
         for (const call of moves(all, git, shown.id, by)) run("space.move", call);
         return;
       }
+      if (round === 3) break; // three rounds of lookups, each checked
       // A few at a time, as the spaces list does: hundreds at once run out of open
       // files or a machine core's running execs.
       for (let i = 0; i < missing.length; i += AT_ONCE) {
@@ -124,20 +125,22 @@ export default class SpaceGroups extends View {
 }
 
 // The repo a folder is in ({ repo: its common .git, linked: a worktree }), or
-// null when it is in none. Throws when git couldn't answer (timed out, failed,
-// unreachable machine): reading that as "no repo" would split a group.
+// null when it is in none or is gone (git's exit 128, in any language). Throws
+// when git couldn't answer (timed out, not installed, unreachable machine):
+// reading that as "no repo" would split a group.
 async function repo(cwd, on) {
   if (!cwd) return null;
   let r;
   try {
     // One call: the git dir and the common dir differ only in a linked worktree
-    // (a submodule's are the same, so it isn't taken for one).
-    r = await exec("git", ["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"], { cwd, on: on ?? null, timeout: 5000 });
+    // (a submodule's are the same, so it isn't taken for one). `-C`, not `cwd`:
+    // a deleted folder is then git's "cannot change to", not a failed start.
+    r = await exec("git", ["-C", cwd, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"], { on: on ?? null, timeout: 5000 });
   } catch (e) {
     throw new Error(`git couldn't look at ${cwd}: ${e?.message ?? e}`);
   }
   if (r.code !== 0) {
-    if (/not a git repository/i.test(r.stderr)) return null;
+    if (r.code === 128 && !r.stdout.trim()) return null;
     throw new Error(`git couldn't look at ${cwd}: ${r.stderr.trim() || `exit ${r.code}`}`);
   }
   const [dir, common] = r.stdout.split("\n");

@@ -115,6 +115,9 @@ pub struct Queue {
     /// The terminal's turn when its label was first seen. A later turn means
     /// the agent worked since, even if no tick saw it working.
     label_turn: HashMap<String, u64>,
+    /// Terminals whose label [`Queue::labels_to_clear`] took off because the
+    /// agent worked: that label's going is not [`Queue::handled`].
+    worked_off: BTreeSet<String>,
 }
 
 static QUEUE: Mutex<Option<Queue>> = Mutex::new(None);
@@ -131,7 +134,7 @@ impl Queue {
     pub fn word(&mut self, addr: &str, rec: &Value) -> Option<String> {
         if label_blocks(rec) {
             self.labeled.insert(addr.to_owned());
-        } else if self.labeled.remove(addr) && !matches!(rec.get("status").and_then(Value::as_str), Some("working" | "blocked" | "error")) {
+        } else if self.labeled.remove(addr) && !self.worked_off.remove(addr) && !matches!(rec.get("status").and_then(Value::as_str), Some("working" | "blocked" | "error")) {
             self.handled.insert(addr.to_owned());
         }
         word(rec)
@@ -153,6 +156,7 @@ impl Queue {
         self.clearing.retain(|a| live.get(a).is_some_and(|r| attention(r).is_some()));
         self.labeled.retain(|a| live.contains_key(a));
         self.handled.retain(|a| live.contains_key(a));
+        self.worked_off.retain(|a| live.contains_key(a));
         self.retry_at.retain(|a, at| *at > now && live.contains_key(a));
         self.label_turn.retain(|a, _| live.get(a).is_some_and(|r| attention(r).is_some()));
         let mut out = Vec::new();
@@ -164,6 +168,7 @@ impl Queue {
             let first = *self.label_turn.entry(addr.clone()).or_insert(turn.unwrap_or(0));
             let worked = rec.get("status").and_then(Value::as_str) == Some("working") || turn.is_some_and(|t| t > first);
             if worked && !self.retry_at.contains_key(addr) && self.clearing.insert(addr.clone()) {
+                self.worked_off.insert(addr.clone());
                 out.push(addr.clone());
             }
         }
@@ -334,7 +339,11 @@ mod tests {
         assert!(q.labels_to_clear(&live, 500).is_empty());
         // Done, working, done between two ticks: the turn moved on, so it goes.
         live.insert("t1".to_owned(), with_turn("done", 5));
+        q.word("t1", &live["t1"]);
         assert_eq!(q.labels_to_clear(&live, 1_000), vec!["t1".to_owned()]);
+        // The label gone, the agent at rest: that turn's finish is still news.
+        q.word("t1", &rec("done", None, None));
+        assert!(!q.handled("t1"), "a label cleared because the agent worked is not dealt with");
     }
 
     #[test]

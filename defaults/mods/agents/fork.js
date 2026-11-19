@@ -36,8 +36,10 @@ function byAddress(all) {
 }
 // Any process can set a label or a name, so a value is drawn on one line with
 // control, bidi and invisible characters dropped, and cut to `max` characters.
-// ZWJ and ZWNJ stay: they join emoji (👨‍👩‍👧) and spell words (Persian).
-const DROP = /[\u0000-\u001f\u007f-\u009f\u061c\u200b\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]+/g;
+// ZWJ and ZWNJ stay: they join emoji (👨‍👩‍👧) and spell words (Persian); so do
+// variation selectors (❤️). Tag characters go: they hide text, at the cost of
+// subdivision flags. outside-agents drops the same set.
+const DROP = /[\u0000-\u001f\u007f-\u009f\u00ad\u034f\u061c\u115f\u1160\u180e\u200b\u200e\u200f\u2028-\u202e\u2060-\u2064\u2066-\u206f\u3164\ufeff\uffa0\ufff9-\ufffb\u{e0000}-\u{e007f}]+/gu;
 // Code points that belong to the one before them: a cut never ends just before one.
 const JOINED = /^[\p{M}\u200d\ufe0e\ufe0f\u{1f3fb}-\u{1f3ff}\u{e0020}-\u{e007f}]$/u;
 const segmenter = typeof Intl !== "undefined" && typeof Intl.Segmenter === "function" ? new Intl.Segmenter() : null;
@@ -138,16 +140,15 @@ export function groups(id, built, pinnedGroups, rest, all) {
 export function withTask(row, a, all, t, collapsed) {
   const task = collapsed ? null : taskOf(all, a.address);
   if (!task) return row;
+  // The row paints and clicks for itself; the task line does the same for its
+  // own strip, so nothing is painted (or focused) twice.
   return div()
     .id(`with-task-${a.address}`)
     .flex_none()
-    .rounded(8)
-    .when(a.focused, (el) => el.bg(t.selected))
-    .hover((s) => s.bg(t.hover))
-    .cursor_pointer()
-    .on_click(() => run("pane.focus", { pane: a.pane }))
     .child(row)
-    .child(div().id(`task-${a.address}`).pl(a.program?.icon ? 33 : 8).pr(8).pb(4).mt(-4).text_size(11.5).truncate().text_color(t.dim).child(task));
+    .child(div().id(`task-${a.address}`).rounded(8).when(a.focused, (el) => el.bg(t.selected)).hover((s) => s.bg(t.hover)).cursor_pointer()
+      .on_click(() => run("pane.focus", { pane: a.pane }))
+      .pl(a.program?.icon ? 33 : 8).pr(8).pb(4).mt(-4).text_size(11.5).truncate().text_color(t.dim).child(task));
 }
 
 // The row's detail: a tab the person named, when the agent is alone in it;
