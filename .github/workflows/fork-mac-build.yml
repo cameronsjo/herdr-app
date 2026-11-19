@@ -84,7 +84,7 @@ jobs:
     needs: build
     if: github.ref == 'refs/heads/master'
     runs-on: macos-15
-    timeout-minutes: 45
+    timeout-minutes: 80
     environment: apple-signing
     permissions:
       contents: read

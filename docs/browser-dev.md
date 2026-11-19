@@ -431,8 +431,11 @@ hardened runtime (the four entitlements in
 `scripts/fork/macos-entitlements.plist`), notarized and stapled, with the
 bundle id `dev.herdr.app.browser-daily`; `scripts/fork/daily-update` and
 `scripts/browser-daily on` install it without re-signing once
-`codesign`, `spctl` and `stapler validate` pass, and re-sign anything else
-ad hoc.
+`codesign`, `spctl` and `stapler validate` pass. A build with the fork's
+signature that fails the `spctl` or `stapler` check is held: `daily-update`
+leaves the installed app and tries again at its next check, while
+`browser-daily on` (which has already quit the app) re-signs it ad hoc.
+Anything else is re-signed ad hoc.
 
 ### Dev-only switch (automated tests only)
 

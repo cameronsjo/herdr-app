@@ -6,7 +6,7 @@
 #                                                 xcrun notarytool store-credentials <name>
 #
 # Refuses an app not signed by the fork's team. Submits a zip of it, waits up
-# to 30 minutes, always prints Apple's log (and adds it to the GitHub step
+# to 60 minutes (Apple: usually far less), always prints Apple's log (and adds it to the GitHub step
 # summary), then staples the ticket to the app and validates it. It does not
 # zip the stapled result; the caller does.
 # Exit: 0 accepted and stapled; 1 refused, rejected, timed out, or a step
@@ -78,7 +78,7 @@ say "submitted $name as $id"
 
 # wait and its status separately, so a timeout still leaves time for the log.
 wait_rc=0
-xcrun notarytool wait "$id" "${auth[@]}" --timeout 30m --output-format json > "$work/wait.json" || wait_rc=$?
+xcrun notarytool wait "$id" "${auth[@]}" --timeout 60m --output-format json > "$work/wait.json" || wait_rc=$?
 status=$(jq -r '.status // "unknown"' "$work/wait.json" 2>/dev/null || true)
 status=${status:-unknown}
 {

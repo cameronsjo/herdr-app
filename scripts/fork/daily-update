@@ -181,10 +181,13 @@ genuine_devid() {
   xcrun stapler validate "$app" >/dev/null 2>&1 || return 2
   devid_why=
 }
+# The installed copy's code identity, which is what macOS keys camera,
+# microphone and keychain grants on: the signature, not the notarization.
 signature_kind() {
-  if [[ ! -d $1 ]]; then echo none
-  elif genuine_devid "$1"; then echo "Developer ID"
-  else echo "ad hoc"; fi
+  local rc=0
+  [ -d "$1" ] || { echo none; return 0; }
+  genuine_devid "$1" || rc=$?
+  if [ "$rc" -eq 1 ]; then echo "ad hoc"; else echo "Developer ID"; fi
 }
 
 # Same steps as browser-daily on, minus quitting and opening. A genuine
