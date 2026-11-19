@@ -116,6 +116,8 @@ case "${1:-}" in
       else
         # The app is already quit, so even a Developer ID build that fails the
         # notarization check is re-signed ad hoc rather than left uninstalled.
+        # `daily-update apply` comes through here too; only daily-update's
+        # unattended install holds such a build back for the next check.
         [ "$rc" -eq 2 ] && echo "browser-daily: $devid_why; signing it ad hoc instead" >&2
         # WebKit keeps the person's cookies and storage per bundle id: its own
         # id keeps them apart from the dev app's (CEF keeps them per app home).
