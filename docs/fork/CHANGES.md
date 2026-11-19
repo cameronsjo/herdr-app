@@ -225,6 +225,7 @@ TUI: the palette listed plugin commands and chose a direction in one step. Shipp
 - A direction row used before this change ("Split right") drops out of Recent; choosing a family row puts that row there instead.
 - The mods folder is listed with `fs.readdir`, falling back to `ls` or `dir` when the app home sits outside the home folder (as `outside-agents` does). Each direction tile shows its own key from `keys.json`, as the palette's rows did.
 - Seams: `src/mods/render_tests.rs` gets two `FORK(palette)` lines, the `mod fork_palette` line for `src/mods/render_tests/fork_palette.rs` and an `ls` reply in the fixture host. Sync: an upstream rewrite of the palette's `entries()`, `rows()` or `go()` means re-placing each marked line; `scripts/fork-mods.test.ts` and `fork_palette` fail if one goes missing.
+- Follow-ups (cameronsjo/herdr-app#47): a direction run from the chooser now reaches Recent: `pick-direction` leaves its row's id in shared `fork.palette.picked`, and the palette's next open puts it first in place of the family row, once per pick (the palette's init seam line gains `fork.withPicked`). An arrow picks on release, so a held arrow's repeats stay in the chooser instead of reaching the terminal after it closes. Only the newest of overlapping `load()`s sets the list. A command name over 80 characters is refused instead of cut to a shorter name; titles are still cut. `load()` has tests of its own (the `ls` fallback, the 64 KB cap, app namespaces).
 
 ### Move a tab to another space, and merge spaces (cameronsjo/herdr-app#15)
 

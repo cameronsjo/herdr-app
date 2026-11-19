@@ -4,7 +4,7 @@
 
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { run, props, closeOverlay, theme, keys } from "herdr";
+import { run, props, closeOverlay, theme, keys, setShared } from "herdr";
 
 const ARROWS = { left: "←", up: "↑", down: "↓", right: "→" };
 const ORDER = ["left", "up", "down", "right"];
@@ -26,7 +26,11 @@ export default class PickDirection extends View {
     const p = props();
     closeOverlay(p.overlay);
     // Only the palette's direction commands, whoever opened this.
-    if (COMMANDS.has(p.command) && ORDER.includes(direction)) run(p.command, { direction });
+    if (!COMMANDS.has(p.command) || !ORDER.includes(direction)) return;
+    run(p.command, { direction });
+    // The palette puts this row in Recent next time it opens (its id is
+    // `<name>:<args as JSON>`), in place of the family row.
+    setShared("fork.palette.picked", { id: `${p.command}:${JSON.stringify({ direction })}`, family: `${p.command}:family`, at: Date.now() });
   }
 
   render() {
@@ -57,11 +61,19 @@ export default class PickDirection extends View {
     return v_flex()
       .id("pick-direction")
       .track_focus(this.handle)
+      // An arrow picks when it is let go: held down, its repeats land here, not
+      // in the terminal that gets the keyboard once this closes.
       .on_key_down((e, cx) => {
         if (e.key === "escape") closeOverlay(props().overlay);
-        else if (dirs.includes(e.key)) this.pick(e.key);
+        else if (dirs.includes(e.key)) this.held = e.key;
         else return;
         cx.stop_propagation();
+      })
+      .on_key_up((e, cx) => {
+        if (!dirs.includes(e.key) || this.held !== e.key) return;
+        this.held = null;
+        cx.stop_propagation();
+        this.pick(e.key);
       })
       .size_full()
       .min_h(0)

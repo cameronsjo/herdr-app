@@ -143,7 +143,7 @@ export default class Palette extends View {
     this.scroll = 0;
     this.recent = JSON.parse(localStorage.getItem("recent") ?? "[]");
     this.handle = cx.focus_handle();
-    cx.spawn(async (cx) => fork.load(() => cx.notify())); // FORK(palette)
+    this.recent = fork.withPicked(this.recent); cx.spawn(async (cx) => fork.load(() => cx.notify())); // FORK(palette): a picked direction joins Recent; read mods' commands
   }
 
   close() {

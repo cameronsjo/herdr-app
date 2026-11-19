@@ -538,10 +538,12 @@ test("agents: outside agents and the empty message", async () => {
   expect(empty("priority", false, undefined)).toBeNull();
 });
 
-async function loadPalette(listed: any[] = []) {
+// `env`: stand-ins for the herdr imports and localStorage that load() and withPicked() use.
+async function loadPalette(listed: any[] = [], env: Record<string, unknown> = {}) {
   const source = (await readFile(new URL("../defaults/frame/palette/fork.js", import.meta.url), "utf8"))
     .replace(/^import [^;]*;\n/gm, "").replace(/^export /gm, "").replace("let listed = [];", "let listed = __listed;");
-  return new Function("__listed", "openOverlay", `${source}; return { commandsOf, entries, go, listable, text };`)(listed, (o: any) => opened.push(o));
+  const all = { appHome: () => "/h/.config/herdr-app", commands: () => [{ name: "pane.split" }, { name: "app.quit" }], readTextFile: async () => null, exec: async () => ({ code: 1, stdout: "", stderr: "" }), win: () => ({ platform: "linux" }), fs: { readdir: async () => [] }, shared: () => null, localStorage: { getItem: () => null, setItem: () => {} }, ...env };
+  return new Function("__listed", "openOverlay", ...Object.keys(all), `${source}; return { commandsOf, entries, go, listable, text, load, withPicked, current: () => listed };`)(listed, (o: any) => opened.push(o), ...Object.values(all));
 }
 const opened: any[] = [];
 const entry = (name: string, args: any = {}, group = "Pane") => ({ name, args, group, title: name, words: "", id: `${name}:${JSON.stringify(args)}` });
@@ -561,6 +563,65 @@ test("palette: a mod lists only its own commands", async () => {
   expect(commandsOf("x", { commands: "nope" })).toEqual([]);
   expect(commandsOf("x", null)).toEqual([]);
   expect(commandsOf("x", { commands: [{ command: "x.y", title: "Quit\n\u202eHerdr" }] })[0].title).toBe("Quit Herdr");
+});
+
+test("palette: a command name over 80 characters is refused, not cut to another", async () => {
+  const { commandsOf } = await loadPalette();
+  const long = `m.${"a".repeat(79)}`;
+  expect(commandsOf("m", { commands: [{ command: long }, { command: long.slice(0, 80) }] }).map((c: any) => c.name)).toEqual([long.slice(0, 80)]);
+  // A title is cut, not refused.
+  expect(commandsOf("m", { commands: [{ command: "m.x", title: "t".repeat(100) }] })[0].title).toHaveLength(60);
+});
+
+test("palette: load() reads each mod's mod.json, falls back to ls, and skips a big one", async () => {
+  const files: Record<string, string> = {
+    "/h/.config/herdr-app/mods/open-folder/mod.json": JSON.stringify({ commands: [{ command: "open-folder.pick", title: "Open folder…" }] }),
+    "/h/.config/herdr-app/mods/big/mod.json": JSON.stringify({ commands: [{ command: "big.x" }], pad: "p".repeat(70000) }),
+    "/h/.config/herdr-app/mods/pane/mod.json": JSON.stringify({ commands: [{ command: "pane.x" }] }),
+  };
+  const lsCalls: string[][] = [];
+  const env = {
+    fs: { readdir: async () => { throw new Error("outside the home folder"); } },
+    exec: async (cmd: string, args: string[]) => { lsCalls.push([cmd, ...args]); return { code: 0, stdout: "open-folder\nbig\npane\n.hidden\n", stderr: "" }; },
+    readTextFile: async (p: string) => files[p] ?? null,
+  };
+  const { load, current } = await loadPalette([], env);
+  let done = 0;
+  await load(() => done++);
+  expect(done).toBe(1);
+  expect(lsCalls).toEqual([["ls", "-1A", "--", "/h/.config/herdr-app/mods"]]);
+  // pane is an app namespace; big's mod.json is over 64 KB.
+  expect(current().map((c: any) => c.name)).toEqual(["open-folder.pick"]);
+});
+
+test("palette: a load an open after it overtook changes nothing", async () => {
+  let release: () => void = () => {};
+  const slow = new Promise<void>((r) => (release = r));
+  let first = true;
+  const env = {
+    fs: { readdir: async () => { if (first) { first = false; await slow; return ["old"]; } return ["new"]; } },
+    readTextFile: async (p: string) => JSON.stringify({ commands: [{ command: `${p.split("/").at(-2)}.go` }] }),
+  };
+  const { load, current } = await loadPalette([], env);
+  const older = load(() => {});
+  await load(() => {});
+  release();
+  await older;
+  expect(current().map((c: any) => c.name)).toEqual(["new.go"]);
+});
+
+test("palette: a direction run from the chooser joins Recent once, in place of its family row", async () => {
+  const store: Record<string, string> = {};
+  const localStorage = { getItem: (k: string) => store[k] ?? null, setItem: (k: string, v: string) => { store[k] = v; } };
+  let picked: unknown = { id: 'pane.split:{"direction":"right"}', family: "pane.split:family", at: 5 };
+  const { withPicked } = await loadPalette([], { localStorage, shared: () => picked });
+  const recent = withPicked(["pane.split:family", "app.quit:{}"]);
+  expect(recent).toEqual(['pane.split:{"direction":"right"}', "app.quit:{}"]);
+  expect(JSON.parse(store.recent)).toEqual(recent);
+  // The same pick again: Recent as the palette left it.
+  expect(withPicked(["app.quit:{}", 'pane.split:{"direction":"right"}'])).toEqual(["app.quit:{}", 'pane.split:{"direction":"right"}']);
+  picked = { id: 7 };
+  expect(withPicked(["x"])).toEqual(["x"]);
 });
 
 test("palette: a folder named like the app's commands lists none", async () => {
