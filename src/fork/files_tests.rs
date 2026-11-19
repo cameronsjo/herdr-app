@@ -26,3 +26,21 @@ fn a_planted_fsmonitor_never_runs() {
     let _ = std::fs::remove_dir_all(&root);
     assert!(!planted, "watchFolder's git calls ran the folder's core.fsmonitor");
 }
+
+#[test]
+fn a_planted_pipe_in_a_watched_repo_never_hangs_the_watch() {
+    // The app home inside a repo (dotfiles): git walks into outside-agents/
+    // and opens its .gitignore, which an agent made a pipe.
+    let root = crate::test_tmp().join(format!("herdr-fork-fifo-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let folder = root.join("home/outside-agents");
+    std::fs::create_dir_all(&folder).unwrap();
+    let git = std::process::Command::new("git").args(["-c", "maintenance.auto=false", "-c", "gc.auto=0"]).arg("-C").arg(&root).args(["init", "-q", "."]).output().unwrap();
+    assert!(git.status.success());
+    assert!(std::process::Command::new("mkfifo").arg(folder.join(".gitignore")).status().unwrap().success());
+    let start = std::time::Instant::now();
+    let _ = watch_directories(&root);
+    let took = start.elapsed();
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(took < crate::fork::untrusted::GIT_DEADLINE * 3, "watchFolder's git waited on a pipe: {took:?}");
+}

@@ -4,6 +4,45 @@
 //! named like one) checks here first and leaves that folder alone.
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+/// How long `watchFolder`'s git calls may take before they are stopped.
+pub const GIT_DEADLINE: Duration = Duration::from_secs(5);
+
+/// `command`'s output, or None when it can't start or runs past `deadline`
+/// (then it is killed). A git call reads ignore files in every untracked
+/// folder it walks, so one inside a watched repo (`outside-agents/`, when the
+/// app home sits in a repo) can plant a pipe that would hang it for good.
+pub fn output_within(command: &mut std::process::Command, deadline: Duration) -> Option<std::process::Output> {
+    use std::io::Read;
+    use std::process::Stdio;
+    let mut child = command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().ok()?;
+    // Read both pipes on threads, so a full pipe never stalls the child.
+    let drain = |pipe: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut out = Vec::new();
+            if let Some(mut p) = pipe {
+                let _ = p.read_to_end(&mut out);
+            }
+            out
+        })
+    };
+    let stdout = drain(child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+    let stderr = drain(child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+    let start = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if start.elapsed() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
+    Some(std::process::Output { status, stdout: stdout.join().ok()?, stderr: stderr.join().ok()? })
+}
 
 /// True when `path` is the app's `outside-agents/` folder or anything in it.
 pub fn untrusted_folder(path: &Path) -> bool {
@@ -35,16 +74,30 @@ pub fn open_plain(path: &Path) -> std::io::Result<std::fs::File> {
     Ok(file)
 }
 
-// libc's O_NONBLOCK, without the dependency on Linux. Reads of a plain file
+// libc's O_NONBLOCK, without the dependency on Linux, for the targets the
+// fork ships (other Unix targets open without it). Reads of a plain file
 // ignore it.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))]
 const O_NONBLOCK: i32 = 0o4000;
-#[cfg(all(unix, not(target_os = "linux")))]
+#[cfg(target_os = "macos")]
 const O_NONBLOCK: i32 = 0x0004;
+#[cfg(not(any(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")), target_os = "macos")))]
+const O_NONBLOCK: i32 = 0;
 
 #[cfg(test)]
 mod tests {
     use super::{open_plain, within};
+
+    #[cfg(unix)]
+    #[test]
+    fn a_command_past_its_deadline_is_stopped() {
+        let start = std::time::Instant::now();
+        assert!(super::output_within(std::process::Command::new("sleep").arg("30"), std::time::Duration::from_millis(200)).is_none());
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
+        let out = super::output_within(std::process::Command::new("echo").arg("hi"), super::GIT_DEADLINE).unwrap();
+        assert!(out.status.success());
+        assert_eq!(out.stdout, b"hi\n");
+    }
 
     #[cfg(unix)]
     #[test]

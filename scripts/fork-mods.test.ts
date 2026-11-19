@@ -493,6 +493,7 @@ test("outside-agents reads only the plain files right in its folder", async () =
   // The folder itself in a batch: the watch overflowed, so everything is news.
   expect(changedNames([`${dir}/x.json`, dir])).toBeNull();
   expect(changedNames([`${dir}/`])).toBeNull();
+  expect([...changedNames([`${dir}/outside-agents`])]).toEqual(["outside-agents"]);
 });
 
 test("outside-agents never takes part of a strange name for an agent file", async () => {

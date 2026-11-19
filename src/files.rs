@@ -236,8 +236,8 @@ mod linux {
         if crate::fork::untrusted::untrusted_folder(root) {
             return HashSet::new();
         }
-        // FORK(outside-agents): nor may any watched repo's core.fsmonitor run. (Before git 2.36 the setting was a hook path, so `false` runs /usr/bin/false: harmless.)
-        let Ok(output) = std::process::Command::new("git").args(["-c", "core.fsmonitor=false"]).arg("-C").arg(root).args(["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"]).output() else {
+        // FORK(outside-agents): nor may any watched repo's core.fsmonitor run, and git stops after GIT_DEADLINE: a repo holding the app home walks into outside-agents/ (a planted pipe). (Before git 2.36 the setting was a hook path, so `false` runs /usr/bin/false: harmless.)
+        let Some(output) = crate::fork::untrusted::output_within(std::process::Command::new("git").args(["-c", "core.fsmonitor=false"]).arg("-C").arg(root).args(["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"]), crate::fork::untrusted::GIT_DEADLINE) else {
             return HashSet::new();
         };
         if !output.status.success() {
@@ -255,9 +255,9 @@ mod linux {
         let ignored = ignored_directories(root);
         let mut paths = HashSet::from([root.to_path_buf()]);
         let mut git_roots = HashSet::new();
-        // FORK(outside-agents): no git in the agents' folder, and core.fsmonitor off, as above.
+        // FORK(outside-agents): no git in the agents' folder, core.fsmonitor off and a deadline, as above.
         if !crate::fork::untrusted::untrusted_folder(root)
-            && let Ok(output) = std::process::Command::new("git").args(["-c", "core.fsmonitor=false"]).arg("-C").arg(root).args(["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"]).output()
+            && let Some(output) = crate::fork::untrusted::output_within(std::process::Command::new("git").args(["-c", "core.fsmonitor=false"]).arg("-C").arg(root).args(["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"]), crate::fork::untrusted::GIT_DEADLINE)
             && output.status.success()
         {
             for line in output.stdout.split(|b| *b == b'\n').filter(|p| !p.is_empty()) {

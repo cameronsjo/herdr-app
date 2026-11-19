@@ -101,7 +101,9 @@ function live(agents, now) {
 // watched folder itself, not a folder inside it. Null when the batch names the
 // folder itself: the watch overflowed, so every file may have changed.
 const changedNames = (paths) => {
-  if (paths.some((p) => p.replace(/[\\/]+$/, "").split(/[\\/]/).pop() === DIR)) return null;
+  // (A folder named like it inside it is just a folder in it.)
+  const parts = (p) => p.replace(/[\\/]+$/, "").split(/[\\/]/);
+  if (paths.some((p) => parts(p).at(-1) === DIR && parts(p).at(-2) !== DIR)) return null;
   return new Set(paths.filter((p) => p.split(/[\\/]/).at(-2) === DIR).map((p) => p.split(/[\\/]/).pop()));
 };
 

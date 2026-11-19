@@ -134,8 +134,13 @@ impl Queue {
     pub fn word(&mut self, addr: &str, rec: &Value) -> Option<String> {
         if label_blocks(rec) {
             self.labeled.insert(addr.to_owned());
-        } else if self.labeled.remove(addr) && !self.worked_off.remove(addr) && !matches!(rec.get("status").and_then(Value::as_str), Some("working" | "blocked" | "error")) {
-            self.handled.insert(addr.to_owned());
+        } else {
+            // A label taken off because the agent worked is never dealt with;
+            // forgotten here either way, so it can't outlive its label.
+            let worked = self.worked_off.remove(addr);
+            if self.labeled.remove(addr) && !worked && !matches!(rec.get("status").and_then(Value::as_str), Some("working" | "blocked" | "error")) {
+                self.handled.insert(addr.to_owned());
+            }
         }
         word(rec)
     }
@@ -168,7 +173,9 @@ impl Queue {
             let first = *self.label_turn.entry(addr.clone()).or_insert(turn.unwrap_or(0));
             let worked = rec.get("status").and_then(Value::as_str) == Some("working") || turn.is_some_and(|t| t > first);
             if worked && !self.retry_at.contains_key(addr) && self.clearing.insert(addr.clone()) {
-                self.worked_off.insert(addr.clone());
+                if self.labeled.contains(addr) {
+                    self.worked_off.insert(addr.clone());
+                }
                 out.push(addr.clone());
             }
         }
@@ -344,6 +351,27 @@ mod tests {
         // The label gone, the agent at rest: that turn's finish is still news.
         q.word("t1", &rec("done", None, None));
         assert!(!q.handled("t1"), "a label cleared because the agent worked is not dealt with");
+        // A later label the person deals with while the agent rests is handled.
+        q.word("t1", &rec("done", None, Some("run Y")));
+        q.word("t1", &rec("done", None, None));
+        assert!(q.handled("t1"), "nothing from the last label lingers");
+    }
+
+    #[test]
+    fn a_label_cleared_while_working_leaves_nothing_behind() {
+        // word() runs before labels_to_clear in a tick: a working agent's label
+        // no longer blocks, so it was never one the queue showed.
+        let mut q = Queue::default();
+        let mut live = HashMap::new();
+        q.word("t1", &rec("done", None, Some("run X")));
+        live.insert("t1".to_owned(), rec("working", None, Some("run X")));
+        q.word("t1", &live["t1"]);
+        assert_eq!(q.labels_to_clear(&live, 0), vec!["t1".to_owned()]);
+        q.word("t1", &rec("done", None, None));
+        // The next label, dealt with while the agent rests: no Done alert.
+        q.word("t1", &rec("done", None, Some("run Y")));
+        q.word("t1", &rec("done", None, None));
+        assert!(q.handled("t1"));
     }
 
     #[test]
