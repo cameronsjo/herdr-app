@@ -57,6 +57,10 @@ jobs:
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: ${{ env.ZIG_VERSION }}
+          # On by default: it restores and saves the global Zig cache under a
+          # key shared with release.yml's `build` job, and that cache's
+          # packages and objects end up in the notarized binary.
+          use-cache: false
       - name: Build the WebKit bundle
         run: scripts/browser-dev-bundle --webkit
       - name: Pack
@@ -164,7 +168,7 @@ jobs:
           set -euo pipefail
           codesign --verify --deep --strict "$APP"
           if [[ $HAS_CERT != true ]]; then exit 0; fi
-          codesign --verify --strict -R "=anchor apple generic and certificate leaf[subject.OU] = \"$TEAM\" and identifier \"$DAILY_ID\"" "$APP"
+          codesign --verify --strict -R "=anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = \"$TEAM\" and identifier \"$DAILY_ID\"" "$APP"
           info=$(codesign -dvv "$APP" 2>&1)
           echo "$info"
           [[ $info =~ flags=0x[0-9a-f]+\([^\)]*runtime ]] || { echo "::error::no hardened runtime flag"; exit 1; }

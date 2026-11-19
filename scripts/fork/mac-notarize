@@ -34,7 +34,7 @@ summary=${GITHUB_STEP_SUMMARY:-/dev/null}
 say() { printf 'mac-notarize: %s\n' "$*" >&2; }
 
 # Only the fork's own Developer ID signature goes to Apple under its account.
-requirement="=anchor apple generic and certificate leaf[subject.OU] = \"$team\""
+requirement="=anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = \"$team\""
 codesign --verify --strict -R "$requirement" "$app" ||
   { say "$app is not signed by Developer ID team $team; refusing to submit it"; exit 1; }
 

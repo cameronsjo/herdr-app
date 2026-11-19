@@ -40,7 +40,7 @@ fork_team=5H883FMW6H
 genuine_devid() {
   local app=$1
   codesign --verify --deep --strict \
-    -R "=anchor apple generic and certificate leaf[subject.OU] = \"$fork_team\" and identifier \"$daily_id\"" "$app" >/dev/null 2>&1 || return 1
+    -R "=anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = \"$fork_team\" and identifier \"$daily_id\"" "$app" >/dev/null 2>&1 || return 1
   [[ "$(spctl -a -t exec -vv "$app" 2>&1)" == *"source=Notarized Developer ID"* ]] || return 1
   xcrun stapler validate "$app" >/dev/null 2>&1
 }
@@ -93,9 +93,12 @@ case "${1:-}" in
     run ditto "$src" "$daily"
     now="ad hoc"  # the CEF bundle is only ever built and signed ad hoc locally
     if [ "$bundle" = browser-dev-webkit ]; then
-      # ditto keeps the signature, so the source decides (the copy may not
-      # exist under DRY_RUN).
-      if genuine_devid "$src"; then
+      # Check the copy that runs, not the source, which a daily-update run
+      # can replace meanwhile. Under DRY_RUN there is no copy: check the
+      # source to show which path a real run would take.
+      checked=$daily
+      [ "${DRY_RUN:-}" = 1 ] && checked=$src
+      if genuine_devid "$checked"; then
         echo "keeping its Developer ID signature (notarized, bundle id $daily_id)"
         now="Developer ID"
       else
