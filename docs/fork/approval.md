@@ -44,12 +44,15 @@ herdr-app approval answer t3 approve --token 9f2c4e…
 - `answer` reads the status and the screen again and presses the option's
   number key (`terminal.keys`) only if the terminal is still blocked and
   the token still matches. The answer is a number, `approve` or `deny`.
-  `approve` is the one option that starts with yes, allow or approve and
-  grants nothing beyond this once: an option that says always, don't ask
-  again, session, all, bypass, auto-accept, auto mode or accept edits is
-  never `approve`. When
-  several plain options match, only a bare `Yes` counts; otherwise give the
-  number. `deny` is the one that starts with no, deny or reject. On a prompt
+  `approve` is the one option whose whole label is a one-time yes: `Yes`,
+  `Allow`, `Approve`, `Proceed`, `Allow once`, `Yes, proceed`, `Yes, just
+  this once` and a few more (`ONCE` in the code), ignoring case, a trailing
+  key hint such as `(y)` and a full stop. Any other label, a grant this list
+  doesn't know or one cut short, needs its number, so `approve` fails
+  closed. When several match, only a bare `Yes`, `Allow` or `Approve`
+  counts; otherwise give the number. `deny` is the one that starts with no,
+  deny or reject and sets nothing for later (not "No, and block this host
+  in the future"). On a prompt
   that isn't `complete`, `approve` and `deny` refuse: read it in its pane
   and give the number. A `question` takes only a number.
 - `answer --wait <secs>` stops waiting for the key after that long and
@@ -85,11 +88,17 @@ herdr-app approval answer t3 approve --token 9f2c4e…
   when the core says the agent was no longer blocked, or its turn (the core
   counts one each time the program's status leaves `working`) had moved
   on. It can't catch an agent that goes from one prompt straight to the
-  next without reporting `working` in between, and it can't take a key
+  next without reporting `working` in between (Claude Code does with
+  parallel tool calls: if a person answers the first prompt in the pane
+  while the key waits, the key answers the second, and `answer` still
+  exits 0 with the first prompt's label), and it can't take a key
   back. herdr-core would close this by cancelling a `terminal.keys` call
   when its connection closes (as it does for `terminal.send`) and by
   pressing only if the turn still matches; it does neither today, and that
   change belongs upstream.
+- A program that reports no `kind` is read from its screen alone, so
+  `approve` and `deny` work on any numbered menu it draws, including a
+  question the model wrote to look like a permission prompt.
 - Any process running as you can call this, as it already can call
   `hc keys`. An agent told to unblock another agent could approve that
   agent's prompt this way; only answer prompts you've read.
