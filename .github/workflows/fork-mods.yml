@@ -18,7 +18,12 @@ concurrency:
 
 jobs:
   fork-mods:
-    runs-on: ubuntu-latest
+    # Windows too: open-folder's Windows paths are otherwise only checked on Linux.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -29,5 +34,7 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.4.4
+          # A master job writes no cache the Mac build could restore.
+          no-cache: true
       - name: Test the fork's mods
         run: bun test scripts/fork-mods.test.ts scripts/fork/

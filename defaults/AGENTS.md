@@ -974,7 +974,9 @@ has 124 programs (agents, editors, runtimes, tools, databases, infra);
   by the old name follows a new one).
   Run the commands with `herdr-app do <mod>.<command>`, `run(...)` or a `keys.json`
   binding. Herdr restores a deleted shipped mod at start. Only the shipped folders run
-  this way: a `mod.clone` copy runs where a layout block names it.
+  this way: a `mod.clone` copy runs where a layout block names it. Don't also name one
+  of these in a layout block: that copy gets every command too, so `open-folder` would
+  make two spaces for one folder.
 - Extra environment variables for one agent (macOS and Linux): put `env` first in its
   argv, `tab.new {argv: ["env", "API_MODE=dev", "claude"]}`. Values show in the terminal's
   argv (`hc ls`), so keep secrets out.

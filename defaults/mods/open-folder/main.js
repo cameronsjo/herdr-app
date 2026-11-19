@@ -10,14 +10,20 @@
 // no block of its own (src/window/fork_mods.rs).
 
 import { View, div } from "gpui-kit";
-import { spaces, panes, run, pickFolder, home, notify, nextCommand, checking, window } from "herdr";
+import { spaces, panes, run, exec, pickFolder, home, notify, nextCommand, checking, window } from "herdr";
 
 // The folder as spaces() and panes() report it: ~ expanded, no trailing
 // separator (a root keeps its own). `win`: Windows, where \ separates too.
+// Spaces are kept: a folder's name may end in one. Blank is "".
 function normal(path, homeDir, win = false) {
   const sep = win ? /[\\/]+$/ : /\/+$/;
-  let p = String(path ?? "").trim();
-  if (p === "~" || p.startsWith("~/") || (win && p.startsWith("~\\"))) p = (homeDir.replace(sep, "") || homeDir.trim().slice(0, 1)) + p.slice(1);
+  let p = String(path ?? "");
+  if (!p.trim()) return "";
+  if (p === "~" || p.startsWith("~/") || (win && p.startsWith("~\\"))) {
+    // A home of / strips to "": ~/x is then /x, not //x.
+    const base = homeDir.replace(sep, "");
+    p = p === "~" ? base || homeDir.trim().slice(0, 1) : base + p.slice(1);
+  }
   const stripped = p.replace(sep, "");
   if (stripped) p = stripped;
   else if (p) p = p[0];
@@ -38,18 +44,31 @@ const key = (p, homeDir, win) => {
 };
 
 // The first of this computer's spaces in `folder` (made there, else its first
-// terminal is there now), or null.
-function existing(folder, all, ps, homeDir, win = false) {
-  const want = key(folder, homeDir, win);
-  if (!want) return null;
+// terminal is there now), or null. `resolved`: the folder with symlinks
+// resolved (/tmp is /private/tmp on macOS), which counts as the same folder.
+function existing(folder, all, ps, homeDir, win = false, resolved = null) {
+  const want = new Set([folder, resolved].filter((f) => f).map((f) => key(f, homeDir, win)).filter((k) => k));
+  if (!want.size) return null;
   const local = all.filter((s) => (s.machine ?? null) === null);
   const first = (s) => {
     const tabs = new Set((s.tabs ?? []).map((c) => c.id));
     return ps.find((p) => tabs.has(p.tab) && p.cwd)?.cwd ?? null;
   };
-  return local.find((s) => s.folder && key(s.folder, homeDir, win) === want)
-    ?? local.find((s) => { const c = first(s); return c !== null && key(c, homeDir, win) === want; })
+  // A space with no folder of its own was made at home.
+  return local.find((s) => want.has(key(s.folder || homeDir, homeDir, win)))
+    ?? local.find((s) => { const c = first(s); return c !== null && want.has(key(c, homeDir, win)); })
     ?? null;
+}
+
+// `folder` with symlinks resolved, or null (Windows, or it can't be read).
+async function physical(folder, win) {
+  if (win) return null;
+  try {
+    const r = await exec("/bin/pwd", ["-P"], { cwd: folder, timeout: 5000 });
+    return r.code === 0 ? r.stdout.replace(/\n$/, "") || null : null;
+  } catch {
+    return null;
+  }
 }
 
 // What a command asks for: { open: folder } or { pick: true }, else null.
@@ -82,7 +101,7 @@ export default class OpenFolder extends View {
             notify({ title: "open-folder", body: `Give a whole path (${win ? "C:\\..." : "/..."} or ~/...), not ${JSON.stringify(folder)}.`, level: "error" });
             continue;
           }
-          this.open(folder, win);
+          await this.open(folder, win);
         } catch (e) {
           notify({ title: "Can't open the folder", body: String(e?.message ?? e), level: "error" });
         }
@@ -90,9 +109,10 @@ export default class OpenFolder extends View {
     });
   }
 
-  open(folder, win) {
+  async open(folder, win) {
     const homeDir = home();
-    const there = existing(folder, spaces(), panes(), homeDir, win);
+    const resolved = await physical(normal(folder, homeDir, win), win);
+    const there = existing(folder, spaces(), panes(), homeDir, win, resolved);
     if (there) run("space.select", { id: there.id });
     else run("space.new", { folder: normal(folder, homeDir, win), machine: "" });
   }

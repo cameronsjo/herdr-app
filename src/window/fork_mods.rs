@@ -38,6 +38,13 @@ pub(super) fn background(folders: &BTreeMap<String, Found>) -> Vec<(String, Inst
         .collect()
 }
 
+/// A background copy's slot: [`AppWindow::drop_layout_copies`] keeps these, so a
+/// layout switch doesn't restart them (an open folder picker or a move in
+/// progress would be lost).
+pub(super) fn is_background(slot: &str) -> bool {
+    slot.starts_with(SLOT)
+}
+
 /// `shown` with the background copies added.
 pub(super) fn with_background(mut shown: Vec<(String, Instance)>, folders: &BTreeMap<String, Found>) -> Vec<(String, Instance)> {
     shown.extend(background(folders));
@@ -64,15 +71,18 @@ pub(super) mod tests {
         }
     }
 
-    #[test]
-    fn a_background_copy_loads_and_gets_its_commands() {
-        // The window's mod tests share one app home: each runs alone in a process of its own.
-        let home = crate::test_tmp().join(format!("herdr-fork-mods-test-{}", std::process::id()));
+    /// Runs `window::fork_mods::tests::<name>` alone in a test process of its own,
+    /// on a fresh app home. The fork's copy of upstream's `window::tests::in_own_process`
+    /// (which names its own module's path, and whose signature the fork doesn't widen);
+    /// `fork_browser` uses this one too. At a sync, carry any hardening of upstream's
+    /// helper over here.
+    pub(in crate::window) fn in_own_process(path: &str, name: &str) {
+        let home = crate::test_tmp().join(format!("herdr-fork-window-test-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         let out = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "window::fork_mods::tests::background_copy", "--nocapture", "--test-threads=1"])
+            .args(["--exact", &format!("{path}::{name}"), "--nocapture", "--test-threads=1"])
             .env("HERDR_APP_HOME", &home)
-            .env("HERDR_TEST_WINDOW", "fork_background_copy")
+            .env("HERDR_TEST_WINDOW", name)
             .output()
             .unwrap();
         let _ = std::fs::remove_dir_all(&home);
@@ -80,40 +90,66 @@ pub(super) mod tests {
         assert!(out.status.success() && log.contains("1 passed"), "{log}");
     }
 
-    /// A background mod's folder with a probe in it: the window loads it with no
-    /// layout block, counts it as shown, and `<mod>.<command>` reaches it.
+    /// In the process [`in_own_process`] started for `name`: whether to go on.
+    pub(in crate::window) fn running_alone(name: &str) -> bool {
+        std::env::var("HERDR_TEST_WINDOW").as_deref() == Ok(name)
+    }
+
+    #[test]
+    fn a_background_copy_loads_and_gets_its_commands() {
+        // The window's mod tests share one app home: each runs alone in a process of its own.
+        in_own_process("window::fork_mods::tests", "background_copy");
+    }
+
+    /// Every background mod's folder with a probe in it: the window loads each with
+    /// no layout block, counts it as shown, never renders it, `<mod>.<command>`
+    /// reaches it, and a layout switch keeps it running instead of restarting it.
     #[gpui::test]
     fn background_copy(cx: &mut gpui::TestAppContext) {
-        if std::env::var("HERDR_TEST_WINDOW").as_deref() != Ok("fork_background_copy") {
+        if !running_alone("background_copy") {
             return;
         }
         ON.set(true);
-        let probe = "import { View, div } from \"gpui-kit\";\n\
-            import { nextCommand, setShared } from \"herdr\";\n\
-            export default class Probe extends View {\n\
-              init(_props, cx) { setShared(\"fork.init\", true); cx.spawn(async () => { for (;;) setShared(\"fork.probe\", await nextCommand()); }); }\n\
-              render() { return div(); }\n\
-            }\n";
-        let name = BACKGROUND[0];
         let layout = serde_json::json!({ "id": "root", "type": "block", "content": { "mod": "probe" } });
-        let (view, cx) = crate::window::tests::open_window(cx, "probe", "import { View, div } from \"gpui-kit\"; export default class P extends View { render() { return div(); } }", layout);
+        let (view, cx) = crate::window::tests::open_window(cx, "probe", "import { View, div } from \"gpui-kit\"; export default class P extends View { render() { return div(); } }", layout.clone());
         cx.run_until_parked();
-        // Start-up installed the shipped mod; swap in the probe the way an edit lands.
-        let main = crate::mods::app_dir().join("mods").join(name).join("main.js");
-        assert!(main.is_file(), "start-up installs the shipped background mod");
-        std::fs::write(&main, probe).unwrap();
-        cx.update(|window, cx| view.update(cx, |this, cx| this.files_changed(vec![format!("mods/{name}/main.js").into()], window, cx)));
+        for name in BACKGROUND {
+            // Start-up installed the shipped mod; swap in the probe the way an edit lands.
+            let probe = format!(
+                "import {{ View, div }} from \"gpui-kit\";\n\
+                 import {{ nextCommand, setShared, shared }} from \"herdr\";\n\
+                 export default class Probe extends View {{\n\
+                   init(_props, cx) {{ setShared(\"fork.init.{name}\", (shared(\"fork.init.{name}\") ?? 0) + 1); cx.spawn(async () => {{ for (;;) setShared(\"fork.probe.{name}\", await nextCommand()); }}); }}\n\
+                   render() {{ setShared(\"fork.render.{name}\", true); return div(); }}\n\
+                 }}\n"
+            );
+            let main = crate::mods::app_dir().join("mods").join(name).join("main.js");
+            assert!(main.is_file(), "start-up installs the shipped background mod {name}");
+            std::fs::write(&main, probe).unwrap();
+            cx.update(|window, cx| view.update(cx, |this, cx| this.files_changed(vec![format!("mods/{name}/main.js").into()], window, cx)));
+        }
         // Under outside-agents' two-second start: its file reads run on real threads,
         // which the test scheduler refuses.
         cx.executor().advance_clock(std::time::Duration::from_secs(1));
         cx.run_until_parked();
-        let slot = format!("fork-background:{name}");
-        let loaded = view.update(cx, |this, _| this.copies.get(&slot).map(|c| (c.root.is_some(), c.error.clone())));
-        assert_eq!(loaded, Some((true, None)), "the background copy loads with no block");
-        assert_eq!(crate::mods::shared("fork.init"), Some(serde_json::json!(true)), "its init() runs without a render");
-        cx.update(|window, cx| view.update(cx, |this, cx| this.run(&format!("{name}.open:/tmp/x"), serde_json::json!({}), window, cx)));
+        for name in BACKGROUND {
+            let slot = format!("fork-background:{name}");
+            let loaded = view.update(cx, |this, _| this.copies.get(&slot).map(|c| (c.root.is_some(), c.error.clone())));
+            assert_eq!(loaded, Some((true, None)), "{name}: the background copy loads with no block");
+            assert_eq!(crate::mods::shared(&format!("fork.init.{name}")), Some(serde_json::json!(1)), "{name}: its init() runs without a render");
+            cx.update(|window, cx| view.update(cx, |this, cx| this.run(&format!("{name}.open:/tmp/x"), serde_json::json!({}), window, cx)));
+            cx.run_until_parked();
+            assert_eq!(crate::mods::shared(&format!("fork.probe.{name}")), Some(serde_json::json!("open:/tmp/x")), "{name}: its command arrives, payload and all");
+        }
+        // Another layout: the background copies keep running, not restarted.
+        std::fs::write(crate::window::layout_path("other"), layout.to_string()).unwrap();
+        cx.update(|window, cx| view.update(cx, |this, cx| this.run("layout.switch", serde_json::json!({ "name": "other" }), window, cx)));
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
         cx.run_until_parked();
-        assert_eq!(crate::mods::shared("fork.probe"), Some(serde_json::json!("open:/tmp/x")), "its command arrives, payload and all");
+        for name in BACKGROUND {
+            assert_eq!(crate::mods::shared(&format!("fork.init.{name}")), Some(serde_json::json!(1)), "{name}: a layout switch doesn't restart it");
+            assert_eq!(crate::mods::shared(&format!("fork.render.{name}")), None, "{name}: render() is never called");
+        }
     }
 
     #[test]

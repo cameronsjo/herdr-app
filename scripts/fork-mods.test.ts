@@ -3,10 +3,11 @@
 import { test, expect } from "bun:test";
 import { readFile } from "node:fs/promises";
 
-async function load(name: string, names: string[]) {
+// `env`: stand-ins for the herdr imports a function under test calls (exec, spaces, ...).
+async function load(name: string, names: string[], env: Record<string, unknown> = {}) {
   const source = (await readFile(new URL(`../defaults/mods/${name}/main.js`, import.meta.url), "utf8"))
     .replace(/^import [^;]*;\n/gm, "").replace(/export default class (\w+)/, "class $1");
-  return new Function("View", "div", `${source}; return { ${names.join(", ")} };`)(class {}, () => ({}));
+  return new Function("View", "div", ...Object.keys(env), `${source}; return { ${names.join(", ")} };`)(class {}, () => ({}), ...Object.values(env));
 }
 
 const space = (id: string, folder: string, tabs: string[] = [], machine: string | null = null) => ({ id, folder, machine, tabs: tabs.map((t) => ({ id: t })) });
@@ -26,6 +27,21 @@ test("open-folder finds the space made in a folder, or whose first terminal is t
   // A space made in the folder wins over one that only wandered into it.
   const made = [...all, space("w4", "/home/me/code/app", ["t4"])];
   expect(existing("/home/me/code/app", made, [...ps, { tab: "t4", cwd: "/tmp" }], "/home/me")?.id).toBe("w4");
+});
+
+test("open-folder keeps a folder's spaces, takes a home of /, and counts a home space and a resolved path", async () => {
+  const { normal, existing } = await load("open-folder", ["normal", "existing"]);
+  expect(normal("~/x", "/")).toBe("/x");
+  expect(normal("/home/me/name ", "/home/me")).toBe("/home/me/name ");
+  expect(normal("   ", "/home/me")).toBe("");
+  // A space with no folder of its own was made at home.
+  const all = [space("w1", "", ["t1"]), space("w2", "/tmp/x", ["t2"])];
+  expect(existing("~", all, [], "/home/me")?.id).toBe("w1");
+  expect(existing("/home/me/", all, [], "/home/me")?.id).toBe("w1");
+  // /private/tmp/x is /tmp/x on macOS: the resolved path finds the space too.
+  const ps = [{ tab: "t2", cwd: "/private/tmp/x" }];
+  expect(existing("/tmp/y", [space("w3", "/elsewhere", ["t2"])], ps, "/home/me", false, "/private/tmp/x")?.id).toBe("w3");
+  expect(existing("/tmp/y", [space("w3", "/elsewhere", ["t2"])], ps, "/home/me")).toBeNull();
 });
 
 test("open-folder reads open:<folder> and pick", async () => {
@@ -91,6 +107,56 @@ test("space-groups stays on its machine and leaves a worktree with no main alone
   expect(apply(order, moves(all, git, "b", -1))).toBe("b x1 r1 r2");
   expect(moves(all, git, "b", 1)).toEqual([]);
   expect(apply(order, moves(all, git, "r2", -1))).toBe("x1 b r2 r1");
+});
+
+test("space-groups tells a worktree from a submodule and stops when git can't answer", async () => {
+  const answers: Record<string, unknown> = {
+    "/r/a": { code: 0, stdout: "/r/a/.git\n/r/a/.git\n", stderr: "" },
+    "/r/a1": { code: 0, stdout: "/r/a/.git/worktrees/a1\n/r/a/.git\n", stderr: "" },
+    "/r/a/sub": { code: 0, stdout: "/r/a/.git/modules/sub\n/r/a/.git/modules/sub\n", stderr: "" },
+    "/tmp": { code: 128, stdout: "", stderr: "fatal: not a git repository (or any of the parent directories): .git\n" },
+    "/slow": new Error("git took longer than 5 s and was stopped"),
+    "/odd": { code: 1, stdout: "", stderr: "fatal: unsafe repository\n" },
+  };
+  const calls: string[] = [];
+  const exec = async (_cmd: string, _args: string[], { cwd }: { cwd: string }) => {
+    calls.push(cwd);
+    const a = answers[cwd];
+    if (a instanceof Error) throw a;
+    return a;
+  };
+  const { repo } = await load("space-groups", ["repo"], { exec });
+  expect(await repo("/r/a")).toEqual({ repo: "/r/a/.git", linked: false });
+  expect(await repo("/r/a1")).toEqual({ repo: "/r/a/.git", linked: true });
+  expect(await repo("/r/a/sub")).toEqual({ repo: "/r/a/.git/modules/sub", linked: false });
+  expect(await repo("/tmp")).toBeNull();
+  await expect(repo("/slow")).rejects.toThrow("git couldn't look at /slow");
+  await expect(repo("/odd")).rejects.toThrow("unsafe repository");
+  // One git call per folder.
+  expect(calls.filter((c) => c === "/r/a").length).toBe(1);
+});
+
+test("space-groups looks again when a space appears while git answers, and once per folder", async () => {
+  const lists = [
+    [{ id: "a", machine: null, active: true, folder: "/r/a", tabs: [] }, { id: "b", machine: null, active: false, folder: "/r/b", tabs: [] }],
+  ];
+  let list = lists[0];
+  const calls: string[] = [];
+  const moved: unknown[] = [];
+  const exec = async (_c: string, _a: string[], { cwd }: { cwd: string }) => {
+    calls.push(cwd);
+    // A worktree space of a appears while git answers the first look.
+    if (calls.length === 1) list = [...list, { id: "a1", machine: null, active: false, folder: "/r/a1", tabs: [] }, { id: "a2", machine: null, active: false, folder: "/r/a1", tabs: [] }];
+    const git = cwd === "/r/a1" ? "/r/a/.git/worktrees/a1\n/r/a/.git\n" : `${cwd}/.git\n${cwd}/.git\n`;
+    return { code: 0, stdout: git, stderr: "" };
+  };
+  const { SpaceGroups } = await load("space-groups", ["SpaceGroups"], {
+    exec, spaces: () => list, panes: () => [], run: (name: string, args: unknown) => moved.push([name, args]),
+  });
+  await SpaceGroups.prototype.move.call({}, 1);
+  // a and its worktrees go down past b as one block; a1 and a2 share a folder: one look.
+  expect(moved).toEqual([["space.move", { id: "b", index: 1 }]]);
+  expect(calls.sort()).toEqual(["/r/a", "/r/a1", "/r/b"]);
 });
 
 const term = (address: string, name: string | null, tab: string, state = "live") => ({ address, name, state, labels: { "herdr.tab": tab } });

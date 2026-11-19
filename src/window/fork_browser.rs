@@ -734,25 +734,15 @@ mod window_tests {
     use crate::browser::block::BROWSER_MOD;
     use serde_json::json;
 
-    /// `window::tests::in_own_process` for this module: the test alone in a
-    /// process of its own, on a fresh app home (a window takes the app home
-    /// and the mods' request channel, which are process-wide).
+    /// The test alone in a process of its own, on a fresh app home (a window takes
+    /// the app home and the mods' request channel, which are process-wide); the
+    /// fork's one copy of upstream's helper is in `fork_mods`.
     fn in_own_process(name: &str) {
-        let home = crate::test_tmp().join(format!("herdr-fork-window-test-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&home);
-        let out = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", &format!("window::fork_browser::window_tests::{name}"), "--nocapture", "--test-threads=1"])
-            .env("HERDR_APP_HOME", &home)
-            .env("HERDR_TEST_WINDOW", name)
-            .output()
-            .unwrap();
-        let _ = std::fs::remove_dir_all(&home);
-        let log = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-        assert!(out.status.success() && log.contains("1 passed"), "{log}");
+        crate::window::fork_mods::tests::in_own_process("window::fork_browser::window_tests", name);
     }
 
     fn running_alone(name: &str) -> bool {
-        std::env::var("HERDR_TEST_WINDOW").as_deref() == Ok(name)
+        crate::window::fork_mods::tests::running_alone(name)
     }
 
     #[test]
