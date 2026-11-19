@@ -272,10 +272,11 @@ test("browser-prototype's placeholder never shows a saved address's query or sig
   expect(placeholder({ loading: false, url: "https://example.test/", title: "" }, "x")).toEqual({ title: null, note: "https://example.test/" });
 });
 
-async function loadFork() {
+// `intl`: undefined stands in for QuickJS, which has no Intl.Segmenter.
+async function loadFork(intl: unknown = Intl) {
   const source = (await readFile(new URL("../defaults/mods/agents/fork.js", import.meta.url), "utf8"))
     .replace(/^import [^;]*;\n/gm, "").replace(/^export /gm, "");
-  return new Function("div", `${source}; return { order, groups, nameOf, taskOf, empty, FORK_SORTS, menuHeight };`)(() => ({}));
+  return new Function("div", "Intl", `${source}; return { order, groups, nameOf, taskOf, detailOf, empty, FORK_SORTS, menuHeight };`)(() => ({}), intl);
 }
 
 const agent = (address: string, space: string, extra = {}) => ({ address, space, space_name: space.toUpperCase(), ...extra });
@@ -337,6 +338,64 @@ test("agents: a label drawn on one line with control and bidi characters dropped
   const out = groups("project", [], [], [{ address: "t1", space: "s1" }], all);
   expect(out[0].label).toBe("p q");
   expect(out[0].id).not.toContain("\u0000");
+});
+
+test("agents: ZWJ and ZWNJ stay, other invisible characters go", async () => {
+  const { nameOf } = await loadFork();
+  const family = "\u{1F468}\u200d\u{1F469}\u200d\u{1F467}";
+  const persian = "\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645";
+  const all = [{ address: "t1", name: `${family} ${persian}` }, { address: "t2", name: "a\u200bb\u200ec\u200fd" }];
+  expect(nameOf(all, "t1")).toBe(`${family} ${persian}`);
+  expect(nameOf(all, "t2")).toBe("a b c d");
+});
+
+test("agents: the task line is cut at 200 characters, a huge label quickly", async () => {
+  const { taskOf } = await loadFork();
+  const at = (task: string) => taskOf([{ address: "t1", labels: { task } }], "t1");
+  expect(at("x".repeat(200))).toBe("x".repeat(200));
+  expect(at("x".repeat(201))).toBe(`${"x".repeat(199)}\u2026`);
+  // Ten million characters: only the start is looked at, and the cut still shows.
+  const start = Date.now();
+  expect(at(`${"\u0000".repeat(5000)}${"y".repeat(10_000_000)}`)).toBeNull();
+  expect(at(`${"y".repeat(10_000_000)}`)).toBe(`${"y".repeat(199)}\u2026`);
+  expect(Date.now() - start).toBeLessThan(500);
+});
+
+test("agents: a cut keeps a flag, an accent and a skin tone whole, with or without Intl", async () => {
+  for (const intl of [Intl, undefined]) {
+    const { nameOf } = await loadFork(intl);
+    const cut = (tail: string) => nameOf([{ address: "t1", name: `${"a".repeat(78)}${tail}` }], "t1");
+    // 78 + three clusters is 81: the cut keeps 78 + one cluster + the ellipsis.
+    for (const one of ["\u{1F1F3}\u{1F1F1}", "e\u0301", "\u{1F44B}\u{1F3FD}", "\u{1F468}\u200d\u{1F4BB}", "\u2764\ufe0f"]) {
+      expect(cut(one + one + one)).toBe(`${"a".repeat(78)}${one}\u2026`);
+    }
+  }
+});
+
+test("agents: a tab the person named stays the row's detail; else the terminal's name", async () => {
+  const { detailOf } = await loadFork();
+  const all = [{ address: "t1", name: "fix-login" }, { address: "t2", name: "" }];
+  expect(detailOf(all, "t1", true, "auth work")).toBe("auth work");
+  expect(detailOf(all, "t1", false, "claude title")).toBe("fix-login");
+  expect(detailOf(all, "t2", false, "claude title")).toBe("claude title");
+  // A named tab whose detail is upstream's live title (named after the program): the name wins.
+  expect(detailOf(all, "t1", true, null)).toBe("fix-login");
+});
+
+test("agents: needs you hides a pinned agent that doesn't need you", async () => {
+  const { order } = await loadFork();
+  // A filter, not a sort: pins don't bring back agents that don't need you.
+  const list = [agent("t1", "s1", { pinned: true }), agent("t2", "s1"), agent("t3", "s1", { pinned: true })];
+  const urgency = (a: { address: string }) => (a.address === "t3" ? 4 : 2);
+  expect(order("needs", list, [], urgency).map((a: { address: string }) => a.address)).toEqual(["t3"]);
+});
+
+test("agents: two long project labels that share their start stay two groups", async () => {
+  const { groups } = await loadFork();
+  const all = [{ address: "t1", labels: { project: `${"p".repeat(100)}1` } }, { address: "t2", labels: { project: `${"p".repeat(100)}2` } }];
+  const out = groups("project", [], [], [{ address: "t1", space: "s1" }, { address: "t2", space: "s1" }], all);
+  expect(out.map((g: { id: string }) => g.id)).toHaveLength(2);
+  expect(out[0].label).toBe(out[1].label);
 });
 
 test("agents: a cut never splits an emoji", async () => {

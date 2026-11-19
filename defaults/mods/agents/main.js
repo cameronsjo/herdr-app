@@ -302,7 +302,7 @@ export default class Agents extends View {
 
     const row = (a, i, subs = []) => {
       const pic = icon(a.program, 16, t.foreground);
-      const more = fork.nameOf(all, a.address) ?? detail.get(a.address); // FORK(agents)
+      const more = fork.detailOf(all, a.address, tabs.get(a.tab)?.named && tabCounts.get(a.tab) === 1, detail.get(a.address)); // FORK(agents)
       // An agent on another machine (`vps/t7`) says which.
       const machine = a.address.includes("/") ? a.address.split("/")[0] : null;
       if (collapsed) {

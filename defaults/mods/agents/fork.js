@@ -14,6 +14,7 @@
 // space header is above it.
 
 import { div } from "gpui-kit";
+import { run } from "herdr";
 
 export const FORK_SORTS = [
   { id: "needs", label: "Needs you", icon: "search" },
@@ -34,15 +35,45 @@ function byAddress(all) {
   return m;
 }
 // Any process can set a label or a name, so a value is drawn on one line with
-// control and bidi characters dropped, and cut to `max` characters.
+// control, bidi and invisible characters dropped, and cut to `max` characters.
+// ZWJ and ZWNJ stay: they join emoji (👨‍👩‍👧) and spell words (Persian).
+const DROP = /[\u0000-\u001f\u007f-\u009f\u061c\u200b\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]+/g;
+// Code points that belong to the one before them: a cut never ends just before one.
+const JOINED = /^[\p{M}\u200d\ufe0e\ufe0f\u{1f3fb}-\u{1f3ff}\u{e0020}-\u{e007f}]$/u;
+const segmenter = typeof Intl !== "undefined" && typeof Intl.Segmenter === "function" ? new Intl.Segmenter() : null;
 const text = (v, max = 80) => {
   if (typeof v !== "string") return null;
-  const s = v.replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]+/g, " ").trim();
+  // Only look at what can show: a huge label would cost every redraw.
+  const room = max * 8 + 16;
+  const long = v.length > room;
+  const s = (long ? v.slice(0, room) : v).replace(DROP, " ").trim();
   if (!s) return null;
-  // Cut by code point, so an emoji at the cut stays whole.
-  const chars = Array.from(s);
-  return chars.length > max ? `${chars.slice(0, max - 1).join("").trimEnd()}\u2026` : s;
+  // Cut by whole characters (grapheme clusters where Intl has them), so a flag,
+  // an accent or a skin tone at the cut stays whole.
+  const parts = segmenter ? Array.from(segmenter.segment(s), (g) => g.segment) : clusters(s);
+  if (parts.length <= max && !long) return s;
+  return `${parts.slice(0, max - 1).join("").trimEnd()}\u2026`;
 };
+
+// Without Intl.Segmenter (QuickJS): code points, with joiners, marks, variation
+// selectors and skin tones kept on the character before them, and regional
+// indicators (flags) in pairs.
+function clusters(s) {
+  const out = [];
+  let ri = false;
+  for (const c of s) {
+    const isRi = c >= "\u{1f1e6}" && c <= "\u{1f1ff}";
+    const last = out.at(-1);
+    if (last !== undefined && (JOINED.test(c) || last.endsWith("\u200d") || (isRi && ri))) {
+      out[out.length - 1] += c;
+      ri = false;
+    } else {
+      out.push(c);
+      ri = isRi;
+    }
+  }
+  return out;
+}
 
 // A label's value on the terminal, cleaned, or null.
 const label = (terminal, key, max) => text(terminal?.labels?.[key], max);
@@ -57,9 +88,11 @@ export function taskOf(all, address) {
 }
 
 // What a project group is called and keyed by: the `project` label, else the space.
+// The key is the whole cleaned label, so two long labels that share their
+// first 80 characters stay two groups; only the shown name is cut.
 function project(a, terminal) {
   const p = label(terminal, "project");
-  return p ? { key: `p:${p}`, label: p } : { key: `s:${a.space}`, label: a.space_name || "" };
+  return p ? { key: `p:${label(terminal, "project", 1024)}`, label: p } : { key: `s:${a.space}`, label: a.space_name || "" };
 }
 
 // A row names its space when its header is a project, which can span spaces.
@@ -99,14 +132,28 @@ export function groups(id, built, pinnedGroups, rest, all) {
   return out;
 }
 
-// The row with its task line under it, or the row alone.
+// The row with its task line under it, or the row alone. The two hover and
+// click as one: a click on the task line focuses the agent too. The line starts
+// under the name: past the row's icon when it has one (16 px + a 9 px gap).
 export function withTask(row, a, all, t, collapsed) {
   const task = collapsed ? null : taskOf(all, a.address);
   if (!task) return row;
   return div()
+    .id(`with-task-${a.address}`)
     .flex_none()
+    .rounded(8)
+    .when(a.focused, (el) => el.bg(t.selected))
+    .hover((s) => s.bg(t.hover))
+    .cursor_pointer()
+    .on_click(() => run("pane.focus", { pane: a.pane }))
     .child(row)
-    .child(div().id(`task-${a.address}`).pl(33).pr(8).pb(4).mt(-4).text_size(11.5).truncate().text_color(t.dim).child(task));
+    .child(div().id(`task-${a.address}`).pl(a.program?.icon ? 33 : 8).pr(8).pb(4).mt(-4).text_size(11.5).truncate().text_color(t.dim).child(task));
+}
+
+// The row's detail: a tab the person named, when the agent is alone in it;
+// else the terminal's own name; else upstream's detail.
+export function detailOf(all, address, personNamedTab, upstream) {
+  return (personNamedTab ? upstream : null) ?? nameOf(all, address) ?? upstream;
 }
 
 // FORK(outside-agents): the agents outside Herdr's terminals this sort shows
