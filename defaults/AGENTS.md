@@ -989,6 +989,7 @@ has 124 programs (agents, editors, runtimes, tools, databases, infra);
   `~/.config/herdr-app/outside-agents/` (`$HERDR_APP_HOME/outside-agents/` when set), `{"name": "…", "status": "working", "title": "…",
   "task": "…", "ttl": 60}`, and rewrites it as its heartbeat. It drops out `ttl` seconds (60 by
   default) after its last write, or when its file is deleted. The folder's `README.md` says more.
+  A sandboxed agent needs write access to that folder only, never the app home above it.
 - The palette (`app.palette`) also lists mods' own commands: a mod names them in its
   `mod.json`, `"commands": [{"command": "my-mod.refresh", "title": "Refresh my board", "words": "reload"}]`,
   only `<its folder>.<command>`, and they show under "Mods" (read when the palette opens).

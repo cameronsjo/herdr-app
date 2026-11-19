@@ -171,8 +171,8 @@ export function empty(id, any, outside) {
 }
 
 // FORK(outside-agents): an "Elsewhere" header and a row for each agent outside
-// Herdr's terminals, after the rest; nothing on the narrow rail. `status(s)`
-// draws upstream's status mark. There is no pane to go to, so a row does nothing.
+// Herdr's terminals, after the rest; nothing on the narrow rail. `status(a)`
+// draws upstream's status mark for the agent's status and reason. There is no pane to go to, so a row does nothing.
 export function outside(t, id, collapsed, list, status) {
   const shown = collapsed ? [] : outsiders(id, list);
   if (!shown.length) return [];
@@ -202,7 +202,7 @@ export function outside(t, id, collapsed, list, status) {
       .child(div().flex().flex_1().min_w(0).gap(5).items_center()
         .child(div().min_w(0).max_w(a.title ? 120 : 200).truncate().text_color(a.status === "idle" ? t.muted : t.foreground).child(a.name))
         .when(Boolean(a.title), (el) => el.child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(`\u00b7 ${a.title}`))))
-      .child(status(a.status)))
+      .child(status(a)))
     .when(Boolean(a.task), (el) => el.child(div().pl(8).pr(8).pb(4).mt(-4).text_size(11.5).truncate().text_color(t.dim).child(a.task)));
   return [header, ...shown.map(row)];
 }

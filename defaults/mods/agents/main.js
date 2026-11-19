@@ -419,7 +419,7 @@ export default class Agents extends View {
     const rows = collapsed
       ? list.flatMap(withKids)
       : groups.flatMap((g) => [header(g), ...(this.folded.has(g.id) ? [] : g.members.flatMap(withKids))]);
-    rows.push(...fork.outside(t, sort.id, collapsed, shared("fork.outside-agents"), (s) => this.status(t, { status: s }, byPriority))); // FORK(outside-agents)
+    rows.push(...fork.outside(t, sort.id, collapsed, shared("fork.outside-agents"), (a) => this.status(t, { status: a.status, reason: a.reason }, byPriority))); // FORK(outside-agents)
 
     return v_flex()
       .size_full()
@@ -453,7 +453,7 @@ export default class Agents extends View {
       )
       .when(list.length === 0 && !collapsed, (el) =>
         // FORK(agents): needs you says so when agents run but none needs you.
-        el.child(div().px(12).text_size(12).text_color(t.dim).child(fork.empty(sort.id, this.listed.size > 0, shared("fork.outside-agents")) ?? "No agent status yet. Agents show up here when they report their status. Older versions and agents inside tmux may not.")),
+        ((m) => (m === "" ? el : el.child(div().px(12).text_size(12).text_color(t.dim).child(m ?? "No agent status yet. Agents show up here when they report their status. Older versions and agents inside tmux may not."))))(fork.empty(sort.id, this.listed.size > 0, shared("fork.outside-agents"))),
       )
       .child(v_flex().id("ag-list").flex_1().min_h(0).px(collapsed ? 0 : 8).overflow_y_scrollbar().mode("always").children(rows))
       .when(collapsed, (el) =>

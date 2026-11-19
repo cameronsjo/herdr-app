@@ -429,8 +429,104 @@ test("outside-agents reads a heartbeat file and drops it when its ttl passes", a
   const agents = new Map([["b", { ...a, id: "b", name: "b", until: now + 1, text: "{}" }], ["a", { ...a, id: "a", name: "a", until: now + 1 }], ["old", { ...a, id: "old", name: "c", until: now }]]);
   const shown = live(agents, now);
   expect(shown.map((x: any) => x.id)).toEqual(["a", "b"]);
-  expect(shown[0]).not.toHaveProperty("until");
+  // `until` stays, so a reloaded copy keeps the live rows; the file's text doesn't.
+  expect(shown[0].until).toBe(now + 1);
   expect(shown[1]).not.toHaveProperty("text");
+  // An error keeps its own word on the pill.
+  expect(parse("x", JSON.stringify({ status: "error" }), now).reason).toBe("error");
+  expect(parse("x", JSON.stringify({ status: "blocked" }), now).reason).toBeNull();
+});
+
+test("outside-agents counts bytes, and drops every invisible character", async () => {
+  const { parse, clip } = await load("outside-agents", ["parse", "clip"]);
+  const now = 1;
+  // 4096 characters of a two-byte letter are 8192 bytes: too big for a heartbeat.
+  const pad = (c: string, n: number) => JSON.stringify({ status: "idle", pad: c.repeat(n) });
+  expect(parse("x", pad("a", 4000), now)).not.toBeNull();
+  expect(parse("x", pad("\u00e9", 2100), now)).toBeNull();
+  for (const c of ["\u00ad", "\u034f", "\u115f", "\u1160", "\u3164", "\uffa0", "\u180e", "\u2060", "\u2064", "\u206a", "\u206f", "\ufe0f", "\u{e0100}", "\ufff9", "\ufffb", "\u{e0041}"]) {
+    expect(clip(`a${c}b`)).toBe("a b");
+  }
+});
+
+// The mod's file handling with the folder stood in for: `files` maps a name in
+// the folder to its text; `find` lists the plain .json files among them.
+async function outsideMod(files: Record<string, string>, extra: Record<string, unknown> = {}) {
+  const reads: string[] = [];
+  const env = {
+    exec: async (cmd: string, args: string[]) => {
+      if (cmd === "test") return { code: 1, stdout: "", stderr: "" };
+      if (cmd !== "find") throw new Error(cmd);
+      const listed = Object.keys(files).filter((n) => n.endsWith(".json") && !n.startsWith("link:")).map((n) => `${args[0]}/${n}`);
+      return { code: 0, stdout: `${listed.join("\n")}\n`, stderr: "" };
+    },
+    readTextFile: async (path: string) => { reads.push(path.split("/").pop()!); return files[path.split("/").pop()!] ?? null; },
+    writeTextFile: async () => null,
+    window: () => ({ platform: "linux" }),
+    ...extra,
+  };
+  const { OutsideAgents } = await load("outside-agents", ["OutsideAgents"], env);
+  const mod = Object.assign(Object.create(OutsideAgents.prototype), { dir: "/h/.config/herdr-app/outside-agents", agents: new Map(), dropped: new Map() });
+  return { mod, reads, files };
+}
+
+test("outside-agents reads only the plain files right in its folder", async () => {
+  const { mod } = await outsideMod({ "a.json": '{"status":"working"}', "bad id!.json": '{"status":"idle"}', "notes.txt": "x" });
+  await mod.relist();
+  expect([...mod.agents.keys()]).toEqual(["a"]);
+  // An event inside a folder in it is not one of its agents.
+  const dir = mod.dir;
+  const { changedNames } = await load("outside-agents", ["changedNames"]);
+  expect([...changedNames([`${dir}/x.json`, `${dir}/sub/y.json`, `${dir}/x.json.tmp`])]).toEqual(["x.json", "x.json.tmp"]);
+});
+
+test("outside-agents takes a temp-file rename batch as a heartbeat, unchanged text too", async () => {
+  const { mod, files, reads } = await outsideMod({ "x.json": '{"status":"working","ttl":5}' });
+  await mod.relist();
+  const first = mod.agents.get("x").until;
+  await new Promise((r) => setTimeout(r, 5));
+  reads.length = 0;
+  // A writer renames x.json.tmp over x.json with the same text: still a heartbeat.
+  await mod.changed([`${mod.dir}/x.json.tmp`, `${mod.dir}/x.json`]);
+  expect(reads).toEqual(["x.json"]);
+  expect(mod.agents.get("x").until).toBeGreaterThan(first);
+  // A relist that reads the same text again is not one.
+  const now = mod.agents.get("x").until;
+  await new Promise((r) => setTimeout(r, 5));
+  await mod.relist();
+  expect(mod.agents.get("x").until).toBe(now);
+  // A file gone from the folder goes from the list.
+  delete files["x.json"];
+  await mod.changed([`${mod.dir}/x.json`]);
+  expect(mod.agents.size).toBe(0);
+});
+
+test("outside-agents makes room for a new agent, and a dropped record doesn't come back on a relist", async () => {
+  const files: Record<string, string> = {};
+  for (let i = 0; i < 128; i++) files[`a${String(i).padStart(3, "0")}.json`] = JSON.stringify({ status: "working", ttl: 86400 });
+  const { mod } = await outsideMod(files);
+  await mod.relist();
+  expect(mod.agents.size).toBe(128);
+  // Full of long-lived records: a new one still gets in, in place of the one that expires soonest.
+  files["a000.json"] = JSON.stringify({ status: "working", ttl: 1 });
+  await mod.changed([`${mod.dir}/a000.json`]);
+  files["zz.json"] = JSON.stringify({ status: "blocked", ttl: 60 });
+  await mod.changed([`${mod.dir}/zz.json`]);
+  expect(mod.agents.has("zz")).toBe(true);
+  expect(mod.agents.has("a000")).toBe(false);
+  // a000's file is unchanged: a relist doesn't read it as a fresh heartbeat.
+  await mod.relist();
+  expect(mod.agents.has("a000")).toBe(false);
+});
+
+test("outside-agents leaves a linked folder without a README", async () => {
+  const written: string[] = [];
+  const { mod } = await outsideMod({}, {
+    exec: async (cmd: string) => ({ code: cmd === "test" ? 0 : 1, stdout: "", stderr: "" }),
+    writeTextFile: async (p: string) => { written.push(p); return null; },
+  });
+  await mod.start();
+  expect(written).toEqual([]);
 });
 
 test("agents: outside agents and the empty message", async () => {
