@@ -47,7 +47,7 @@ fn clean(s: &str) -> String {
             !c.is_control()
                 && !matches!(
                     *c,
-                    '\u{ad}' | '\u{34f}' | '\u{115f}' | '\u{1160}' | '\u{17b4}' | '\u{17b5}' | '\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{3164}' | '\u{fe00}'..='\u{fe0f}' | '\u{feff}' | '\u{ffa0}' | '\u{e0000}'..='\u{e007f}'
+                    '\u{ad}' | '\u{34f}' | '\u{61c}' | '\u{115f}' | '\u{1160}' | '\u{17b4}' | '\u{17b5}' | '\u{180b}'..='\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{2028}' | '\u{2029}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{3164}' | '\u{fe00}'..='\u{fe0f}' | '\u{feff}' | '\u{ffa0}' | '\u{1d173}'..='\u{1d17a}' | '\u{e0000}'..='\u{e007f}'
                 )
         })
         .collect()
@@ -225,16 +225,24 @@ const STANDING: &[&str] = &[
 /// know, a label cut short) needs its number.
 const ONCE: &[&str] = &["yes", "allow", "approve", "proceed", "allow once", "approve once", "allow this once", "yes, once", "yes, proceed", "yes, allow once", "yes, just this once", "yes, allow this once"];
 
-/// A label as `approve` compares it: lower case, straight apostrophes, no
-/// trailing key hint (`(y)`, `(esc)`) or full stop.
+/// A label as `approve` and `deny` compare it: lower case, straight
+/// apostrophes, no trailing key hint (`(y)`, `(esc)`, `(shift+tab)`) or
+/// full stop. Only a key hint comes off: "Yes (always)" stays as it is.
 fn plain(label: &str) -> String {
     let o = label.to_lowercase().replace('’', "'");
     let o = o.trim();
-    let o = match o.rfind(" (") {
-        Some(at) if o.ends_with(')') && o.len() - at <= 14 => &o[..at],
+    let key = |k: &str| k.chars().count() == 1 || matches!(k, "esc" | "enter" | "tab" | "shift+tab" | "space");
+    let o = match o.strip_suffix(')').and_then(|r| r.rsplit_once(" (")) {
+        Some((rest, hint)) if key(hint) => rest,
         _ => o,
     };
     o.trim_end_matches('.').trim().to_owned()
+}
+
+/// Whether a label, as shown, says it grants or sets something for later.
+fn standing(label: &str) -> bool {
+    let o = label.to_lowercase().replace('’', "'");
+    STANDING.iter().any(|s| o.contains(s)) || o.ends_with(" all") || o.contains(" all)")
 }
 
 /// The option an answer means: a number, `approve` (the one option whose
@@ -246,10 +254,14 @@ pub fn choose(p: &Prompt, answer: &str) -> Result<usize, String> {
         let found: Vec<usize> = (0..p.options.len())
             .filter(|&i| {
                 let o = plain(&p.options[i]);
+                // Never a label that says it lasts, however it is worded.
+                if standing(&p.options[i]) {
+                    return false;
+                }
                 if what == "approves" {
                     return ONCE.contains(&o.as_str());
                 }
-                words.iter().any(|w| o == *w || o.starts_with(&format!("{w} ")) || o.starts_with(&format!("{w},")) || o.starts_with(&format!("{w}."))) && !STANDING.iter().any(|s| o.contains(s))
+                words.iter().any(|w| o == *w || o.starts_with(&format!("{w} ")) || o.starts_with(&format!("{w},")) || o.starts_with(&format!("{w}.")))
             })
             .collect();
         // Several: only a bare "Yes" (or "Yes (y)") is clearly the plain one.
@@ -521,6 +533,10 @@ some earlier output
         // Control and bidi characters never reach a caller.
         let sly = "Proceed?\n 1. Yes\u{202e}oN\n 2. No\u{9b}2J don\u{200b}'t\n";
         assert_eq!(parse(sly, None).unwrap().options, ["YesoN", "No2J don't"]);
+        let hidden = "Proceed?\n 1. Yes, al\u{ad}ways\u{e0041}\n 2. No\u{2028}\n";
+        let hidden = parse(hidden, None).unwrap();
+        assert_eq!(hidden.options, ["Yes, always", "No"]);
+        assert!(choose(&Prompt { complete: true, ..hidden }, "approve").is_err());
     }
 
     #[test]
@@ -590,12 +606,20 @@ some earlier output
             "Yes, for this directory",
             "Yes, and …",
             "Yes, al\u{ad}ways",
+            "Yes (always)",
+            "Allow (session)",
+            "Yes (for now on)",
+            "Yes (all)",
+            "Yes (permanent)",
+            "Yes (for session)",
         ] {
             assert!(choose(&menu(&[standing, "No"]), "approve").is_err(), "{standing}");
         }
         assert_eq!(choose(&menu(&["Yes, just this once", "Yes, and don't ask again for this command in this session", "No, and tell Codex what to do differently"]), "approve"), Ok(1));
         assert_eq!(choose(&menu(&["Allow once (a)", "Deny"]), "approve"), Ok(1));
         // `deny` never sets anything for later either.
+        assert!(choose(&menu(&["Yes", "No (always)"]), "deny").is_err());
+        assert_eq!(choose(&menu(&["Yes (y)", "No (esc)"]), "deny"), Ok(2));
         assert_eq!(choose(&menu(&["Yes", "No, and block this host in the future", "No, and tell Codex what to do differently"]), "deny"), Ok(3));
         // Several plain yeses: only a bare one is clear.
         assert!(choose(&menu(&["Yes, run it", "Yes, but in a sandbox", "No"]), "approve").is_err());
