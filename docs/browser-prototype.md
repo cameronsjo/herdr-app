@@ -34,8 +34,9 @@ gzipped) and the `.app` stays at 62 MB; the engine is the OS's. With CEF the
 which is why CEF isn't the proposal ([Engine](#engine-the-system-web-view-not-chromium)).
 The default build is unchanged. `src/browser/` is about 8,100 lines, tests
 included: about 2,200 WebKit-only, about 1,100 CEF-only, the rest shared.
-It is ad hoc signed only: Developer ID signing and notarization are not
-done. Measurements: [Details](#details-measured-facts).
+Local builds are ad hoc signed; the fork's everyday WebKit build is
+Developer ID signed, notarized and stapled by its CI (`fork-mac-build.yml`).
+Measurements: [Details](#details-measured-facts).
 
 ## Can's three questions
 
@@ -315,6 +316,7 @@ anything where the real cursor is. An agent click on an input that calls
 | Chromium version | 156.0.8078.48 | `CEF_VERSION` in the distribution's `include/cef_version.h`; the framework's `Info.plist` carries only `156.0.14.0` and branch 8078 |
 | Signing | ad hoc, no hardened runtime, no team | `codesign -dv` on the app and a helper: `flags=0x2(adhoc)`, `Signature=adhoc`, `TeamIdentifier=not set`; `codesign --verify --deep --strict` exits 0 |
 | Notarization | not attempted | — |
+| Signing, everyday WebKit build | Developer ID (team `5H883FMW6H`), hardened runtime, notarized and stapled, bundle id `dev.herdr.app.browser-daily` | the `sign` job of `fork-mac-build.yml`; not yet measured on a published release (Linear CAM-543) |
 | Sandbox | renderer, GPU and utility processes run sandboxed with ad hoc signing | checked once, in the first spike (each helper process reported sandboxed); not re-checked on this build |
 | Notices | not covered | `just notices` with cargo-about 0.9.3 exits 0 and leaves `THIRD-PARTY-NOTICES` unchanged; it has no `cef` or `cef-dll-sys` entry and nothing from Chromium's `CREDITS.html`; `licenses/inventory.json` has no CEF entry |
 | CEF download | about 135 MB to download, about 470 MB in `CEF_PATH` once unpacked | size of the `.tar.bz2`; `du -sh` on `CEF_PATH` |
