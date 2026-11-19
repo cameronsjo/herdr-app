@@ -709,6 +709,81 @@ pub fn claim_todo(
         .collect()
 }
 
+/// How long an app waits before it labels a terminal again after a
+/// `terminal.label` write failed (the core is gone, say), instead of every
+/// listing tick.
+pub const LABEL_RETRY: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Whether a terminal whose label write last failed at `failed` may be tried
+/// again at `now`.
+pub fn label_retry_due(failed: Option<std::time::Instant>, now: std::time::Instant) -> bool {
+    failed.is_none_or(|at| now.saturating_duration_since(at) >= LABEL_RETRY)
+}
+
+/// The other apps' sockets on terminals this app claimed this run, each with
+/// its terminals: another app started later took them (`claim_todo` claims
+/// each terminal once). When that app quits, [`app_quit`] says so and
+/// this app drops them from `claimed`, so its next listing labels them
+/// again: the surviving app takes its terminals back.
+pub fn taken_by_others(
+    live: &std::collections::HashMap<String, Value>,
+    claimed: &std::collections::HashSet<String>,
+    socket: &str,
+) -> std::collections::BTreeMap<String, Vec<String>> {
+    let mut out: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    for addr in claimed {
+        let label = live.get(addr).and_then(|r| r.pointer("/labels")).and_then(|l| l.get(SOCKET_LABEL)).and_then(Value::as_str);
+        if let Some(other) = label.filter(|l| *l != socket && !l.is_empty()) {
+            out.entry(other.to_owned()).or_default().push(addr.clone());
+        }
+    }
+    for terminals in out.values_mut() {
+        terminals.sort();
+    }
+    out
+}
+
+/// The terminals in `released` (quit app's socket → its terminals) that the
+/// core still lists with that socket: a terminal relabeled meanwhile (by
+/// this app or a newer one) is not taken back.
+pub fn still_labeled(live: &std::collections::HashMap<String, Value>, released: &[(String, Vec<String>)]) -> Vec<String> {
+    released
+        .iter()
+        .flat_map(|(socket, terminals)| {
+            terminals.iter().filter(move |t| {
+                live.get(*t).and_then(|r| r.pointer("/labels")).and_then(|l| l.get(SOCKET_LABEL)).and_then(Value::as_str) == Some(socket.as_str())
+            })
+        })
+        .cloned()
+        .collect()
+}
+
+/// Whether the app a label names quit: its socket file is gone, or it is a
+/// private socket ([`private_socket`]: this user's, in a folder only they
+/// can write to) that nobody listens on. A label pointing anywhere else is
+/// never connected to.
+#[cfg(unix)]
+pub fn app_quit(socket: &str) -> bool {
+    let path = std::path::Path::new(socket);
+    match std::fs::symlink_metadata(path) {
+        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+        Ok(_) => private_socket(path) && socket_gone(socket),
+    }
+}
+
+/// Whether no app serves `socket` any more: the file is gone, or nothing
+/// listens on it (an app that quit leaves its socket file). Any other error
+/// (another user's socket, say) is not taken as gone. A live app whose
+/// connection queue is full also refuses: it then loses its terminals to
+/// this app until its own next listing labels them again.
+#[cfg(unix)]
+fn socket_gone(socket: &str) -> bool {
+    match std::os::unix::net::UnixStream::connect(socket) {
+        Ok(_) => false,
+        Err(e) => matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused),
+    }
+}
+
 /// [`caller_facts`]'s answer from `hc connect`'s reply lines, in any order:
 /// the core's id (the `hello`, id 0) and the labeled socket (the
 /// `terminal.get`, id 1). A line that isn't JSON, or another id, is skipped.
@@ -905,7 +980,7 @@ pub enum Asked {
 /// Whether an app's error means it doesn't hold the terminal: it doesn't
 /// know it, has it parked, or is on another core.
 pub fn not_here(terminal: &str, error: &str) -> bool {
-    error == format!("no terminal {terminal} in Herdr") || error == crate::browser::parked(terminal) || error == crate::browser::other_core(terminal)
+    error == crate::browser::no_terminal(terminal) || error == crate::browser::parked(terminal) || error == crate::browser::other_core(terminal)
 }
 
 /// Asks each app in turn ([`provider_sockets`] order). The first answer or
@@ -931,11 +1006,26 @@ pub fn ask_in_turn<S>(sockets: &[S], mut ask: impl FnMut(&S) -> Asked) -> Result
     Err(not_held.or(unreachable))
 }
 
+/// How long [`ask_app`] waits for one app. A live app answers within its
+/// control socket's 5 s (`control::serve` replies "the window did not
+/// answer" then), so only a hung app waits this long. With up to three
+/// apps and [`caller_facts`]'s 3 s, an attach takes at most about 21 s,
+/// well inside agent-browser's 60 s for a provider's `browser.launch`.
+pub const ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(6);
+
+/// "Herdr is not running", naming the sockets this provider was given
+/// (pinned, default) and never a labeled one: that path is the core's text
+/// and stays out of the agent's context. A labeled socket equal to one of
+/// them is still named, as that one.
+pub fn not_running(pinned: Option<&str>, default: &str) -> String {
+    no_app(&provider_sockets(None, pinned, default).join(", "))
+}
+
 /// One attach request to one app over a connected socket.
 #[cfg(unix)]
 fn ask_app(mut stream: &std::os::unix::net::UnixStream, attach: &Value, terminal: &str) -> Asked {
     use std::io::{BufRead, BufReader, Read, Write};
-    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+    let _ = stream.set_read_timeout(Some(ASK_TIMEOUT));
     if let Err(e) = stream.write_all(format!("{}\n", json!({ "attach": attach })).as_bytes()) {
         return Asked::Unreachable(Some(format!("Herdr did not take the request: {e}")));
     }
@@ -988,11 +1078,12 @@ pub fn provider_main(args: &[String]) -> i32 {
                 let Ok(stream) = std::os::unix::net::UnixStream::connect(s) else { return Asked::Unreachable(None) };
                 if !crate::browser::socket::same_user(&stream) {
                     tracing::warn!("browser: skipping {}: its listener runs as another user", crate::browser::log_safe(s));
-                    return Asked::Unreachable(Some(format!("the socket at {s} is not this user's")));
+                    // No path: a labeled one is the core's text, not this app's.
+                    return Asked::Unreachable(Some("a Herdr socket for this terminal belongs to another user".to_owned()));
                 }
                 ask_app(&stream, &attach, &terminal)
             })
-            .map_err(|e| e.unwrap_or_else(|| no_app(&sockets.join(", "))))
+            .map_err(|e| e.unwrap_or_else(|| not_running(pinned.as_deref(), &default)))
         }),
         Err(e) => json!({ "protocol": PROTOCOL, "success": false, "error": e }),
     };
@@ -1043,6 +1134,83 @@ mod tests {
         assert_eq!(claim_todo(&m, &live, &claimed, mine), ["t2"]);
     }
 
+    #[test]
+    fn a_failed_label_is_retried_after_a_pause_not_every_tick() {
+        let now = std::time::Instant::now();
+        assert!(label_retry_due(None, now));
+        assert!(!label_retry_due(Some(now), now));
+        assert!(!label_retry_due(Some(now), now + LABEL_RETRY / 2));
+        assert!(label_retry_due(Some(now), now + LABEL_RETRY));
+    }
+
+    #[test]
+    fn the_app_finds_its_terminals_another_app_took() {
+        let (mine, other) = ("/me/a/herdr-app.sock", "/me/b/herdr-app.sock");
+        let labeled = |s: &str| json!({ "labels": { (SOCKET_LABEL): s } });
+        let live: std::collections::HashMap<String, Value> = [
+            ("t1".to_owned(), labeled(mine)),
+            ("t2".to_owned(), labeled(other)),
+            ("t3".to_owned(), labeled(other)),
+            ("t4".to_owned(), json!({ "labels": {} })),
+            ("t5".to_owned(), labeled(other)),
+        ]
+        .into();
+        // t5 is another app's but was never this app's; t6 is gone from the core.
+        let claimed: std::collections::HashSet<String> = ["t1", "t2", "t3", "t4", "t6"].map(str::to_owned).into();
+        let taken = taken_by_others(&live, &claimed, mine);
+        assert_eq!(taken.len(), 1);
+        assert_eq!(taken[other], ["t2", "t3"]);
+    }
+
+    #[test]
+    fn not_running_names_the_given_sockets_never_an_empty_list() {
+        let d = "/h/herdr-app.sock";
+        assert_eq!(not_running(Some(d), d), no_app(d));
+        assert_eq!(not_running(None, d), no_app(d));
+        assert_eq!(not_running(Some("/p/herdr-app.sock"), d), no_app(&format!("/p/herdr-app.sock, {d}")));
+    }
+
+    #[test]
+    fn only_terminals_still_labeled_with_the_quit_app_come_back() {
+        let (gone, mine) = ("/me/b/herdr-app.sock", "/me/a/herdr-app.sock");
+        let labeled = |s: &str| json!({ "labels": { (SOCKET_LABEL): s } });
+        let live: std::collections::HashMap<String, Value> = [("t2".to_owned(), labeled(gone)), ("t3".to_owned(), labeled(mine))].into();
+        // t3 was relabeled while the check ran; t4 left the core.
+        let released = vec![(gone.to_owned(), vec!["t2".to_owned(), "t3".to_owned(), "t4".to_owned()])];
+        assert_eq!(still_labeled(&live, &released), ["t2"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_label_naming_a_missing_socket_is_an_app_that_quit() {
+        assert!(app_quit(&format!("/nonexistent-herdr-{}/herdr-app.sock", std::process::id())));
+        // A file that exists but is no private socket is never connected to.
+        let dir = std::env::temp_dir().join(format!("herdr-quit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("herdr-app.sock");
+        std::fs::write(&file, "").unwrap();
+        assert!(!app_quit(&file.to_string_lossy()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_socket_nobody_serves_is_gone() {
+        let dir = std::env::temp_dir().join(format!("herdr-gone-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("herdr-app.sock");
+        let path = sock.to_string_lossy().into_owned();
+        assert!(socket_gone(&path), "a missing socket file");
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        assert!(!socket_gone(&path), "a served socket");
+        // An app that quit leaves its socket file behind.
+        drop(listener);
+        assert!(sock.exists());
+        assert!(socket_gone(&path), "a socket file nobody listens on");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // The label is a unix path, which only unix reads as absolute.
     #[cfg(unix)]
     #[test]
@@ -1090,7 +1258,7 @@ mod tests {
     fn the_provider_stops_at_the_app_holding_the_terminal() {
         use crate::browser::{other_core, parked};
         let t = "t3";
-        assert!(not_here(t, &format!("no terminal {t} in Herdr")) && not_here(t, &parked(t)) && not_here(t, &other_core(t)));
+        assert!(not_here(t, &crate::browser::no_terminal(t)) && not_here(t, &parked(t)) && not_here(t, &other_core(t)));
         assert!(!not_here(t, &access_off("b1")) && !not_here(t, &no_browser()) && !not_here(t, &parked("t4")));
         let ok = json!({ "cdpUrl": "ws://x" });
         let run = |answers: Vec<Asked>| {

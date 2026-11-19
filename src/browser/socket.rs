@@ -1,6 +1,7 @@
 //! FORK(browser): the control socket is this user's only. Agent access to a
 //! browser is the person's switch, and an agent reaches it through the
-//! socket, so another user must not (`control.rs` calls these two).
+//! socket, so another user must not (`control.rs` calls `bind_control` and
+//! `same_user`).
 
 use std::io;
 use std::path::Path;
@@ -34,6 +35,26 @@ pub fn bind_private<L>(path: &Path, bind: impl FnOnce(&Path) -> io::Result<L>) -
         }
     }
     Ok(listener)
+}
+
+/// Whether this app serves its control socket ([`bind_control`] bound it).
+static SERVING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// [`bind_private`] for the app's control socket, remembering whether it
+/// bound. An app labels its terminals with its socket only if it bound it
+/// ([`serving`]), so a second app on the same home, which binds nothing,
+/// never labels terminals with the first one's socket.
+pub fn bind_control<L>(path: &Path, bind: impl FnOnce(&Path) -> io::Result<L>) -> io::Result<L> {
+    let bound = bind_private(path, bind);
+    SERVING.store(bound.is_ok(), std::sync::atomic::Ordering::Relaxed);
+    bound
+}
+
+/// Whether [`bind_control`] bound the control socket.
+// Read only where browsers run (`fork_claim_terminals`); tests read it everywhere.
+#[cfg_attr(not(all(target_os = "macos", feature = "browser-pane")), allow(dead_code))]
+pub fn serving() -> bool {
+    SERVING.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// The socket's folder is owned by the socket's owner and no one else may write to it.
@@ -86,6 +107,20 @@ mod tests {
         let _client = UnixStream::connect(&path).unwrap();
         let (served, _) = listener.accept().unwrap();
         assert!(same_user(&served), "this user's own connection is dropped");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_a_bound_control_socket_counts_as_served() {
+        let dir = std::env::temp_dir().join(format!("herdr-sock-ctl-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = dir.join("s.sock");
+        let _ = std::fs::remove_file(&path);
+        let refused = bind_control(&path, |_| Err::<UnixListener, _>(std::io::Error::from(std::io::ErrorKind::AddrInUse)));
+        assert!(refused.is_err() && !serving(), "a failed bind is not served");
+        let _listener = bind_control(&path, |p| UnixListener::bind(p)).unwrap();
+        assert!(serving());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

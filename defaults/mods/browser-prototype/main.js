@@ -46,6 +46,10 @@ export default class BrowserPage extends View {
     const { browser, float } = props() ?? {};
     const saved = panes().find((p) => p.browser === browser)?.url;
     const { title, note } = placeholder(browsers().find((b) => b.browser === browser), saved, Boolean(float));
+    // A float never holds the page (its report would move it). It is sized
+    // to its content, where size_full() collapses to nothing
+    // (cameronsjo/herdr-app#43), so its note gets a width of its own.
+    if (float) return div().w(320).p(16).bg(t.surface).text_color(t.dim).child(note);
     const card = div()
       .size_full()
       .flex()
@@ -62,7 +66,6 @@ export default class BrowserPage extends View {
       .size_full()
       .relative()
       .child(card)
-      // A float doesn't hold the page: its report would move it.
-      .when(Boolean(browser) && !float, (d) => d.child(nativeView("browser", browser).absolute().inset_0()));
+      .when(Boolean(browser), (d) => d.child(nativeView("browser", browser).absolute().inset_0()));
   }
 }
