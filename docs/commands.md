@@ -107,8 +107,8 @@ Move a tab (the active one if no id) with its panes and terminals to another spa
 
 | Argument | Required |
 |---|---|
-| `id` | no |
 | `space` | yes |
+| `id` | no |
 | `index` | no |
 
 ## `space.merge`
@@ -117,8 +117,8 @@ Move every tab of a space (default: the shown one) to the end of another space o
 
 | Argument | Required |
 |---|---|
-| `id` | no |
 | `into` | yes |
+| `id` | no |
 
 ## `pane.split`
 

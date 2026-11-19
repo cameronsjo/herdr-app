@@ -40,8 +40,8 @@ pub const COMMANDS: &[Command] = &[
     cmd("tab.rename", &[opt("id"), opt("name")], "Rename a tab (asks the person when no name; an empty name: called by its number again)."),
     cmd("tab.move", &[opt("id"), opt("index"), opt("by")], "Move a tab (the active one if no id) to a position in its space (1 = first), or `by` places left (-) or right (+), wrapping."),
     // FORK(spaces): run by src/window/fork_spaces.rs.
-    cmd("tab.move_to_space", &[opt("id"), req("space"), opt("index")], "Move a tab (the active one if no id) with its panes and terminals to another space on the same machine, at a position (1 = first; default: last). Moving a space's last tab takes the space away; its terminals keep running. A shown tab stays shown."),
-    cmd("space.merge", &[opt("id"), req("into")], "Move every tab of a space (default: the shown one) to the end of another space on the same machine, in order, and take the emptied space away; its terminals keep running."),
+    cmd("tab.move_to_space", &[req("space"), opt("id"), opt("index")], "Move a tab (the active one if no id) with its panes and terminals to another space on the same machine, at a position (1 = first; default: last). Moving a space's last tab takes the space away; its terminals keep running. A shown tab stays shown."),
+    cmd("space.merge", &[req("into"), opt("id")], "Move every tab of a space (default: the shown one) to the end of another space on the same machine, in order, and take the emptied space away; its terminals keep running."),
     cmd("pane.split", &[req("direction"), opt("pane"), opt("argv"), opt("mod"), opt("props")], "Split a pane (default: the focused one) \"right\" or \"down\" with a new terminal, or with a mod (`mod`, its `props`) beside it."),
     cmd("pane.close", &[opt("pane")], "Close a pane and end its terminal."),
     cmd("terminal.open", &[opt("argv"), opt("folder"), opt("place"), opt("name")], "Start a terminal: as a new tab (place \"tab\", default), or \"right\"/\"down\" of the focused pane."),

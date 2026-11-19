@@ -587,6 +587,30 @@ pub fn offline() -> Arc<Core> {
     })
 }
 
+// FORK(spaces): a test core whose replies a test picks, for a label write that fails.
+/// A core that answers every call at once with what `reply` returns for its
+/// method and params: `Err` is the core's error object.
+#[cfg(test)]
+pub fn scripted(reply: impl Fn(&str, &Value) -> Result<Value, Value> + Send + 'static) -> Arc<Core> {
+    let (writer, frames) = mpsc::channel::<Vec<u8>>();
+    let (lost_tx, lost) = async_channel::bounded(1);
+    std::mem::forget(lost_tx);
+    let routes = Arc::new(Mutex::new(Routes::default()));
+    let replies = routes.clone();
+    std::thread::spawn(move || {
+        for frame in frames {
+            let Some(Ok(req)) = frame.get(HEADER..).map(serde_json::from_slice::<Value>) else { continue };
+            let result = reply(req["method"].as_str().unwrap_or_default(), &req["params"]);
+            let id = req["id"].as_u64().unwrap_or_default();
+            if let Some(tx) = replies.lock().unwrap().replies.remove(&id) {
+                let _ = tx.send(result);
+            }
+        }
+    });
+    let child = std::process::Command::new(std::env::current_exe().unwrap()).arg("--help").stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+    Arc::new(Core { hello: Value::Null, writer, routes, next_id: AtomicU64::new(1), child: Mutex::new(child), lost })
+}
+
 /// A core that answers every call at once: `terminal.run` with a new address,
 /// whose argv it passes on to `runs`; anything else with `{}`.
 #[cfg(test)]

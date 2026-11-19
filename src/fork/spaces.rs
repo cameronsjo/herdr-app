@@ -57,6 +57,9 @@ pub fn move_tab(
     }
     let terminals = model::addresses(&moved.root);
     let dst = &mut m.spaces[to];
+    // A space with no tab selected shows its first: keep showing that one
+    // when the tab goes in ahead of it.
+    dst.active = dst.active_tab().map(|c| c.id.clone());
     let at = index.map_or(dst.tabs.len(), |i| i.saturating_sub(1).min(dst.tabs.len()));
     dst.tabs.insert(at, moved);
     let from_id = m.spaces[from].id.clone();
@@ -192,6 +195,28 @@ mod tests {
     }
 
     #[test]
+    fn a_tab_put_first_leaves_the_tab_its_new_space_showed() {
+        // p2 has no tab selected (or names one that is gone): it shows c3.
+        for gone in [None, Some("nope".to_owned())] {
+            let mut m = three();
+            m.space_mut("p2").unwrap().active = gone;
+            move_tab(&mut m, "c2", "p2", Some(1)).unwrap();
+            assert_eq!(tabs(&m, "p2"), ["c2", "c3"]);
+            assert_eq!(
+                m.space("p2")
+                    .and_then(|s| s.active_tab())
+                    .map(|c| c.id.as_str()),
+                Some("c3")
+            );
+        }
+        // A shown tab moved first is shown there instead.
+        let mut m = three();
+        m.select_tab("c2");
+        move_tab(&mut m, "c2", "p2", Some(1)).unwrap();
+        assert_eq!(m.active_tab().map(|c| c.id.as_str()), Some("c2"));
+    }
+
+    #[test]
     fn the_last_tab_takes_its_space_away_without_making_it_recent() {
         let mut m = three();
         m.select_tab("c3");
@@ -226,6 +251,21 @@ mod tests {
         assert_eq!(m.active_tab().map(|c| c.id.as_str()), Some("c2"));
         assert!(merge(&mut m, "p2", "p2").is_err());
         assert!(m.recent.is_empty());
+    }
+
+    #[test]
+    fn the_key_shorthand_names_the_destination() {
+        let short = |name: &str, value: &str| {
+            crate::commands::shorthand(crate::commands::find(name).unwrap(), value)
+        };
+        assert_eq!(
+            short("tab.move_to_space", "p2"),
+            serde_json::json!({ "space": "p2" })
+        );
+        assert_eq!(
+            short("space.merge", "p2"),
+            serde_json::json!({ "into": "p2" })
+        );
     }
 
     #[test]
