@@ -722,7 +722,7 @@ pub fn label_retry_due(failed: Option<std::time::Instant>, now: std::time::Insta
 
 /// The other apps' sockets on terminals this app claimed this run, each with
 /// its terminals: another app started later took them (`claim_todo` claims
-/// each terminal once). When that app quits, [`socket_gone`] says so and
+/// each terminal once). When that app quits, [`app_quit`] says so and
 /// this app drops them from `claimed`, so its next listing labels them
 /// again: the surviving app takes its terminals back.
 pub fn taken_by_others(
@@ -777,7 +777,7 @@ pub fn app_quit(socket: &str) -> bool {
 /// connection queue is full also refuses: it then loses its terminals to
 /// this app until its own next listing labels them again.
 #[cfg(unix)]
-pub fn socket_gone(socket: &str) -> bool {
+fn socket_gone(socket: &str) -> bool {
     match std::os::unix::net::UnixStream::connect(socket) {
         Ok(_) => false,
         Err(e) => matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused),
@@ -1013,6 +1013,14 @@ pub fn ask_in_turn<S>(sockets: &[S], mut ask: impl FnMut(&S) -> Asked) -> Result
 /// well inside agent-browser's 60 s for a provider's `browser.launch`.
 pub const ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(6);
 
+/// "Herdr is not running", naming the sockets this provider was given
+/// (pinned, default) and never a labeled one: that path is the core's text
+/// and stays out of the agent's context. A labeled socket equal to one of
+/// them is still named, as that one.
+pub fn not_running(pinned: Option<&str>, default: &str) -> String {
+    no_app(&provider_sockets(None, pinned, default).join(", "))
+}
+
 /// One attach request to one app over a connected socket.
 #[cfg(unix)]
 fn ask_app(mut stream: &std::os::unix::net::UnixStream, attach: &Value, terminal: &str) -> Asked {
@@ -1075,9 +1083,7 @@ pub fn provider_main(args: &[String]) -> i32 {
                 }
                 ask_app(&stream, &attach, &terminal)
             })
-            // The sockets this app chose (pinned, default), not a labeled one:
-            // that path is the core's text and stays out of the agent's context.
-            .map_err(|e| e.unwrap_or_else(|| no_app(&sockets.iter().filter(|s| Some(s.as_str()) != labeled.as_deref()).cloned().collect::<Vec<_>>().join(", "))))
+            .map_err(|e| e.unwrap_or_else(|| not_running(pinned.as_deref(), &default)))
         }),
         Err(e) => json!({ "protocol": PROTOCOL, "success": false, "error": e }),
     };
@@ -1154,6 +1160,14 @@ mod tests {
         let taken = taken_by_others(&live, &claimed, mine);
         assert_eq!(taken.len(), 1);
         assert_eq!(taken[other], ["t2", "t3"]);
+    }
+
+    #[test]
+    fn not_running_names_the_given_sockets_never_an_empty_list() {
+        let d = "/h/herdr-app.sock";
+        assert_eq!(not_running(Some(d), d), no_app(d));
+        assert_eq!(not_running(None, d), no_app(d));
+        assert_eq!(not_running(Some("/p/herdr-app.sock"), d), no_app(&format!("/p/herdr-app.sock, {d}")));
     }
 
     #[test]

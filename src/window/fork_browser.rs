@@ -734,9 +734,10 @@ impl AppWindow {
             let slot = div()
                 .size_full()
                 .key_context(super::key_context("Mod", "mod", block::BROWSER_MOD))
-                // A layout block (not a tab's pane): as `render_slot` does, a bare
-                // click leaves the keyboard with the focused pane.
-                .when(self.model.tab_of(&n.id).is_none(), |d| {
+                // A layout block (not a tab's pane or an overlay's): as
+                // `render_slot` does, a bare click leaves the keyboard with the
+                // focused pane.
+                .when(self.model.tab_of(&n.id).is_none() && !self.overlays.iter().any(|o| o.layout.as_ref().is_some_and(|l| l.find(&n.id).is_some())), |d| {
                     d.capture_any_mouse_down(cx.listener(|_, _, window, cx| cx.defer_in(window, |this, window, cx| this.refocus_pane(window, cx))))
                 })
                 .child(root);
