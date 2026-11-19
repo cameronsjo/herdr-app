@@ -79,7 +79,8 @@ say "submitted $name as $id"
 # wait and its status separately, so a timeout still leaves time for the log.
 wait_rc=0
 xcrun notarytool wait "$id" "${auth[@]}" --timeout 30m --output-format json > "$work/wait.json" || wait_rc=$?
-status=$(jq -r '.status // "unknown"' "$work/wait.json" 2>/dev/null || echo unknown)
+status=$(jq -r '.status // "unknown"' "$work/wait.json" 2>/dev/null || true)
+status=${status:-unknown}
 {
   echo "### Notarization: $name"
   echo "- Submission: \`$id\`"

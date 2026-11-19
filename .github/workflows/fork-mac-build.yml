@@ -72,7 +72,7 @@ jobs:
           name: herdr-browser-webkit-unsigned
           path: dist/herdr-browser-webkit-unsigned.zip
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 3
 
   # The only job that can read the Apple secrets (environment apple-signing,
   # master only). It checks out nothing but the fork's signing files, runs no

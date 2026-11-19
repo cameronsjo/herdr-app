@@ -38,14 +38,21 @@ run() {
 running() { pgrep -f -- "$1/Contents/MacOS/" >/dev/null 2>&1; }
 # FORK(signing): a release fork-mac-build signed with the fork's Developer ID,
 # notarized and stapled for the everyday bundle id. Kept in step with
-# scripts/fork/daily-update's copy.
+# scripts/fork/daily-update's copy. Returns 0 for that build; 1 when the app is
+# not signed by the fork's Developer ID for that id; 2 when it is, but spctl or
+# stapler does not confirm the notarization (devid_why says which).
 fork_team=5H883FMW6H
+devid_why=
 genuine_devid() {
   local app=$1
+  devid_why="not signed by the fork's Developer ID for $daily_id"
   codesign --verify --deep --strict \
     -R "=anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = \"$fork_team\" and identifier \"$daily_id\"" "$app" >/dev/null 2>&1 || return 1
-  [[ "$(spctl -a -t exec -vv "$app" 2>&1)" == *"source=Notarized Developer ID"* ]] || return 1
-  xcrun stapler validate "$app" >/dev/null 2>&1
+  devid_why="signed by the fork's Developer ID, but spctl does not report it notarized"
+  [[ "$(spctl -a -t exec -vv "$app" 2>&1)" == *"source=Notarized Developer ID"* ]] || return 2
+  devid_why="signed by the fork's Developer ID, but stapler validate fails"
+  xcrun stapler validate "$app" >/dev/null 2>&1 || return 2
+  devid_why=
 }
 signature_kind() {
   if [ ! -d "$1" ]; then echo none
@@ -101,10 +108,15 @@ case "${1:-}" in
       # source to show which path a real run would take.
       checked=$daily
       [ "${DRY_RUN:-}" = 1 ] && checked=$src
-      if genuine_devid "$checked"; then
+      rc=0
+      genuine_devid "$checked" || rc=$?
+      if [ "$rc" -eq 0 ]; then
         echo "keeping its Developer ID signature (notarized, bundle id $daily_id)"
         now="Developer ID"
       else
+        # The app is already quit, so even a Developer ID build that fails the
+        # notarization check is re-signed ad hoc rather than left uninstalled.
+        [ "$rc" -eq 2 ] && echo "browser-daily: $devid_why; signing it ad hoc instead" >&2
         # WebKit keeps the person's cookies and storage per bundle id: its own
         # id keeps them apart from the dev app's (CEF keeps them per app home).
         echo "giving it its own bundle id ($daily_id), signed ad hoc"
