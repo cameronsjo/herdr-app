@@ -598,7 +598,7 @@ The main ones:
   in beside it like any tab), `tab.close {id?, confirmed?}` (closing the last tab
   closes its space and asks first unless confirmed),
   `tab.rename {id?, name}` ("": its number again), `tab.move {id?, index | by}` (by: places left (-) or right (+), skipping settled tabs as `tab.next` does, wrapping),
-  `tab.move_to_space {id?, space, index?}` (to another space on the same machine, last by default; a space's last tab takes the space away, its terminals still running), `space.merge {id?, into}` (every tab, in order, to the end of `into`) <!-- FORK(spaces) -->,
+  `tab.move_to_space {space, id?, index?}` (to another space on the same machine, last by default; a space's last tab takes the space away, its terminals still running), `space.merge {into, id?}` (every tab, in order, to the end of `into`) <!-- FORK(spaces) -->,
   `tab.select {index | id}`, `tab.next`, `tab.prev`,
   `tab.settle {id?}`, `tab.unsettle {id?}` (index, next and prev
   skip settled tabs).
@@ -746,6 +746,13 @@ herdr-app commands    # every command and its arguments
 
 `herdr-app do` prints what the command made (`{ "space", "tab",
 "terminal" }`, `{ "pane", "terminal" }`) or `{ "error": "..." }` and exits 1.
+
+<!-- FORK(approval): the approval command, in one block. -->
+`herdr-app approval show <terminal>` prints the numbered menu a blocked agent
+shows (a permission prompt or a question) with a token for that exact prompt;
+`herdr-app approval answer <terminal> <number|approve|deny> --token <token>
+[--wait <secs>]` presses that option's key only while the agent still shows
+it. Answer only prompts you have read and were asked to answer.
 
 ## The person: `settings.json`
 
