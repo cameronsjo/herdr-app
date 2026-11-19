@@ -33,6 +33,22 @@ run() {
   if [ "${DRY_RUN:-}" = 1 ]; then printf 'would run:'; printf ' %q' "$@"; echo; else "$@"; fi
 }
 running() { pgrep -f -- "$1/Contents/MacOS/" >/dev/null 2>&1; }
+# FORK(signing): a release fork-mac-build signed with the fork's Developer ID,
+# notarized and stapled for the everyday bundle id. Kept in step with
+# scripts/fork/daily-update's copy.
+fork_team=5H883FMW6H
+genuine_devid() {
+  local app=$1
+  codesign --verify --deep --strict \
+    -R "=anchor apple generic and certificate leaf[subject.OU] = \"$fork_team\" and identifier \"$daily_id\"" "$app" >/dev/null 2>&1 || return 1
+  [[ "$(spctl -a -t exec -vv "$app" 2>&1)" == *"source=Notarized Developer ID"* ]] || return 1
+  xcrun stapler validate "$app" >/dev/null 2>&1
+}
+signature_kind() {
+  if [ ! -d "$1" ]; then echo none
+  elif genuine_devid "$1"; then echo "Developer ID"
+  else echo "ad hoc"; fi
+}
 which_runs() {
   if running "$daily"; then echo "browser build ($daily)"
   elif running "$stock"; then echo "Herdr ($stock)"
@@ -70,16 +86,29 @@ case "${1:-}" in
     [ -x "$stock/Contents/MacOS/Herdr" ] || { echo "browser-daily: no $stock to switch back to; install Herdr first." >&2; exit 1; }
     quit_herdr "$daily"
     quit_herdr "$stock"
+    was=$(signature_kind "$daily")
     echo "copying $src to $daily"
     run mkdir -p "$(dirname "$daily")"
     run rm -rf "$daily"
     run ditto "$src" "$daily"
+    now="ad hoc"  # the CEF bundle is only ever built and signed ad hoc locally
     if [ "$bundle" = browser-dev-webkit ]; then
-      # WebKit keeps the person's cookies and storage per bundle id: its own
-      # id keeps them apart from the dev app's (CEF keeps them per app home).
-      echo "giving it its own bundle id ($daily_id), signed ad hoc"
-      run /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $daily_id" "$daily/Contents/Info.plist"
-      run codesign --force --deep --sign - --preserve-metadata=entitlements "$daily"
+      # ditto keeps the signature, so the source decides (the copy may not
+      # exist under DRY_RUN).
+      if genuine_devid "$src"; then
+        echo "keeping its Developer ID signature (notarized, bundle id $daily_id)"
+        now="Developer ID"
+      else
+        # WebKit keeps the person's cookies and storage per bundle id: its own
+        # id keeps them apart from the dev app's (CEF keeps them per app home).
+        echo "giving it its own bundle id ($daily_id), signed ad hoc"
+        run /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $daily_id" "$daily/Contents/Info.plist"
+        run codesign --force --deep --sign - --preserve-metadata=entitlements "$daily"
+        now="ad hoc"
+      fi
+    fi
+    if [ "$was" != none ] && [ "$was" != "$now" ]; then
+      echo "the app's code identity changed ($was -> $now): macOS asks once more for camera, microphone and keychain access"
     fi
     echo "opening the browser build on your real home"
     run open -n "$daily"

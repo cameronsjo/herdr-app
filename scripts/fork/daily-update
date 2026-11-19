@@ -149,6 +149,8 @@ fetch_release() {
   fi
   ditto -x -k "$dir/$asset" "$dir/unpacked" || { say "${sha:0:8}: could not unpack $asset"; return 1; }
   [[ -d "$dir/unpacked/Herdr Dev.app" ]] || { say "${sha:0:8}: $asset holds no Herdr Dev.app"; return 1; }
+  codesign --verify --deep --strict "$dir/unpacked/Herdr Dev.app" 2>/dev/null ||
+    { say "${sha:0:8}: the Herdr Dev.app in $asset fails codesign --verify"; return 1; }
   xattr -dr com.apple.quarantine "$dir/unpacked/Herdr Dev.app" 2>/dev/null || true
   local dest="$build/target/browser-dev-webkit"
   mkdir -p "$dest" && rm -rf "$dest/Herdr Dev.app" && mv "$dir/unpacked/Herdr Dev.app" "$dest/Herdr Dev.app" ||
@@ -157,17 +159,46 @@ fetch_release() {
   return 0
 }
 
-# Same steps as browser-daily on, minus quitting and opening: its own bundle id, signed ad hoc.
+# A release fork-mac-build signed with the fork's Developer ID, notarized and
+# stapled for the everyday bundle id. Kept in step with browser-daily's copy.
+fork_team=5H883FMW6H
+daily_id=dev.herdr.app.browser-daily
+genuine_devid() {
+  local app=$1
+  codesign --verify --deep --strict \
+    -R "=anchor apple generic and certificate leaf[subject.OU] = \"$fork_team\" and identifier \"$daily_id\"" "$app" >/dev/null 2>&1 || return 1
+  [[ "$(spctl -a -t exec -vv "$app" 2>&1)" == *"source=Notarized Developer ID"* ]] || return 1
+  xcrun stapler validate "$app" >/dev/null 2>&1
+}
+signature_kind() {
+  if [[ ! -d $1 ]]; then echo none
+  elif genuine_devid "$1"; then echo "Developer ID"
+  else echo "ad hoc"; fi
+}
+
+# Same steps as browser-daily on, minus quitting and opening. A genuine
+# Developer ID build is installed as is; anything else gets its own bundle id
+# and an ad hoc signature, as before.
 install_bundle() {
-  local src="$build/target/browser-dev-webkit/Herdr Dev.app" sha=$1
+  local src="$build/target/browser-dev-webkit/Herdr Dev.app" sha=$1 was now
+  was=$(signature_kind "$daily")
   mkdir -p "$(dirname "$daily")"
   rm -rf "$daily.next"
   ditto "$src" "$daily.next"
-  /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier dev.herdr.app.browser-daily" "$daily.next/Contents/Info.plist"
-  codesign --force --deep --sign - --preserve-metadata=entitlements "$daily.next"
+  if genuine_devid "$daily.next"; then
+    now="Developer ID"
+  else
+    /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $daily_id" "$daily.next/Contents/Info.plist"
+    codesign --force --deep --sign - --preserve-metadata=entitlements "$daily.next"
+    now="ad hoc"
+  fi
   rm -rf "$daily"
   mv "$daily.next" "$daily"
   printf '%s\n' "$sha" > "$installed_file"
+  say "${sha:0:8}: installed $now signed"
+  if [[ $was != none && $was != "$now" ]]; then
+    say "the app's code identity changed ($was -> $now): macOS asks once more for camera, microphone and keychain access"
+  fi
 }
 
 # The agent's copy follows the build worktree's script (takes effect on the next run).
