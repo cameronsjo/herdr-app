@@ -23,6 +23,9 @@
 # The build is the debug-profile dev bundle (scripts/browser-dev-bundle
 # --webkit), the same one `just browser-build --webkit` and browser-daily use;
 # a download lands where that build would, in the build worktree's target/.
+# A download from a signed release is already Developer ID signed, notarized
+# and stapled with the everyday bundle id, and is installed as is; anything
+# else (a local build, an ad hoc release) gets that id and an ad hoc signature.
 # The agent runs a copy of this script (~/.local/share/herdr-fork/); `check`
 # refreshes that copy from the build worktree by an atomic rename, so a
 # running copy is never rewritten.

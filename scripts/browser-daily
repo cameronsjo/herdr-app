@@ -16,6 +16,9 @@
 # `on` copies the bundle `just browser-build [--webkit]` made to
 # ~/Applications/Herdr Browser.app first, so later dev rebuilds never remove
 # the binary your everyday app runs from. Re-run `on` to take a newer build.
+# A WebKit bundle that daily-update downloaded from a signed release keeps its
+# Developer ID signature; any other WebKit bundle gets the everyday bundle id
+# and an ad hoc signature.
 # It then adds Herdr's provider to ~/.agent-browser/config.json
 # (browser.agent_browser_setup), so terminals from before the switch can use
 # `agent-browser -p herdr --session herdr-$HC_TERMINAL_ID`.

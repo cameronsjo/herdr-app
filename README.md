@@ -51,7 +51,7 @@ The install commands in upstream's README install upstream's app, not this one. 
 ### Under the hood
 
 - **Background mods.** A mod can run with nothing on screen, which is what the folder, worktree-group, tab-name and outside-agent features above use.
-- **Release on merge.** Each change merged to `master` is built on GitHub's Mac runners and published as an attested prerelease. A small job on Cameron's Mac checks hourly, verifies the build came from this repo's workflow, and installs it, never quitting a running app.
+- **Release on merge.** Each change merged to `master` is built on GitHub's Mac runners, signed with the fork's Developer ID and notarized, and published as an attested prerelease. A small job on Cameron's Mac checks hourly, verifies the build came from this repo's workflow, and installs it, never quitting a running app.
 - **Weekly upstream sync.** A scheduled Claude session reviews upstream's new code for supply-chain risk before running any of it, then merges it in. A clean sync merges itself once tests pass. One with conflicts or a workflow change waits for a person, and a security concern stops the sync and opens an issue. [How it works](docs/fork/weekly-sync.md).
 - **Extra CI** for what upstream's doesn't test: the WebKit browser build on macOS and the fork's own mods.
 
