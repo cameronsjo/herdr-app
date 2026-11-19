@@ -225,8 +225,9 @@ Never stop a server or session you didn't start.
 - Open a folder without making a second space for it:
   `herdr-app do open-folder.open:~/code/app` goes to the space already there, else makes one.
 - Move the shown space with its git worktree spaces: `herdr-app do space-groups.up` (or `.down`).
-- A terminal started with a name (`hc run --name fix-login …`) names its tab, if
-  nobody named the tab; a tab still called by the old name follows a new one.
+- A terminal started with a name (`hc run --name fix-login …`) names its tab when
+  it is the tab's only named terminal and nobody named the tab; a tab still called
+  by the old name follows a new one.
 - Extra environment variables for an agent go through `env` in its argv
   (macOS and Linux): `herdr-app do tab.new --name api --argv '["env","API_MODE=dev","claude"]'`.
   The values show in the terminal's argv (`hc ls`), so don't pass secrets this way.

@@ -95,22 +95,31 @@ test("space-groups stays on its machine and leaves a worktree with no main alone
 
 const term = (address: string, name: string | null, tab: string, state = "live") => ({ address, name, state, labels: { "herdr.tab": tab } });
 const tabsOf = (...tabs: { id: string; name: string; named: boolean }[]) => new Map(tabs.map((t) => [t.id, t]));
+// The tab each terminal's pane is in (panes()), here taken from the test's own label plus
+// the address's machine prefix; the mod itself never reads the label.
+const at = (all: { address: string; labels: Record<string, string> }[]) =>
+  new Map(all.map((t) => [t.address, t.address.includes("/") ? `${t.address.split("/")[0]}/${t.labels["herdr.tab"]}` : t.labels["herdr.tab"]]));
+async function loadPlan() {
+  const { plan, tabsByTerminal } = await load("name-sync", ["plan", "tabsByTerminal"]);
+  return { raw: plan, tabsByTerminal, plan: (all: any[], tabs: Map<string, any>, last: object) => plan(all, tabs, last, at(all)) };
+}
 
 test("name-sync names an unnamed tab after its one named terminal", async () => {
-  const { plan } = await load("name-sync", ["plan"]);
+  const { plan } = await loadPlan();
   const tabs = tabsOf({ id: "c1", name: "1", named: false }, { id: "vps/c2", name: "2", named: false }, { id: "c3", name: "3", named: false });
   const all = [term("t1", "fix-login", "c1"), term("vps/t7", "deploy", "c2"), term("t3", "a", "c3"), term("t4", "b", "c3"), term("t5", null, "c1")];
   const { renames, seen } = plan(all, tabs, {});
   // Two named terminals in c3: neither name wins, and neither is decided yet.
   // A remote tab carries its machine prefix.
   expect(renames).toEqual([{ id: "c1", name: "fix-login" }, { id: "vps/c2", name: "deploy" }]);
-  expect(seen).toEqual({ t1: { name: "fix-login", tab: "c1" }, "vps/t7": { name: "deploy", tab: "vps/c2" } });
+  // Nothing is recorded until the tabs show the names (see the retry test).
+  expect(seen).toEqual({});
   // Once t4 ends, t3 is c3's only named terminal: c3 takes its name.
   expect(plan([all[2], term("t4", "b", "c3", "finished")], tabs, seen).renames).toEqual([{ id: "c3", name: "a" }]);
 });
 
 test("name-sync waits for a tab that isn't shown yet", async () => {
-  const { plan } = await load("name-sync", ["plan"]);
+  const { plan } = await loadPlan();
   const all = [term("t1", "fix-login", "c9")];
   const first = plan(all, tabsOf(), {});
   expect(first).toEqual({ renames: [], seen: {} });
@@ -123,7 +132,7 @@ test("name-sync waits for a tab that isn't shown yet", async () => {
 });
 
 test("name-sync leaves a tab someone named, unless it still carries the old name", async () => {
-  const { plan } = await load("name-sync", ["plan"]);
+  const { plan } = await loadPlan();
   const all = [term("t1", "fix-login-2", "c1")];
   const was = (name: string, tab = "c1") => ({ t1: { name, tab } });
   // Renamed since we looked, and the tab still says the old name: it follows.
@@ -139,8 +148,42 @@ test("name-sync leaves a tab someone named, unless it still carries the old name
   expect(plan(all, tabsOf({ id: "c1", name: "1", named: false }), was("fix-login-2", "c0")).renames).toEqual([{ id: "c1", name: "fix-login-2" }]);
 });
 
+test("name-sync finds a terminal's tab from its pane, not from its label", async () => {
+  const { raw, tabsByTerminal } = await loadPlan();
+  const where = tabsByTerminal([{ pane: "p1", terminal: "t1", tab: "c1" }, { pane: "p2", terminal: null, tab: "c2" }, { pane: "p3", terminal: "t1", tab: "c3" }]);
+  expect([...where]).toEqual([["t1", "c1"]]);
+  // t1's label claims c2, an unnamed tab it isn't in: c2 stays as it is.
+  const tabs = tabsOf({ id: "c1", name: "work", named: true }, { id: "c2", name: "2", named: false });
+  expect(raw([term("t1", "x", "c2")], tabs, {}, where).renames).toEqual([]);
+  // A terminal shown in no pane has no tab yet.
+  expect(raw([term("t9", "x", "c2")], tabs, {}, where)).toEqual({ renames: [], seen: {} });
+});
+
+test("name-sync retries a rename that hasn't shown on the tab", async () => {
+  const { plan } = await loadPlan();
+  const all = [term("t1", "fix-login-2", "c1")];
+  const was = { t1: { name: "fix-login", tab: "c1" } };
+  // Asked to rename: what it knew stays, so a rejected rename is asked for again.
+  const first = plan(all, tabsOf({ id: "c1", name: "fix-login", named: true }), was);
+  expect(first).toEqual({ renames: [{ id: "c1", name: "fix-login-2" }], seen: was });
+  expect(plan(all, tabsOf({ id: "c1", name: "fix-login", named: true }), first.seen).renames).toEqual([{ id: "c1", name: "fix-login-2" }]);
+  // Once the tab shows the new name, it's recorded and nothing more is asked.
+  expect(plan(all, tabsOf({ id: "c1", name: "fix-login-2", named: true }), first.seen)).toEqual({ renames: [], seen: { t1: { name: "fix-login-2", tab: "c1" } } });
+  // A new terminal on an unnamed tab: nothing recorded until the name lands.
+  const fresh = plan(all, tabsOf({ id: "c1", name: "1", named: false }), {});
+  expect(fresh).toEqual({ renames: [{ id: "c1", name: "fix-login-2" }], seen: {} });
+});
+
+test("name-sync still follows a rename recorded by the first build (a bare name)", async () => {
+  const { plan } = await loadPlan();
+  const all = [term("t1", "fix-login-2", "c1")];
+  // tab null: the first build didn't record where; any tab still called the old name follows.
+  expect(plan(all, tabsOf({ id: "c1", name: "fix-login", named: true }), { t1: { name: "fix-login", tab: null } }).renames).toEqual([{ id: "c1", name: "fix-login-2" }]);
+  expect(plan(all, tabsOf({ id: "c1", name: "auth", named: true }), { t1: { name: "fix-login", tab: null } }).renames).toEqual([]);
+});
+
 test("name-sync remembers an offline machine's terminals and forgets ended ones", async () => {
-  const { plan } = await load("name-sync", ["plan"]);
+  const { plan } = await loadPlan();
   const last = { t1: { name: "x", tab: "c1" }, t2: { name: "gone", tab: "c1" }, "vps/t9": { name: "away", tab: "vps/c2" } };
   const { seen } = plan([term("t1", "x", "c1", "finished")], tabsOf({ id: "c1", name: "1", named: false }), last);
   // t1 ended; t2 is no longer listed on a machine that lists terminals; vps lists nothing.

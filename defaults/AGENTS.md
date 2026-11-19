@@ -970,7 +970,8 @@ has 124 programs (agents, editors, runtimes, tools, databases, infra);
   folder, else makes one there; `open-folder.pick` asks for the folder first),
   `space-groups` (`space-groups.up` / `space-groups.down` move the shown space and its git
   worktree spaces as one block), and `name-sync` (a terminal started with a name names its
-  tab when nobody named the tab; a tab still called by the old name follows a new one).
+  tab when it is the tab's only named terminal and nobody named the tab; a tab still called
+  by the old name follows a new one).
   Run the commands with `herdr-app do <mod>.<command>`, `run(...)` or a `keys.json`
   binding. Herdr restores a deleted shipped mod at start. Only the shipped folders run
   this way: a `mod.clone` copy runs where a layout block names it.
