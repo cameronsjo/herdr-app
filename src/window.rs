@@ -1411,7 +1411,8 @@ impl AppWindow {
     /// Another layout: its mods start fresh. Pane mods (they belong to their
     /// tab) and overlays stay.
     fn drop_layout_copies(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let gone: Vec<_> = self.copies.keys().filter(|s| {
+        let gone: Vec<_> = self.copies.keys().filter(|s| !fork_mods::is_background(s)) // FORK(background-mods): they outlive a layout switch
+            .filter(|s| {
             self.model.tab_of(s).is_none() && !self.overlays.iter().any(|o| o.slot == **s || o.layout.as_ref().is_some_and(|l| l.find(s).is_some()))
         }).cloned().collect();
         for slot in gone {
@@ -4387,6 +4388,7 @@ impl AppWindow {
             // An incomplete scan cannot prove that the source is unchanged.
             stamp.is_none() || self.mod_stamps.borrow_mut().insert(name.clone(), stamp.clone()).as_ref() != Some(&stamp)
         }).collect();
+        self.fork_mods_edited(&edited); // FORK(browser): an edited browser-prototype stops drawing over pages
         if edited.is_empty() {
             return;
         }

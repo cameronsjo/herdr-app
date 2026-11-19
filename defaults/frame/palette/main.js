@@ -143,7 +143,7 @@ export default class Palette extends View {
     this.scroll = 0;
     this.recent = JSON.parse(localStorage.getItem("recent") ?? "[]");
     this.handle = cx.focus_handle();
-    cx.spawn(async (cx) => fork.load(() => cx.notify())); // FORK(palette)
+    this.recent = fork.withPicked(this.recent); cx.spawn(async (cx) => fork.load(() => cx.notify())); // FORK(palette): a picked direction joins Recent; read mods' commands
   }
 
   close() {
@@ -167,7 +167,7 @@ export default class Palette extends View {
 
   // The rows to show: grouped when empty, ranked while typing.
   rows() {
-    const all = fork.entries(entries(), this.query); // FORK(palette)
+    const all = fork.entries(entries(), this.query, this.recent); // FORK(palette)
     const q = this.query.trim().toLowerCase().replace(/\s+/g, "");
     if (!q) {
       const recent = this.recent.map((id) => all.find((e) => e.id === id)).filter(Boolean).slice(0, 5);
