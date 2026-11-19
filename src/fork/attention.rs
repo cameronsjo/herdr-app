@@ -32,6 +32,9 @@ const MAX_TEXT: usize = 40;
 /// How often a working agent's screen is read for the stall check, in ms.
 pub const READ_EVERY_MS: u64 = 60_000;
 
+/// How long a failed label removal waits before it is tried again, in ms.
+const RETRY_MS: u64 = 5_000;
+
 /// The attention label's text, if set (trimmed, at most [`MAX_TEXT`] characters).
 pub fn attention(rec: &Value) -> Option<String> {
     let text = rec.pointer("/labels").and_then(|l| l.get(LABEL)).and_then(Value::as_str)?.trim();
@@ -107,6 +110,11 @@ pub struct Queue {
     /// Terminals whose label went while the agent wasn't working.
     handled: BTreeSet<String>,
     watches: HashMap<String, Watch>,
+    /// Failed label removals: not tried again before this time, ms.
+    retry_at: HashMap<String, u64>,
+    /// The terminal's turn when its label was first seen. A later turn means
+    /// the agent worked since, even if no tick saw it working.
+    label_turn: HashMap<String, u64>,
 }
 
 static QUEUE: Mutex<Option<Queue>> = Mutex::new(None);
@@ -137,16 +145,25 @@ impl Queue {
     }
 
     /// Terminals whose attention label should go: set while the agent works
-    /// again (a new turn started). Each is returned once until the core
-    /// echoes the label gone; [`Queue::cleared_failed`] lets one be tried
-    /// again.
-    pub fn labels_to_clear(&mut self, live: &HashMap<String, Value>) -> Vec<String> {
+    /// again, or the terminal's `turn` moved past the one it had when the label
+    /// was first seen (a turn shorter than a tick: done, working, done). Each
+    /// is returned once until the core echoes the label gone;
+    /// [`Queue::cleared_failed`] lets one be tried again after [`RETRY_MS`].
+    pub fn labels_to_clear(&mut self, live: &HashMap<String, Value>, now: u64) -> Vec<String> {
         self.clearing.retain(|a| live.get(a).is_some_and(|r| attention(r).is_some()));
         self.labeled.retain(|a| live.contains_key(a));
         self.handled.retain(|a| live.contains_key(a));
+        self.retry_at.retain(|a, at| *at > now && live.contains_key(a));
+        self.label_turn.retain(|a, _| live.get(a).is_some_and(|r| attention(r).is_some()));
         let mut out = Vec::new();
         for (addr, rec) in live {
-            if rec.get("status").and_then(Value::as_str) == Some("working") && attention(rec).is_some() && self.clearing.insert(addr.clone()) {
+            if attention(rec).is_none() {
+                continue;
+            }
+            let turn = rec.get("turn").and_then(Value::as_u64);
+            let first = *self.label_turn.entry(addr.clone()).or_insert(turn.unwrap_or(0));
+            let worked = rec.get("status").and_then(Value::as_str) == Some("working") || turn.is_some_and(|t| t > first);
+            if worked && !self.retry_at.contains_key(addr) && self.clearing.insert(addr.clone()) {
                 out.push(addr.clone());
             }
         }
@@ -154,9 +171,10 @@ impl Queue {
         out
     }
 
-    /// A label removal that failed: try it on a later tick.
-    pub fn cleared_failed(&mut self, addr: &str) {
+    /// A label removal that failed: try it again once [`RETRY_MS`] have passed.
+    pub fn cleared_failed(&mut self, addr: &str, now: u64) {
         self.clearing.remove(addr);
+        self.retry_at.insert(addr.to_owned(), now + RETRY_MS);
     }
 
     /// The terminals to read now for the stall check: working agents not
@@ -286,17 +304,37 @@ mod tests {
         let mut live = HashMap::new();
         live.insert("t1".to_owned(), rec("working", None, Some("run X")));
         live.insert("t2".to_owned(), rec("done", None, Some("run Y")));
-        assert_eq!(q.labels_to_clear(&live), vec!["t1".to_owned()]);
+        assert_eq!(q.labels_to_clear(&live, 0), vec!["t1".to_owned()]);
         // Not again while the removal is on its way.
-        assert!(q.labels_to_clear(&live).is_empty());
-        // A failed removal is tried again.
-        q.cleared_failed("t1");
-        assert_eq!(q.labels_to_clear(&live), vec!["t1".to_owned()]);
+        assert!(q.labels_to_clear(&live, 500).is_empty());
+        // A failed removal is tried again, but not on the very next tick.
+        q.cleared_failed("t1", 1_000);
+        assert!(q.labels_to_clear(&live, 1_500).is_empty());
+        assert!(q.labels_to_clear(&live, 5_999).is_empty());
+        assert_eq!(q.labels_to_clear(&live, 6_000), vec!["t1".to_owned()]);
         // Gone: forgotten, so a later label on t1 clears again.
         live.insert("t1".to_owned(), rec("working", None, None));
-        assert!(q.labels_to_clear(&live).is_empty());
+        assert!(q.labels_to_clear(&live, 7_000).is_empty());
         live.insert("t1".to_owned(), rec("working", None, Some("again")));
-        assert_eq!(q.labels_to_clear(&live), vec!["t1".to_owned()]);
+        assert_eq!(q.labels_to_clear(&live, 7_500), vec!["t1".to_owned()]);
+    }
+
+    #[test]
+    fn a_turn_shorter_than_a_tick_still_clears_the_label() {
+        let with_turn = |status: &str, turn: u64| {
+            let mut r = rec(status, None, Some("run X"));
+            r["turn"] = json!(turn);
+            r
+        };
+        let mut q = Queue::default();
+        let mut live = HashMap::new();
+        live.insert("t1".to_owned(), with_turn("done", 4));
+        assert!(q.labels_to_clear(&live, 0).is_empty());
+        // Same turn: the label stays.
+        assert!(q.labels_to_clear(&live, 500).is_empty());
+        // Done, working, done between two ticks: the turn moved on, so it goes.
+        live.insert("t1".to_owned(), with_turn("done", 5));
+        assert_eq!(q.labels_to_clear(&live, 1_000), vec!["t1".to_owned()]);
     }
 
     #[test]

@@ -89,6 +89,7 @@ Added 2026-11-17 (cameronsjo/herdr-app#16, Linear CAM-921). What it does: `docs/
 - Seams: `src/main.rs` `mod fork`; `src/window.rs` `mod fork_attention`, the shown word in `tend_terminals` (`Queue::word`), the `looking` line after it (a label cleared while the agent rested raises no Done alert), the tick call there, and `fork_agent_fields` on each `agents()` entry; `defaults/mods/agents/main.js` the badge text (`needsYou`) and the Stalled badge; `defaults/herdr.d.ts` the three `AgentInfo` fields. All marked `FORK(attention)`.
 - The label is `herdr.attention`, in Herdr's shared label namespace on purpose, so other clients can learn it. If upstream ever gives that label another meaning, rename the fork's.
 - `stall_minutes` lives in `<app home>/fork.json`, not `settings.json`, so upstream's settings struct stays as it is.
+- Follow-ups (cameronsjo/herdr-app#35): the priority view shows the full Stalled pill (the "…" glyph is for the narrow rail only); a failed label removal waits 5 s before it is tried again; and a label also goes once the terminal's `turn` moves past the one it had when the label was first seen, so a turn shorter than a tick doesn't leave it behind.
 
 ## Answering approvals
 
