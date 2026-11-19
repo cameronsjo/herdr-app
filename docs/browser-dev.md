@@ -425,6 +425,14 @@ library validation is off (`DYLD_INSERT_LIBRARIES` works on the browser
 process at its next launch, same user only), and Chromium logs a failed
 signature check of its own process (`process_requirement.cc … -67030`);
 whether Chromium then skips checks between its processes is unverified.
+Local dev bundles of either engine stay ad hoc signed. The everyday WebKit
+build that `fork-mac-build.yml` publishes is Developer ID signed with the
+hardened runtime (the four entitlements in
+`scripts/fork/macos-entitlements.plist`), notarized and stapled, with the
+bundle id `dev.herdr.app.browser-daily`; `scripts/fork/daily-update` and
+`scripts/browser-daily on` install it without re-signing once
+`codesign`, `spctl` and `stapler validate` pass, and re-sign anything else
+ad hoc.
 
 ### Dev-only switch (automated tests only)
 
