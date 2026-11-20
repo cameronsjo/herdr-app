@@ -18,6 +18,14 @@
 #   daily-update install   add the launchd agent (a check every hour; a local
 #                          build only on AC power, HERDR_DAILY_ANY_POWER=1 on
 #                          battery too)
+#   daily-update install --download-only
+#                          the same agent on a Mac with no checkout: it only
+#                          downloads, and installs only a notarized Developer ID
+#                          build (docs/browser-dev.md § Another Mac)
+#   daily-update adopt <sha>  download-only: put the staged, verified script of
+#                          release browser-<sha> in place of the agent's copy
+#   daily-update verify <file> <sha>  check a file against fork-mac-build.yml's
+#                          attestation for commit <sha> (exit 0: verified)
 #   daily-update uninstall remove it
 #
 # The build is the debug-profile dev bundle (scripts/browser-dev-bundle
@@ -32,6 +40,15 @@
 # passed the CI check (before any download or build). When that check itself
 # is broken, `bash scripts/fork/daily-update install` from a checkout replaces
 # the copy by hand.
+#
+# Download-only mode never builds, never re-signs and never updates its own
+# script on its own. It takes the newest `browser-<sha>` release only when the
+# tag points at <sha>, <sha> is ahead of what is installed and on master, its
+# CI passed, `gh attestation verify` passes with every pin below, and the app
+# is genuine_devid (rc 0). A newer verified `daily-update` from the release is
+# staged and announced; `adopt <sha>` puts it in place. gh reads its token
+# from the Keychain item herdr-fork-gh-token (a fine-grained, read-only token
+# for this repo), never the interactive login.
 # Exit: 0 done or nothing to do; 1 a step failed (logged and notified);
 #       2 setup error.
 set -Eeuo pipefail
@@ -60,16 +77,28 @@ say() { printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*"; }
 notify() { osascript -e 'on run argv' -e 'display notification (item 1 of argv) with title "Herdr fork"' -e 'end run' "$1" >/dev/null 2>&1 || true; }
 running() { pgrep -f -- "$daily/Contents/MacOS/" >/dev/null 2>&1; }
 
-# Any checkout of the repo finds the primary one; the build worktree sits beside the others.
 mkdir -p "$state_dir"
 src_dir=$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
-if common=$(git -C "$src_dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
-  root=$(cd -P -- "$common/.." && pwd -P)
-  printf '%s\n' "$root" > "$state_dir/root"
-else
-  root=$(cat "$state_dir/root" 2>/dev/null) || { echo "daily-update: run 'install' from a checkout of $repo_url_fork first" >&2; exit 2; }
+# Download-only is set by `install --download-only` and cleared by a plain `install`.
+mode_file="$state_dir/mode"
+download_only=
+if [[ "${1:-}" == install ]]; then
+  if [[ "${2:-}" == --download-only ]]; then download_only=1; fi
+elif [[ "$(cat "$mode_file" 2>/dev/null)" == download-only ]]; then
+  download_only=1
 fi
-build="$(cd -P -- "$root/.." && pwd -P)/herdr-app-worktrees/daily"
+
+# Any checkout of the repo finds the primary one; the build worktree sits beside the others.
+root='' build=''
+if [[ -z $download_only ]]; then
+  if common=$(git -C "$src_dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
+    root=$(cd -P -- "$common/.." && pwd -P)
+    printf '%s\n' "$root" > "$state_dir/root"
+  else
+    root=$(cat "$state_dir/root" 2>/dev/null) || { echo "daily-update: run 'install' from a checkout of $repo_url_fork first (or 'install --download-only' on a Mac without one)" >&2; exit 2; }
+  fi
+  build="$(cd -P -- "$root/.." && pwd -P)/herdr-app-worktrees/daily"
+fi
 
 fork_remote() {
   local r
@@ -213,13 +242,20 @@ signature_kind() {
 # that spctl or stapler does not confirm is left for the next check (a
 # transient failure must not turn a notarized build into an ad hoc one).
 # Anything else gets its own bundle id and an ad hoc signature, as before.
+# With `strict` (download-only), anything but a genuine Developer ID build
+# (rc 0) is refused: the installed app stays, and nothing is re-signed.
 install_bundle() {
-  local src="$build/target/browser-dev-webkit/Herdr Dev.app" sha=$1 was now rc=0
+  local sha=$1 src=${2:-"$build/target/browser-dev-webkit/Herdr Dev.app"} strict=${3:-} was now rc=0
   was=$(signature_kind "$daily")
   mkdir -p "$(dirname "$daily")"
   rm -rf "$daily.next"
   ditto "$src" "$daily.next"
   genuine_devid "$daily.next" || rc=$?
+  if [[ -n $strict && $rc -ne 0 ]]; then
+    rm -rf "$daily.next"
+    refuse "$sha" "not installed: $devid_why (download-only installs only a notarized Developer ID build)"
+    return 1
+  fi
   if [[ $rc -eq 2 ]]; then
     rm -rf "$daily.next"
     say "${sha:0:8}: not installed: $devid_why; the next check tries again"
@@ -264,7 +300,191 @@ refresh_self() {
   notify "The daily-update agent's script changed ($old_sum -> $new_sum); see $log"
 }
 
+# ---- download-only ----------------------------------------------------------
+# Plain bash only (no `command`, no grep in conditions): launchd runs /bin/bash 3.2.
+
+gh_token_item=herdr-fork-gh-token
+token_source=
+# gh gets a fine-grained read-only token from the Keychain (or GH_TOKEN when a
+# person runs this by hand), and an empty config dir, so it can never fall back
+# to the interactive login's token.
+use_scoped_token() {
+  unset GITHUB_TOKEN GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN
+  export GH_HOST=github.com GH_CONFIG_DIR="$state_dir/gh-config" GH_PROMPT_DISABLED=1
+  mkdir -p "$GH_CONFIG_DIR"
+  if [[ -n ${GH_TOKEN:-} ]]; then token_source="GH_TOKEN from the environment"; return 0; fi
+  if ! GH_TOKEN=$(security find-generic-password -s "$gh_token_item" -w 2>/dev/null) || [[ -z $GH_TOKEN ]]; then
+    say "no Keychain item $gh_token_item (a fine-grained token, $repo_url_fork only, Contents and Metadata read): see docs/browser-dev.md § Another Mac"
+    return 1
+  fi
+  export GH_TOKEN
+  token_source="Keychain item $gh_token_item"
+}
+
+# A refusal is logged every time and notified once per commit and reason.
+refuse() {
+  local sha=$1 why=$2 key
+  say "${sha:0:8}: refused: $why"
+  key="$sha $why"
+  if [[ "$(cat "$state_dir/refused" 2>/dev/null)" != "$key" ]]; then
+    notify "Herdr Browser ${sha:0:8} was not installed: $why; see $log"
+    printf '%s\n' "$key" > "$state_dir/refused"
+  fi
+}
+
+# 0 when <file> carries fork-mac-build.yml's attestation, made on a GitHub-hosted
+# runner from refs/heads/master at commit <sha>, and that attestation names this
+# file: its basename and sha256 are one of the statement's subjects.
+attest_identity="https://github.com/$repo_url_fork/$build_workflow@refs/heads/master"
+verify_attested() {
+  local file=$1 sha=$2 name digest hits
+  [[ -f $file && $sha =~ ^[0-9a-f]{40}$ ]] || return 1
+  name=$(basename "$file")
+  [[ $name =~ ^[A-Za-z0-9._-]+$ ]] || return 1   # it goes into the jq filter below
+  digest=$(shasum -a 256 "$file" | cut -d' ' -f1)
+  hits=$(gh attestation verify "$file" --repo "$repo_url_fork" \
+    --cert-identity "$attest_identity" \
+    --cert-oidc-issuer https://token.actions.githubusercontent.com \
+    --source-ref refs/heads/master --source-digest "$sha" --signer-digest "$sha" \
+    --predicate-type https://slsa.dev/provenance/v1 --deny-self-hosted-runners \
+    --format json \
+    --jq "[.[].verificationResult.statement.subject[] | select(.name == \"$name\" and .digest.sha256 == \"$digest\")] | length" \
+    2>/dev/null) || return 1
+  [[ $hits =~ ^[1-9][0-9]*$ ]]
+}
+
+# The newest published browser-<40 hex> release's tag ("" when none).
+newest_release() {
+  gh release list -R "$repo_url_fork" --limit 100 --exclude-drafts --json tagName,publishedAt \
+    --jq '[.[] | select(.tagName | test("^browser-[0-9a-f]{40}$"))] | sort_by(.publishedAt) | last | .tagName // ""'
+}
+
+# The release's tag is a plain tag on commit <sha> itself.
+tag_points_at() {
+  local sha=$1 got
+  got=$(gh api "repos/$repo_url_fork/git/ref/tags/browser-$sha" --jq '.object.type + " " + .object.sha' 2>/dev/null) || return 1
+  [[ $got == "commit $sha" ]]
+}
+
+# GitHub's compare status of base...head: ahead, behind, identical or diverged.
+compare_status() {
+  gh api "repos/$repo_url_fork/compare/$1...$2" --jq .status 2>/dev/null || echo unknown
+}
+
+# The downgrade floor: <sha> is ahead of the installed commit (when there is
+# one), and at or behind master's head.
+above_floor() {
+  local installed=$1 sha=$2 st
+  if [[ -n $installed ]]; then
+    st=$(compare_status "$installed" "$sha")
+    [[ $st == ahead ]] || { floor_why="browser-${sha:0:8} is not ahead of the installed ${installed:0:8} ($st)"; return 1; }
+  fi
+  st=$(compare_status "$sha" master)
+  [[ $st == ahead || $st == identical ]] || { floor_why="browser-${sha:0:8} is not on master ($st)"; return 1; }
+}
+
+# A newer daily-update from release <sha>, verified, is staged for `adopt`;
+# nothing here changes the running script.
+staged_dir="$state_dir/staged"
+stage_script() {
+  local sha=$1 dir="$state_dir/script-download"
+  if [[ "$(cat "$staged_dir/sha" 2>/dev/null)" == "$sha" ]]; then return 0; fi
+  rm -rf "$dir"; mkdir -p "$dir"
+  if ! gh release download "browser-$sha" -R "$repo_url_fork" -p daily-update -D "$dir" >/dev/null 2>&1; then
+    rm -rf "$dir"; return 0   # releases from before 2026-11-20 carry no script
+  fi
+  if cmp -s "$dir/daily-update" "$self"; then rm -rf "$dir"; return 0; fi
+  if ! verify_attested "$dir/daily-update" "$sha"; then
+    rm -rf "$dir"
+    refuse "$sha" "its daily-update did not verify against fork-mac-build.yml's attestation"
+    return 0
+  fi
+  rm -rf "$staged_dir"; mkdir -p "$staged_dir"
+  mv "$dir/daily-update" "$staged_dir/daily-update"
+  printf '%s\n' "$sha" > "$staged_dir/sha"
+  rm -rf "$dir"
+  say "${sha:0:8}: a newer daily-update is verified and staged; to use it: bash $self adopt $sha"
+  notify "A newer daily-update (browser-${sha:0:8}) is verified and staged. To use it: bash $self adopt $sha"
+}
+
+cmd_check_download_only() {
+  lock
+  # shellcheck disable=SC2154  # trap_rc is assigned inside the trap string
+  trap 'trap_rc=$?; say "check failed at line $LINENO: $BASH_COMMAND (exit $trap_rc)"; notify "The daily update check failed; see $log"; exit 1' ERR
+  local tag sha installed dir="$state_dir/download" floor_why=''
+  use_scoped_token || exit 2
+  say "download-only check (gh token: $token_source)"
+  tag=$(newest_release)
+  [[ -n $tag ]] || { say "no browser-<sha> release yet"; return 0; }
+  sha=${tag#browser-}
+  installed=$(cat "$installed_file" 2>/dev/null || true)
+  if [[ $installed == "$sha" ]]; then
+    say "browser-${sha:0:8} already installed"
+    stage_script "$sha"
+    return 0
+  fi
+  tag_points_at "$sha" || { refuse "$sha" "tag $tag does not point at commit $sha"; return 0; }
+  above_floor "$installed" "$sha" || { refuse "$sha" "$floor_why"; return 0; }
+  if ! ci_passed "$sha"; then say "${sha:0:8}: not installing"; return 0; fi
+  if running; then
+    say "${sha:0:8} is ready; Herdr Browser is running, so the next check installs it"
+    if [[ "$(cat "$notified_file" 2>/dev/null)" != "$sha" ]]; then
+      notify "Herdr Browser ${sha:0:8} is ready; it installs at the first check after you quit Herdr Browser"
+      printf '%s\n' "$sha" > "$notified_file"
+    fi
+    return 0
+  fi
+  rm -rf "$dir"; mkdir -p "$dir"
+  gh release download "$tag" -R "$repo_url_fork" -p "$asset" -D "$dir" >/dev/null 2>&1 ||
+    { say "${sha:0:8}: download of $tag failed; the next check tries again"; rm -rf "$dir"; return 0; }
+  if ! verify_attested "$dir/$asset" "$sha"; then
+    rm -rf "$dir"
+    refuse "$sha" "$asset did not verify against fork-mac-build.yml's attestation"
+    return 0
+  fi
+  if ! ditto -x -k "$dir/$asset" "$dir/unpacked" || [[ ! -d "$dir/unpacked/Herdr Dev.app" ]]; then
+    rm -rf "$dir"; refuse "$sha" "$asset holds no Herdr Dev.app"; return 0
+  fi
+  xattr -dr com.apple.quarantine "$dir/unpacked/Herdr Dev.app" 2>/dev/null || true
+  if install_bundle "$sha" "$dir/unpacked/Herdr Dev.app" strict; then
+    printf '%s\n' "$sha" > "$built_file"
+  fi
+  rm -rf "$dir"
+  stage_script "$sha"
+}
+
+cmd_adopt() {
+  lock
+  local sha=${1:-} have from
+  [[ $sha =~ ^[0-9a-f]{40}$ ]] || { echo "usage: daily-update adopt <40-hex sha>" >&2; exit 2; }
+  have=$(cat "$staged_dir/sha" 2>/dev/null || true)
+  [[ $have == "$sha" ]] || { echo "daily-update: nothing staged for $sha (staged: ${have:-none})" >&2; exit 1; }
+  use_scoped_token || exit 2
+  # The staged bytes again, not a new download: what was announced is what goes in.
+  verify_attested "$staged_dir/daily-update" "$sha" ||
+    { echo "daily-update: the staged script no longer verifies; not adopted" >&2; exit 1; }
+  # Never back to an older script than the one running, when its commit is known.
+  from=$(cat "$script_from" 2>/dev/null || true)
+  if [[ $from =~ ([0-9a-f]{40}) ]] && [[ ${BASH_REMATCH[1]} != "$sha" ]]; then
+    local st
+    st=$(compare_status "${BASH_REMATCH[1]}" "$sha")
+    [[ $st == ahead ]] || { echo "daily-update: $sha is not ahead of the running script's ${BASH_REMATCH[1]:0:8} ($st); not adopted" >&2; exit 1; }
+  fi
+  install -m 0755 "$staged_dir/daily-update" "$self.new" && mv -f "$self.new" "$self"
+  printf 'release browser-%s, adopted %s\n' "$sha" "$(date '+%Y-%m-%d')" > "$script_from"
+  rm -rf "$staged_dir"
+  say "adopted daily-update from browser-${sha:0:8}: sha256 $(shasum -a 256 "$self" | cut -d' ' -f1)"
+}
+
+cmd_verify() {
+  local file=${1:-} sha=${2:-}
+  [[ -n $file && $sha =~ ^[0-9a-f]{40}$ ]] || { echo "usage: daily-update verify <file> <40-hex sha>" >&2; exit 2; }
+  if [[ -n $download_only ]]; then use_scoped_token || exit 2; fi
+  if verify_attested "$file" "$sha"; then echo "verified: $file is $(basename "$file") from fork-mac-build.yml at $sha"; else echo "NOT verified: $file" >&2; exit 1; fi
+}
+
 cmd_check() {
+  if [[ -n $download_only ]]; then cmd_check_download_only; return; fi
   lock
   # shellcheck disable=SC2154  # trap_rc is assigned inside the trap string
   trap 'trap_rc=$?; say "check failed at line $LINENO: $BASH_COMMAND (exit $trap_rc)"; notify "The daily build check failed; see $log"; exit 1' ERR
@@ -311,6 +531,10 @@ cmd_check() {
 }
 
 cmd_apply() {
+  if [[ -n $download_only ]]; then
+    echo "daily-update: download-only installs at the first check after Herdr Browser quits; quit it, then run: bash $self check" >&2
+    exit 1
+  fi
   lock
   local sha
   sha=$(cat "$built_file" 2>/dev/null) || { echo "daily-update: nothing built yet; run: daily-update check" >&2; exit 1; }
@@ -319,7 +543,15 @@ cmd_apply() {
 }
 
 cmd_status() {
-  echo "build worktree: $build"
+  if [[ -n $download_only ]]; then
+    echo "mode:           download-only (no checkout; notarized Developer ID builds only)"
+    if [[ -n ${GH_TOKEN:-} ]]; then echo "gh token:       GH_TOKEN from the environment"
+    elif security find-generic-password -s "$gh_token_item" >/dev/null 2>&1; then echo "gh token:       Keychain item $gh_token_item"
+    else echo "gh token:       MISSING: Keychain item $gh_token_item"; fi
+    echo "staged script:  $(cat "$staged_dir/sha" 2>/dev/null || echo none)"
+  else
+    echo "build worktree: $build"
+  fi
   echo "built:          $(cat "$built_file" 2>/dev/null || echo none)"
   echo "installed:      $(cat "$installed_file" 2>/dev/null || echo none) ($daily)"
   if running; then echo "Herdr Browser:  running"; else echo "Herdr Browser:  not running"; fi
@@ -335,7 +567,22 @@ cmd_status() {
 
 cmd_install() {
   mkdir -p "$(dirname "$plist")" "$(dirname "$log")"
-  if [[ "$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/daily-update" != "$self" ]]; then
+  if [[ -n $download_only ]]; then
+    # install --download-only [<sha>]: with <sha>, the agent's copy must verify
+    # as release browser-<sha>'s daily-update, and that is recorded.
+    local from_sha=${3:-}
+    [[ "$src_dir/$(basename "${BASH_SOURCE[0]}")" == "$self" ]] ||
+      { echo "daily-update: in download-only mode, put the verified script at $self first and run it from there (docs/browser-dev.md § Another Mac)" >&2; exit 2; }
+    if [[ -n $from_sha ]]; then
+      use_scoped_token || exit 2
+      verify_attested "$self" "$from_sha" || { echo "daily-update: $self does not verify as browser-$from_sha's daily-update" >&2; exit 1; }
+      printf 'release browser-%s, bootstrap %s\n' "$from_sha" "$(date '+%Y-%m-%d')" > "$script_from"
+    fi
+    printf 'download-only\n' > "$mode_file"
+  else
+    rm -f "$mode_file"
+  fi
+  if [[ -z $download_only && "$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/daily-update" != "$self" ]]; then
     install -m 0755 "${BASH_SOURCE[0]}" "$self.new" && mv -f "$self.new" "$self"
     local head
     head=$(git -C "$src_dir" rev-parse HEAD 2>/dev/null || echo unknown)
@@ -371,8 +618,13 @@ PLIST
     [[ $tries -eq 10 ]] && { echo "daily-update: launchctl bootstrap kept failing; see: launchctl print gui/$(id -u)/$label" >&2; exit 1; }
     sleep 1
   done
-  echo "installed: $plist (a check every hour; local builds on AC power only); log $log"
-  echo "first build now: bash $self check"
+  if [[ -n $download_only ]]; then
+    echo "installed: $plist (download-only, a check every hour); log $log"
+    echo "first check now: bash $self check"
+  else
+    echo "installed: $plist (a check every hour; local builds on AC power only); log $log"
+    echo "first build now: bash $self check"
+  fi
 }
 
 cmd_uninstall() {
@@ -385,7 +637,9 @@ case "${1:-}" in
   check) cmd_check ;;
   apply) cmd_apply ;;
   status) cmd_status ;;
-  install) cmd_install ;;
+  install) cmd_install "$@" ;;
+  adopt) cmd_adopt "${2:-}" ;;
+  verify) cmd_verify "${2:-}" "${3:-}" ;;
   uninstall) cmd_uninstall ;;
-  *) sed -n '2,23p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  *) sed -n '2,29p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
