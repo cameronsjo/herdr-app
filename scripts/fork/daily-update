@@ -42,13 +42,21 @@
 # the copy by hand.
 #
 # Download-only mode never builds, never re-signs and never updates its own
-# script on its own. It takes the newest `browser-<sha>` release only when the
-# tag points at <sha>, <sha> is ahead of what is installed and on master, its
-# CI passed, `gh attestation verify` passes with every pin below, and the app
-# is genuine_devid (rc 0). A newer verified `daily-update` from the release is
-# staged and announced; `adopt <sha>` puts it in place. gh reads its token
-# from the Keychain item herdr-fork-gh-token (a fine-grained, read-only token
-# for this repo), never the interactive login.
+# script on its own. Of the `browser-<sha>` releases whose commit is an
+# ancestor of master, it takes the one closest to master's head (not the last
+# published, so a re-run of an old commit cannot roll back or stall it), and
+# only when the tag points at <sha>, <sha> is ahead of what is installed (on a
+# first install: at most first_install_max_behind commits behind master), its
+# CI passed, `gh attestation verify` passes with the pins in verify_attested,
+# and the app is genuine_devid (rc 0). Those pins tie the attestation to this
+# repo, fork-mac-build.yml on refs/heads/master and commit <sha>; their
+# --deny-self-hosted-runners covers the runner of the job that made the
+# attestation (publish), not the build or sign jobs' runners. A newer verified
+# `daily-update` from the release is staged and announced; `adopt <sha>` puts
+# it in place. gh reads its token from the Keychain item herdr-fork-gh-token (a
+# fine-grained token for this repo: Contents, Metadata and Attestations read),
+# or from an exported GH_TOKEN when one is present (a person running it by
+# hand); never from gh's own login.
 # Exit: 0 done or nothing to do; 1 a step failed (logged and notified);
 #       2 setup error.
 set -Eeuo pipefail
@@ -193,9 +201,9 @@ fetch_release() {
     return 1
   fi
   (cd "$dir" && shasum -a 256 -c "$asset.sha256" >/dev/null) || { say "${sha:0:8}: $asset does not match its checksum"; return 1; }
-  # Built by this repo's build workflow, from this exact commit on master.
-  if ! gh attestation verify "$dir/$asset" -R "$repo_url_fork" --signer-workflow "$repo_url_fork/$build_workflow" \
-    --source-ref refs/heads/master --source-digest "$sha" --deny-self-hosted-runners >/dev/null 2>&1; then
+  # Built by this repo's build workflow, from this exact commit on master: the
+  # same pins as download-only (verify_attested is the one place they live).
+  if ! verify_attested "$dir/$asset" "$sha"; then
     say "${sha:0:8}: $tag's attestation did not verify"
     # Once per commit, like devid-held: an hourly agent would repeat it every hour.
     if [[ "$(state_of "$state_dir/attest-failed")" != "$sha" ]]; then
@@ -323,7 +331,7 @@ use_scoped_token() {
   if [[ -n ${GH_TOKEN:-} ]]; then token_source="GH_TOKEN from the environment"; return 0; fi
   GH_TOKEN=$(security find-generic-password -s "$gh_token_item" -w 2>/dev/null || true)
   if [[ -z $GH_TOKEN ]]; then
-    say "no Keychain item $gh_token_item (a fine-grained token, $repo_url_fork only, Contents and Metadata read): see docs/browser-dev.md § Another Mac"
+    say "no Keychain item $gh_token_item (a fine-grained token, $repo_url_fork only, Contents, Metadata and Attestations read): see docs/browser-dev.md § Another Mac"
     return 1
   fi
   export GH_TOKEN
@@ -346,7 +354,7 @@ refuse() {
 # file: its basename and sha256 are one of the statement's subjects.
 attest_identity="https://github.com/$repo_url_fork/$build_workflow@refs/heads/master"
 verify_attested() {
-  local file=$1 sha=$2 name digest hits
+  local file=$1 sha=$2 name digest hits err="$state_dir/attest.err"
   [[ -f $file && $sha =~ ^[0-9a-f]{40}$ ]] || return 1
   name=$(basename "$file")
   [[ $name =~ ^[A-Za-z0-9._-]+$ ]] || return 1   # it goes into the jq filter below
@@ -358,38 +366,97 @@ verify_attested() {
     --predicate-type https://slsa.dev/provenance/v1 --deny-self-hosted-runners \
     --format json \
     --jq "[.[].verificationResult.statement.subject[] | select(.name == \"$name\" and .digest.sha256 == \"$digest\")] | length" \
-    2>/dev/null || echo none)
-  [[ $hits =~ ^[1-9][0-9]*$ ]]
+    2>"$err" || echo none)
+  if [[ $hits =~ ^[1-9][0-9]*$ ]]; then return 0; fi
+  # gh's own words go in the log: a 403 (the token lacks Attestations: read)
+  # or a network error reads differently from a file nothing attests.
+  say "gh attestation verify $name at ${sha:0:8}: $(tr '\n' ' ' < "$err" | cut -c1-400)"
+  return 1
 }
 
-# The newest published browser-<40 hex> release's tag ("" when none).
-newest_release() {
-  gh release list -R "$repo_url_fork" --limit 100 --exclude-drafts --json tagName,publishedAt \
-    --jq '[.[] | select(.tagName | test("^browser-[0-9a-f]{40}$"))] | sort_by(.publishedAt) | last | .tagName // ""' || echo gh-failed
+# One GitHub API read, into api_out. 0: answered; 1: GitHub said 404 (the
+# thing does not exist, which callers treat as a refusal); 2: no answer
+# (network, rate limit, 403, 5xx: the next check tries again), api_why says
+# what gh said. A global, not stdout: a function that fails inside $(...) runs
+# the ERR trap there under bash 3.2 (see state_of).
+api_out='' api_why=''
+api_get() {
+  local err="$state_dir/api.err"
+  api_out=$(gh api "$1" --jq "$2" 2>"$err" || echo __api_failed__)
+  case $api_out in
+    *__api_failed__*)
+      api_why=$(tr '\n' ' ' < "$err" | cut -c1-200)
+      api_out=''
+      case $api_why in *"HTTP 404"*) return 1 ;; esac
+      return 2 ;;
+  esac
 }
 
-# The release's tag is a plain tag on commit <sha> itself.
+# compare/<base>...<head> into cmp_status (ahead, behind, identical,
+# diverged), cmp_ahead (commits head has that base lacks) and cmp_behind
+# (commits base has that head lacks); returns as api_get.
+cmp_status='' cmp_ahead='' cmp_behind=''
+compare_get() {
+  local rc=0
+  cmp_status='' cmp_ahead='' cmp_behind=''
+  api_get "repos/$repo_url_fork/compare/$1...$2" '"\(.status) \(.ahead_by) \(.behind_by)"' || rc=$?
+  [[ $rc -eq 0 ]] || return $rc
+  read -r cmp_status cmp_ahead cmp_behind <<<"$api_out"
+}
+
+# Which release to take: of the published browser-<40 hex> releases whose
+# commit is an ancestor of master (compare/<sha>...master has behind_by 0), the
+# one closest to master's head (smallest ahead_by), into rel_sha and
+# rel_distance. Not the last published: a re-run of an old commit publishes
+# later, and must neither roll a first install back nor stall updates.
+# 0: found; 1: none; 2: no answer from the API.
+first_install_max_behind=5   # a first install takes a release at most 5 commits behind master
+rel_sha='' rel_distance=''
+select_release() {
+  local list tag sha rc best='' best_n=''
+  rel_sha='' rel_distance=''
+  list=$(gh release list -R "$repo_url_fork" --limit 30 --exclude-drafts --json tagName \
+    --jq '.[] | .tagName | select(test("^browser-[0-9a-f]{40}$"))' 2>/dev/null || echo __api_failed__)
+  case $list in *__api_failed__*) api_why="release list failed"; return 2 ;; esac
+  while IFS= read -r tag; do
+    [[ -n $tag ]] || continue
+    sha=${tag#browser-}
+    rc=0; compare_get "$sha" master || rc=$?
+    if [[ $rc -eq 2 ]]; then return 2; fi
+    [[ $rc -eq 0 ]] || continue
+    [[ $cmp_behind == 0 && $cmp_ahead =~ ^[0-9]+$ ]] || continue
+    if [[ -z $best_n ]] || (( cmp_ahead < best_n )); then best=$sha best_n=$cmp_ahead; fi
+  done <<<"$list"
+  [[ -n $best ]] || return 1
+  rel_sha=$best rel_distance=$best_n
+}
+
+# The release's tag is a plain tag on commit <sha> itself. 0 yes; 1 no (or no
+# such tag); 2 no answer.
 tag_points_at() {
-  local sha=$1 got
-  got=$(gh api "repos/$repo_url_fork/git/ref/tags/browser-$sha" --jq '.object.type + " " + .object.sha' 2>/dev/null || true)
-  [[ $got == "commit $sha" ]]
+  local sha=$1 rc=0
+  api_get "repos/$repo_url_fork/git/ref/tags/browser-$sha" '.object.type + " " + .object.sha' || rc=$?
+  [[ $rc -eq 0 ]] || return $rc
+  [[ $api_out == "commit $sha" ]] || return 1
 }
 
-# GitHub's compare status of base...head: ahead, behind, identical or diverged.
-compare_status() {
-  gh api "repos/$repo_url_fork/compare/$1...$2" --jq .status 2>/dev/null || echo unknown
-}
-
-# The downgrade floor: <sha> is ahead of the installed commit (when there is
-# one), and at or behind master's head.
+# The downgrade floor: <sha> is ahead of the installed commit; with nothing
+# installed, it is at most first_install_max_behind commits behind master.
+# (select_release already took only ancestors of master.) 0 above it; 1 not
+# (floor_why says why); 2 no answer.
 above_floor() {
-  local installed=$1 sha=$2 st
+  local installed=$1 sha=$2 distance=$3 rc=0
   if [[ -n $installed ]]; then
-    st=$(compare_status "$installed" "$sha")
-    [[ $st == ahead ]] || { floor_why="browser-${sha:0:8} is not ahead of the installed ${installed:0:8} ($st)"; return 1; }
+    compare_get "$installed" "$sha" || rc=$?
+    if [[ $rc -eq 2 ]]; then return 2; fi
+    if [[ $rc -ne 0 || $cmp_status != ahead ]]; then
+      floor_why="browser-${sha:0:8} is not ahead of the installed ${installed:0:8} (${cmp_status:-unknown commit})"
+      return 1
+    fi
+  elif (( distance > first_install_max_behind )); then
+    floor_why="first install: browser-${sha:0:8} is $distance commits behind master, more than $first_install_max_behind"
+    return 1
   fi
-  st=$(compare_status "$sha" master)
-  [[ $st == ahead || $st == identical ]] || { floor_why="browser-${sha:0:8} is not on master ($st)"; return 1; }
 }
 
 # A newer daily-update from release <sha>, verified, is staged for `adopt`;
@@ -420,21 +487,34 @@ cmd_check_download_only() {
   lock
   # shellcheck disable=SC2154  # trap_rc is assigned inside the trap string
   trap 'trap_rc=$?; say "check failed at line $LINENO: $BASH_COMMAND (exit $trap_rc)"; notify "The daily update check failed; see $log"; exit 1' ERR
-  local tag sha installed dir="$state_dir/download" floor_why=''
+  local tag sha installed dir="$state_dir/download" floor_why='' rc=0
   use_scoped_token || exit 2
   say "download-only check (gh token: $token_source)"
-  tag=$(newest_release)
-  if [[ $tag == gh-failed ]]; then say "the GitHub API did not answer (releases); the next check tries again"; return 0; fi
-  [[ -n $tag ]] || { say "no browser-<sha> release yet"; return 0; }
-  sha=${tag#browser-}
+  select_release || rc=$?
+  case $rc in
+    0) ;;
+    1) say "no browser-<sha> release on master yet"; return 0 ;;
+    *) say "the GitHub API did not answer (releases: $api_why); the next check tries again"; return 0 ;;
+  esac
+  sha=$rel_sha tag="browser-$rel_sha"
   installed=$(cat "$installed_file" 2>/dev/null || true)
   if [[ $installed == "$sha" ]]; then
     say "browser-${sha:0:8} already installed"
     stage_script "$sha"
     return 0
   fi
-  tag_points_at "$sha" || { refuse "$sha" "tag $tag does not point at commit $sha"; return 0; }
-  above_floor "$installed" "$sha" || { refuse "$sha" "$floor_why"; return 0; }
+  rc=0; tag_points_at "$sha" || rc=$?
+  case $rc in
+    0) ;;
+    2) say "${sha:0:8}: the GitHub API did not answer (tag: $api_why); the next check tries again"; return 0 ;;
+    *) refuse "$sha" "tag $tag does not point at commit $sha"; return 0 ;;
+  esac
+  rc=0; above_floor "$installed" "$sha" "$rel_distance" || rc=$?
+  case $rc in
+    0) ;;
+    2) say "${sha:0:8}: the GitHub API did not answer (compare: $api_why); the next check tries again"; return 0 ;;
+    *) refuse "$sha" "$floor_why"; return 0 ;;
+  esac
   if ! ci_passed "$sha"; then say "${sha:0:8}: not installing"; return 0; fi
   if running; then
     say "${sha:0:8} is ready; Herdr Browser is running, so the next check installs it"
@@ -476,9 +556,10 @@ cmd_adopt() {
   # Never back to an older script than the one running, when its commit is known.
   from=$(cat "$script_from" 2>/dev/null || true)
   if [[ $from =~ ([0-9a-f]{40}) ]] && [[ ${BASH_REMATCH[1]} != "$sha" ]]; then
-    local st
-    st=$(compare_status "${BASH_REMATCH[1]}" "$sha")
-    [[ $st == ahead ]] || { echo "daily-update: $sha is not ahead of the running script's ${BASH_REMATCH[1]:0:8} ($st); not adopted" >&2; exit 1; }
+    local running_sha=${BASH_REMATCH[1]} rc=0
+    compare_get "$running_sha" "$sha" || rc=$?
+    if [[ $rc -eq 2 ]]; then echo "daily-update: the GitHub API did not answer ($api_why); try again" >&2; exit 1; fi
+    [[ $rc -eq 0 && $cmp_status == ahead ]] || { echo "daily-update: $sha is not ahead of the running script's ${running_sha:0:8} (${cmp_status:-unknown commit}); not adopted" >&2; exit 1; }
   fi
   install -m 0755 "$staged_dir/daily-update" "$self.new" && mv -f "$self.new" "$self"
   printf 'release browser-%s, adopted %s\n' "$sha" "$(date '+%Y-%m-%d')" > "$script_from"
@@ -581,7 +662,8 @@ cmd_install() {
     # install --download-only [<sha>]: with <sha>, the agent's copy must verify
     # as release browser-<sha>'s daily-update, and that is recorded.
     local from_sha=${3:-}
-    [[ "$src_dir/$(basename "${BASH_SOURCE[0]}")" == "$self" ]] ||
+    # Physical paths on both sides: $HOME can sit behind a symlink.
+    [[ "$src_dir/$(basename "${BASH_SOURCE[0]}")" == "$(cd -P -- "$state_dir" && pwd -P)/$(basename "$self")" ]] ||
       { echo "daily-update: in download-only mode, put the verified script at $self first and run it from there (docs/browser-dev.md § Another Mac)" >&2; exit 2; }
     if [[ -n $from_sha ]]; then
       use_scoped_token || exit 2

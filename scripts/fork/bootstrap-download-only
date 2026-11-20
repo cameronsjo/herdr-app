@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# Sets up scripts/fork/daily-update's download-only agent on a Mac with no
+# checkout of cameronsjo/herdr-app (docs/browser-dev.md § Another Mac).
+#
+#   bash bootstrap-download-only [--new-token]
+#
+# This file is that Mac's trust root: fetch it at a commit you have read, read
+# it, then run it. It
+#   1. stores a fine-grained token in the Keychain item herdr-fork-gh-token,
+#      asking for it when the item is missing (--new-token replaces it);
+#   2. picks the release the agent would: of the browser-<sha> releases whose
+#      commit is an ancestor of master, the one closest to master's head, whose
+#      tag points at <sha>;
+#   3. downloads that release's daily-update and checks it with
+#      gh attestation verify and every pin daily-update uses, and that the
+#      attestation names this file (its name and sha256);
+#   4. puts those same bytes in ~/.local/share/herdr-fork/daily-update by an
+#      atomic rename;
+#   5. runs `daily-update install --download-only <sha>` (which verifies its own
+#      copy again), then `check` and `status`.
+# The token goes only into the environment of each gh call here; nothing is
+# exported, so it stays out of your shell. Run it with bash, not source.
+# Exit: 0 set up; 1 a check failed; 2 setup error.
+set -euo pipefail
+
+repo=cameronsjo/herdr-app
+item=herdr-fork-gh-token
+state="$HOME/.local/share/herdr-fork"
+agent="$state/daily-update"
+identity="https://github.com/$repo/.github/workflows/fork-mac-build.yml@refs/heads/master"
+
+die() { local rc=$1; shift; echo "bootstrap-download-only: $*" >&2; exit "$rc"; }
+
+new_token=''
+case ${1:-} in
+  --new-token) new_token=1 ;;
+  '') ;;
+  *) sed -n '2,23p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac
+[[ ${BASH_SOURCE[0]} == "$0" ]] || die 2 "run it with bash, not source: it must not leave anything in your shell"
+for tool in gh security shasum install; do
+  command -v "$tool" >/dev/null 2>&1 || die 2 "needs $tool"
+done
+
+# 1. The token.
+if [[ -n $new_token ]] || ! security find-generic-password -s "$item" >/dev/null 2>&1; then
+  { : </dev/tty; } 2>/dev/null || die 2 "needs a terminal to ask for the token"
+  echo "Make a fine-grained token for $repo only: Contents, Metadata and Attestations read, with an expiry date."
+  echo "Keychain asks for it twice and does not echo it."
+  security add-generic-password -U -s "$item" -a "$USER" -w </dev/tty
+fi
+token=$(security find-generic-password -s "$item" -w 2>/dev/null) && [[ -n $token ]] ||
+  die 2 "no token in the Keychain item $item"
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+mkdir -p "$work/gh-config" "$work/dl"
+# gh with that token and an empty config dir: never gh's own login.
+ghs() {
+  GH_TOKEN="$token" GH_CONFIG_DIR="$work/gh-config" GH_HOST=github.com GH_PROMPT_DISABLED=1 \
+    GITHUB_TOKEN='' GH_ENTERPRISE_TOKEN='' gh "$@"
+}
+
+# 2. The release.
+tags=$(ghs release list -R "$repo" --limit 30 --exclude-drafts --json tagName \
+  --jq '.[] | .tagName | select(test("^browser-[0-9a-f]{40}$"))') || die 1 "could not list the releases"
+best='' best_n=''
+while IFS= read -r tag; do
+  [[ -n $tag ]] || continue
+  sha=${tag#browser-}
+  cmp=$(ghs api "repos/$repo/compare/$sha...master" --jq '"\(.status) \(.ahead_by) \(.behind_by)"') ||
+    die 1 "the GitHub API did not answer for $tag; try again"
+  read -r _ ahead behind <<<"$cmp"
+  [[ $behind == 0 && $ahead =~ ^[0-9]+$ ]] || continue   # not an ancestor of master
+  if [[ -z $best_n ]] || (( ahead < best_n )); then best=$sha best_n=$ahead; fi
+done <<<"$tags"
+[[ -n $best ]] || die 1 "no browser-<sha> release on master"
+sha=$best tag="browser-$best"
+points=$(ghs api "repos/$repo/git/ref/tags/$tag" --jq '.object.type + " " + .object.sha') ||
+  die 1 "could not read the tag $tag"
+[[ $points == "commit $sha" ]] || die 1 "tag $tag points at $points, not commit $sha"
+echo "release $tag ($best_n commits behind master)"
+
+# 3. The script, verified.
+ghs release download "$tag" -R "$repo" -p daily-update -D "$work/dl" || die 1 "$tag has no daily-update"
+file="$work/dl/daily-update"
+digest=$(shasum -a 256 "$file" | cut -d' ' -f1)
+hits=$(ghs attestation verify "$file" --repo "$repo" \
+  --cert-identity "$identity" \
+  --cert-oidc-issuer https://token.actions.githubusercontent.com \
+  --source-ref refs/heads/master --source-digest "$sha" --signer-digest "$sha" \
+  --predicate-type https://slsa.dev/provenance/v1 --deny-self-hosted-runners \
+  --format json \
+  --jq "[.[].verificationResult.statement.subject[] | select(.name == \"daily-update\" and .digest.sha256 == \"$digest\")] | length") ||
+  die 1 "daily-update from $tag did not verify (gh's error is above)"
+[[ $hits =~ ^[1-9][0-9]*$ ]] || die 1 "the attestation for $tag does not name this daily-update ($digest)"
+echo "verified: daily-update sha256 $digest, built by fork-mac-build.yml at $sha"
+
+# 4. Those bytes, into place.
+mkdir -p "$state"
+install -m 0755 "$file" "$agent.new"
+mv -f "$agent.new" "$agent"
+
+# 5. The agent. It reads the token from the Keychain itself.
+env -u GH_TOKEN bash "$agent" install --download-only "$sha"
+env -u GH_TOKEN bash "$agent" check || true   # its log says why; status below shows where it stands
+env -u GH_TOKEN bash "$agent" status
