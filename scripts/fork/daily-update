@@ -261,7 +261,7 @@ install_bundle() {
   genuine_devid "$daily.next" || rc=$?
   if [[ -n $strict && $rc -ne 0 ]]; then
     rm -rf "$daily.next"
-    refuse "$sha" "not installed: $devid_why (download-only installs only a notarized Developer ID build)"
+    refuse "$sha" "$devid_why (download-only installs only a notarized Developer ID build)"
     return 1
   fi
   if [[ $rc -eq 2 ]]; then
@@ -321,7 +321,8 @@ use_scoped_token() {
   export GH_HOST=github.com GH_CONFIG_DIR="$state_dir/gh-config" GH_PROMPT_DISABLED=1
   mkdir -p "$GH_CONFIG_DIR"
   if [[ -n ${GH_TOKEN:-} ]]; then token_source="GH_TOKEN from the environment"; return 0; fi
-  if ! GH_TOKEN=$(security find-generic-password -s "$gh_token_item" -w 2>/dev/null) || [[ -z $GH_TOKEN ]]; then
+  GH_TOKEN=$(security find-generic-password -s "$gh_token_item" -w 2>/dev/null || true)
+  if [[ -z $GH_TOKEN ]]; then
     say "no Keychain item $gh_token_item (a fine-grained token, $repo_url_fork only, Contents and Metadata read): see docs/browser-dev.md § Another Mac"
     return 1
   fi
@@ -334,7 +335,7 @@ refuse() {
   local sha=$1 why=$2 key
   say "${sha:0:8}: refused: $why"
   key="$sha $why"
-  if [[ "$(cat "$state_dir/refused" 2>/dev/null)" != "$key" ]]; then
+  if [[ "$(state_of "$state_dir/refused")" != "$key" ]]; then
     notify "Herdr Browser ${sha:0:8} was not installed: $why; see $log"
     printf '%s\n' "$key" > "$state_dir/refused"
   fi
@@ -357,20 +358,20 @@ verify_attested() {
     --predicate-type https://slsa.dev/provenance/v1 --deny-self-hosted-runners \
     --format json \
     --jq "[.[].verificationResult.statement.subject[] | select(.name == \"$name\" and .digest.sha256 == \"$digest\")] | length" \
-    2>/dev/null) || return 1
+    2>/dev/null || echo none)
   [[ $hits =~ ^[1-9][0-9]*$ ]]
 }
 
 # The newest published browser-<40 hex> release's tag ("" when none).
 newest_release() {
   gh release list -R "$repo_url_fork" --limit 100 --exclude-drafts --json tagName,publishedAt \
-    --jq '[.[] | select(.tagName | test("^browser-[0-9a-f]{40}$"))] | sort_by(.publishedAt) | last | .tagName // ""'
+    --jq '[.[] | select(.tagName | test("^browser-[0-9a-f]{40}$"))] | sort_by(.publishedAt) | last | .tagName // ""' || echo gh-failed
 }
 
 # The release's tag is a plain tag on commit <sha> itself.
 tag_points_at() {
   local sha=$1 got
-  got=$(gh api "repos/$repo_url_fork/git/ref/tags/browser-$sha" --jq '.object.type + " " + .object.sha' 2>/dev/null) || return 1
+  got=$(gh api "repos/$repo_url_fork/git/ref/tags/browser-$sha" --jq '.object.type + " " + .object.sha' 2>/dev/null || true)
   [[ $got == "commit $sha" ]]
 }
 
@@ -396,7 +397,7 @@ above_floor() {
 staged_dir="$state_dir/staged"
 stage_script() {
   local sha=$1 dir="$state_dir/script-download"
-  if [[ "$(cat "$staged_dir/sha" 2>/dev/null)" == "$sha" ]]; then return 0; fi
+  if [[ "$(state_of "$staged_dir/sha")" == "$sha" ]]; then return 0; fi
   rm -rf "$dir"; mkdir -p "$dir"
   if ! gh release download "browser-$sha" -R "$repo_url_fork" -p daily-update -D "$dir" >/dev/null 2>&1; then
     rm -rf "$dir"; return 0   # releases from before 2026-11-20 carry no script
@@ -423,6 +424,7 @@ cmd_check_download_only() {
   use_scoped_token || exit 2
   say "download-only check (gh token: $token_source)"
   tag=$(newest_release)
+  if [[ $tag == gh-failed ]]; then say "the GitHub API did not answer (releases); the next check tries again"; return 0; fi
   [[ -n $tag ]] || { say "no browser-<sha> release yet"; return 0; }
   sha=${tag#browser-}
   installed=$(cat "$installed_file" 2>/dev/null || true)
@@ -436,7 +438,7 @@ cmd_check_download_only() {
   if ! ci_passed "$sha"; then say "${sha:0:8}: not installing"; return 0; fi
   if running; then
     say "${sha:0:8} is ready; Herdr Browser is running, so the next check installs it"
-    if [[ "$(cat "$notified_file" 2>/dev/null)" != "$sha" ]]; then
+    if [[ "$(state_of "$notified_file")" != "$sha" ]]; then
       notify "Herdr Browser ${sha:0:8} is ready; it installs at the first check after you quit Herdr Browser"
       printf '%s\n' "$sha" > "$notified_file"
     fi

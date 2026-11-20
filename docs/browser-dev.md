@@ -132,8 +132,65 @@ bash ~/.local/share/herdr-fork/daily-update check
 bash ~/.local/share/herdr-fork/daily-update status
 ```
 
-Test a change to the script with `bun test scripts/fork/daily-update.test.ts`;
-on macOS it runs under `/bin/bash` 3.2, as launchd does.
+Test a change to the script with `bun test scripts/fork/daily-update.test.ts
+scripts/fork/daily-update-download-only.test.ts`; on macOS they run under
+`/bin/bash` 3.2, as launchd does.
+
+### Another Mac (download-only)
+
+A Mac with no checkout runs the same agent in download-only mode. It never
+builds and never re-signs: it installs the newest `browser-<sha>` release only
+when the tag points at `<sha>`, `<sha>` is ahead of what is installed and on
+`master`, its CI passed, `gh attestation verify` passes with every pin below,
+and the app is the fork's notarized Developer ID build. Anything else is
+refused, logged, and notified once. Like the main Mac, it installs only while
+Herdr Browser is not running; quit it and the next hourly check installs.
+
+It does not update its own script on its own. A newer `daily-update` from a
+release is verified, staged and announced; `bash
+~/.local/share/herdr-fork/daily-update adopt <sha>` re-verifies the staged
+bytes and puts them in place.
+
+`gh` reads a token from the Keychain item `herdr-fork-gh-token`, never the
+interactive login. Make a fine-grained token for `cameronsjo/herdr-app` only,
+Contents: read and Metadata: read, with an expiry date (renew it before then:
+the agent logs `no Keychain item` or `gh` errors once it lapses). The repo is
+public, so read access is all it needs.
+
+Set up, once, from a terminal (the Keychain step asks for the token):
+
+```sh
+set -euo pipefail
+repo=cameronsjo/herdr-app
+security add-generic-password -U -s herdr-fork-gh-token -a "$USER" -w
+GH_TOKEN=$(security find-generic-password -s herdr-fork-gh-token -w); export GH_TOKEN
+GH_CONFIG_DIR=$(mktemp -d); export GH_CONFIG_DIR
+tag=$(gh release list -R "$repo" --exclude-drafts --limit 100 --json tagName,publishedAt \
+  --jq '[.[] | select(.tagName | test("^browser-[0-9a-f]{40}$"))] | sort_by(.publishedAt) | last | .tagName')
+sha=${tag#browser-}
+dir=$(mktemp -d)
+gh release download "$tag" -R "$repo" -p daily-update -D "$dir"
+digest=$(shasum -a 256 "$dir/daily-update" | cut -d' ' -f1)
+n=$(gh attestation verify "$dir/daily-update" --repo "$repo" \
+  --cert-identity "https://github.com/$repo/.github/workflows/fork-mac-build.yml@refs/heads/master" \
+  --cert-oidc-issuer https://token.actions.githubusercontent.com \
+  --source-ref refs/heads/master --source-digest "$sha" --signer-digest "$sha" \
+  --predicate-type https://slsa.dev/provenance/v1 --deny-self-hosted-runners --format json \
+  --jq "[.[].verificationResult.statement.subject[] | select(.name == \"daily-update\" and .digest.sha256 == \"$digest\")] | length")
+[ "$n" -ge 1 ] || { echo "daily-update from $tag did not verify" >&2; exit 1; }
+mkdir -p ~/.local/share/herdr-fork
+install -m 0755 "$dir/daily-update" ~/.local/share/herdr-fork/daily-update.new
+mv -f ~/.local/share/herdr-fork/daily-update.new ~/.local/share/herdr-fork/daily-update
+bash ~/.local/share/herdr-fork/daily-update install --download-only "$sha"
+bash ~/.local/share/herdr-fork/daily-update check
+bash ~/.local/share/herdr-fork/daily-update status
+```
+
+`install --download-only <sha>` verifies the agent's copy again as that
+release's `daily-update` and records it. `daily-update verify <file> <sha>`
+checks any file against the same pins. Remove the agent with `daily-update
+uninstall`; the Keychain item stays until `security delete-generic-password -s
+herdr-fork-gh-token`.
 
 ## Try it
 

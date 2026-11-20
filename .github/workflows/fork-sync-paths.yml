@@ -1,0 +1,63 @@
+# FORK(sync-guard): a required check (ruleset 27338965) that fails an
+# unattended PR touching the files that decide what runs on Cameron's Macs or
+# what the sync routine does, so auto-merge can never land them; a person
+# merges such a PR with the admin bypass after reading it. Fork-only file.
+#
+# Unattended: the head branch is sync/* (scripts/fork/sync-upstream) or
+# claude/* (cloud sessions, the weekly routine included), the title says it
+# syncs upstream, or the head is in another repository.
+#
+# pull_request_target, so the check that runs is master's copy of this file: a
+# PR cannot change the check that judges it. It checks out nothing and runs no
+# code from the PR; it reads the PR's file list from the API.
+name: fork-sync-paths
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  sync-paths:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Unattended PRs leave the protected paths alone
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          # Untrusted text: read from the environment, never spliced into the script.
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          set -euo pipefail
+          why=''
+          case $HEAD_REF in sync/* | claude/*) why="head branch $HEAD_REF" ;; esac
+          shopt -s nocasematch
+          if [[ -z $why && $TITLE == *"sync upstream"* ]]; then why="title says it syncs upstream"; fi
+          shopt -u nocasematch
+          if [[ -z $why && $HEAD_REPO != "$REPO" ]]; then why="head is in $HEAD_REPO"; fi
+          if [[ -z $why ]]; then echo "not an unattended PR: nothing to check"; exit 0; fi
+          # Both names of a renamed file count: moving a protected file out is a change to it.
+          files=$(gh api --paginate "repos/$REPO/pulls/$PR/files" --jq '.[] | .filename, (.previous_filename // empty)')
+          hit=()
+          while IFS= read -r f; do
+            case $f in
+              scripts/fork/* | .github/* | docs/fork/weekly-sync.md | CLAUDE.md) hit+=("$f") ;;
+            esac
+          done <<<"$files"
+          if [[ ${#hit[@]} -eq 0 ]]; then echo "unattended PR ($why), no protected path touched"; exit 0; fi
+          {
+            echo "::error::An unattended PR ($why) changes protected paths, so it cannot merge on its own. Cameron reviews it and merges with the admin bypass:"
+            printf '  %s\n' "${hit[@]}"
+          } >&2
+          exit 1

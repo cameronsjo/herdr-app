@@ -9,7 +9,8 @@
 #   build    compiles; holds no secret and no write token
 #   sign     the only job on the apple-signing environment; runs no repo code
 #            but the fork's signing scripts
-#   publish  attests and releases what sign made
+#   publish  attests and releases what sign made, with this commit's
+#            scripts/fork/daily-update (for download-only Macs)
 name: fork-mac-build
 run-name: ${{ format('browser build {0}', github.sha) }}
 
@@ -203,7 +204,8 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # Attests and publishes what sign made; runs none of the repo's code.
+  # Attests and publishes what sign made, plus this commit's
+  # scripts/fork/daily-update as a file; runs none of the repo's code.
   publish:
     needs: sign
     runs-on: ubuntu-latest
@@ -231,10 +233,33 @@ jobs:
           sha256sum -c herdr-browser-webkit.zip.sha256
           got=$(sha256sum herdr-browser-webkit.zip | cut -d' ' -f1)
           [[ -n $WANT && $got == "$WANT" ]] || { echo "::error::zip sha256 $got is not the one sign made ($WANT)"; exit 1; }
+      # The updater script, for a Mac with no checkout (daily-update
+      # --download-only stages it; a person adopts it). Taken from this commit
+      # only, never from build or sign, and never run here.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: src
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            scripts/fork/daily-update
+      - name: Add the updater script
+        run: |
+          set -euo pipefail
+          f=src/scripts/fork/daily-update
+          # Byte for byte the blob at this commit: no filter or line-ending change.
+          want=$(git -C src rev-parse "$GITHUB_SHA:scripts/fork/daily-update")
+          got=$(git -C src hash-object --no-filters "scripts/fork/daily-update")
+          [[ $got == "$want" ]] || { echo "::error::$f is blob $got, not $GITHUB_SHA's $want"; exit 1; }
+          cp "$f" dist/daily-update
+          sha256sum dist/daily-update
       - name: Attest where it was built
         uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
         with:
-          subject-path: dist/herdr-browser-webkit.zip
+          subject-path: |
+            dist/herdr-browser-webkit.zip
+            dist/daily-update
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
@@ -253,7 +278,7 @@ jobs:
           fi
           # A draft first, published once both files are up, so a reader never
           # sees a release whose files are still uploading.
-          gh release create "$tag" dist/herdr-browser-webkit.zip dist/herdr-browser-webkit.zip.sha256 \
+          gh release create "$tag" dist/herdr-browser-webkit.zip dist/herdr-browser-webkit.zip.sha256 dist/daily-update \
             -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --draft --prerelease --latest=false \
             --title "Browser build ${GITHUB_SHA:0:8}" --notes "$notes"
           gh release edit "$tag" -R "$GITHUB_REPOSITORY" --draft=false
