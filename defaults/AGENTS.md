@@ -959,7 +959,9 @@ has 124 programs (agents, editors, runtimes, tools, databases, infra);
   Terminals' `picker`, `peek`, and `pane` (an
   example pane header, not used by the default layouts; <!-- FORK(browser) --> a browser pane gets
   back, forward, reload, an address field, zoom, a viewport picker and DevTools from its
-  `browser.js`), and `worktree`
+  `browser.js`), `markdown` (<!-- FORK(markdown) --> a markdown file rendered in a pane:
+  `pane.split {direction, mod: "markdown", props: {file, on?}}`, `file` absolute, `on` its
+  machine; it reloads on save, and Files previews `.md` files the same way), and `worktree`
   (git worktrees as spaces: the space menu's and the + menu's New worktree,
   Open worktree (the repo's checkouts, filtered; one already shown is gone
   to) and Remove worktree open it as a dialog with props `{space, folder?,

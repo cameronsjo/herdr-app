@@ -1,7 +1,7 @@
 // A lazy file browser for the focused pane's folder, with bounded read-only previews.
 import { View, div, svg } from "gpui-kit";
-import { v_flex, h_flex, Editor, EditorState } from "gpui-base";
-import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings, window } from "herdr";
+import { v_flex, h_flex, Editor, EditorState, TextView } from "gpui-base"; // FORK(markdown): TextView
+import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings, window, run } from "herdr"; // FORK(markdown): run
 
 function location() {
   const space = spaces().find(s => s.active), f = focused();
@@ -12,6 +12,7 @@ function location() {
 const key = () => JSON.stringify(location());
 const LANG = { ts: "js", tsx: "js", mts: "js", cts: "js", jsx: "js", mjs: "js", toml: "yaml", jsonc: "json", svelte: "html", vue: "html" };
 const PER_FOLDER = 500, TOTAL = 5000;
+const MARKDOWN = /\.(md|markdown)$/i; // FORK(markdown)
 
 async function directory(path, on) {
   const windowsDirectory = async () => {
@@ -129,6 +130,7 @@ export default class Files extends View {
 
   show(path, cx) {
     this.code?.release(); this.code = null; this.file = path; this.fileError = null;
+    this.markdown = null; // FORK(markdown)
     if (!path || !cx) return;
     const context = this.context, root = this.root, on = this.on;
     cx.spawn(async cx => {
@@ -137,6 +139,8 @@ export default class Files extends View {
         if (this.file !== path || !this.current(context)) return;
         if (text === null) { this.fileError = "This file is no longer available"; return; }
         if (text.includes("\0")) { this.fileError = "Binary file · no text preview"; return; }
+        // FORK(markdown): .md files preview rendered; the markdown mod opens them beside the terminal.
+        if (MARKDOWN.test(path)) { this.markdown = text.length > 400000 ? text.slice(0, 400000) + "\n\n… (file truncated)" : text; return; }
         const t = theme(), ext = path.includes(".") ? path.split(".").pop() : "txt";
         this.code = EditorState.new({ language: LANG[ext] ?? ext, readonly: true,
           value: text.length > 400000 ? text.slice(0, 400000) + "\n… (file truncated)" : text,
@@ -170,10 +174,12 @@ export default class Files extends View {
       .child(h_flex().h(42).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
         .when(Boolean(this.file), el => el.child(div().id("files-back").w(20).cursor_pointer().text_color(t.muted).on_click((_e, cx) => { this.show(null); cx.notify(); }).child("←")))
         .child(div().font_semibold().child("Files"))
-        .child(div().flex_1().min_w(0).truncate().text_right().text_size(12).text_color(t.dim).child(this.file ?? this.root?.split(/[\\/]/).pop() ?? "")))
+        .child(div().flex_1().min_w(0).truncate().text_right().text_size(12).text_color(t.dim).child(this.file ?? this.root?.split(/[\\/]/).pop() ?? ""))
+        // FORK(markdown): open the previewed markdown file in its own pane beside the terminal.
+        .when(this.markdown != null, el => el.child(div().id("files-open-markdown").px(6).rounded(5).cursor_pointer().text_color(t.muted).hover(s => s.bg(t.hover)).on_click(() => run("pane.split", { direction: "right", mod: "markdown", props: { file: `${this.root}/${this.file}`, on: this.on } })).child("Open"))))
       .when(!this.file, el => el.child(v_flex().id("files-tree").flex_1().min_h(0).overflow_y_scrollbar().p(6).children(this.rows("", 0, [], t))
         .when(Boolean(this.error) || !this.entries.get("")?.length, el => el.child(div().p(8).text_size(12).text_color(t.dim).child(this.error || (this.loading ? "Loading files…" : this.root ? "No files" : "No folder"))))
         .when(this.limited, el => el.child(div().p(8).text_size(11).text_color(t.dim).child("File list limited to 500 entries per folder and 5,000 total")))))
-      .when(Boolean(this.file), el => el.child(this.code ? Editor.new(this.code).flex_1().min_h(0) : div().p(12).text_color(t.dim).child(this.fileError || "Loading file…")));
+      .when(Boolean(this.file), el => el.child(this.markdown != null ? div().flex_1().min_h(0).p(12).child(TextView.markdown("files-markdown", this.markdown).scrollable(true).selectable(true).size_full()) /* FORK(markdown) */ : this.code ? Editor.new(this.code).flex_1().min_h(0) : div().p(12).text_color(t.dim).child(this.fileError || "Loading file…")));
   }
 }
