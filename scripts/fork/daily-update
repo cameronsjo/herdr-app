@@ -497,7 +497,7 @@ cmd_check_download_only() {
     *) say "the GitHub API did not answer (releases: $api_why); the next check tries again"; return 0 ;;
   esac
   sha=$rel_sha tag="browser-$rel_sha"
-  installed=$(cat "$installed_file" 2>/dev/null || true)
+  installed=$(state_of "$installed_file")
   if [[ $installed == "$sha" ]]; then
     say "browser-${sha:0:8} already installed"
     stage_script "$sha"
@@ -547,14 +547,14 @@ cmd_adopt() {
   lock
   local sha=${1:-} have from
   [[ $sha =~ ^[0-9a-f]{40}$ ]] || { echo "usage: daily-update adopt <40-hex sha>" >&2; exit 2; }
-  have=$(cat "$staged_dir/sha" 2>/dev/null || true)
+  have=$(state_of "$staged_dir/sha")
   [[ $have == "$sha" ]] || { echo "daily-update: nothing staged for $sha (staged: ${have:-none})" >&2; exit 1; }
   use_scoped_token || exit 2
   # The staged bytes again, not a new download: what was announced is what goes in.
   verify_attested "$staged_dir/daily-update" "$sha" ||
     { echo "daily-update: the staged script no longer verifies; not adopted" >&2; exit 1; }
   # Never back to an older script than the one running, when its commit is known.
-  from=$(cat "$script_from" 2>/dev/null || true)
+  from=$(state_of "$script_from")
   if [[ $from =~ ([0-9a-f]{40}) ]] && [[ ${BASH_REMATCH[1]} != "$sha" ]]; then
     local running_sha=${BASH_REMATCH[1]} rc=0
     compare_get "$running_sha" "$sha" || rc=$?

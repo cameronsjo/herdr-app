@@ -518,7 +518,8 @@ bundle id `dev.herdr.app.browser-daily`; `scripts/fork/daily-update` and
 signature that fails the `spctl` or `stapler` check is held: `daily-update`
 leaves the installed app and tries again at its next check, while
 `browser-daily on` (which has already quit the app) re-signs it ad hoc.
-Anything else is re-signed ad hoc.
+Anything else is re-signed ad hoc, except in `daily-update`'s download-only
+mode, which refuses it and never re-signs (§ Another Mac).
 
 ### Dev-only switch (automated tests only)
 
