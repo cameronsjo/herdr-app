@@ -124,3 +124,10 @@ test.skipIf(skip)("a gated commit refreshes the script before the download, even
   expect(notified).toContain("agent's script changed");
   expect(notified).not.toContain("check failed");
 });
+
+// The CI leg on macos-latest exists for this: if /bin/bash there stops being
+// 3.2, the tests above no longer cover what launchd runs.
+test.skipIf(process.platform !== "darwin")("on macOS the tests run under /bin/bash 3.2", () => {
+  expect(BASH).toBe("/bin/bash");
+  expect(execFileSync("/bin/bash", ["-c", "echo $BASH_VERSION"], { encoding: "utf8" })).toMatch(/^3\.2\./);
+});
