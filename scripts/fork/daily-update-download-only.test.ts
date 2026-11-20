@@ -84,7 +84,13 @@ jqx=''; prev=''; for a in "$@"; do [ "$prev" = --jq ] && jqx=$a; prev=$a; done
 answer() { if [ -n "$jqx" ]; then jq -r "$jqx" <<<"$1"; else echo "$1"; fi; }
 fail_http() { echo "gh: $1 (HTTP $2)" >&2; exit 1; }
 case "$1 $2" in
-  "release list") def='[{"tagName":"${TAG}"}]'; answer "\${STUB_RELEASES:-$def}"; exit 0 ;;
+  "release list")
+    case "\${STUB_LIST_HTTP:-}" in
+      401) echo "HTTP 401: Bad credentials (https://api.github.com/graphql)" >&2; exit 1 ;;
+      403) echo "HTTP 403: Resource not accessible by personal access token (https://api.github.com/graphql)" >&2; exit 1 ;;
+      403rl) echo "HTTP 403: API rate limit exceeded for user ID 1. (https://api.github.com/graphql)" >&2; exit 1 ;;
+    esac
+    def='[{"tagName":"${TAG}"}]'; answer "\${STUB_RELEASES:-$def}"; exit 0 ;;
   "release download")
     shift 2; tag=$1; shift; dest='' pat=''
     while [ $# -gt 0 ]; do case $1 in -p) pat=$2; shift 2 ;; -D) dest=$2; shift 2 ;; *) shift ;; esac; done
@@ -140,6 +146,9 @@ case "$1" in
 esac`);
   stub("launchctl", `echo "launchctl $*" >> "$HOME/launchctl.log"`);
   stub("plutil", `exit 0`);
+  // mv: real, except moving the new app in when STUB_MV_FAIL is set.
+  const realMv = existsSync("/bin/mv") ? "/bin/mv" : "/usr/bin/mv";
+  stub("mv", `case "$1" in *".app.next") [ -n "\${STUB_MV_FAIL:-}" ] && { echo "mv: stub failure" >&2; exit 1; } ;; esac\nexec ${realMv} "$@"`);
   stub("osascript", `echo "$*" >> "$HOME/notified.log"`);
 });
 
@@ -421,5 +430,96 @@ test("bootstrap never exports the token", () => {
   const src = readFileSync(BOOTSTRAP, "utf8");
   expect(src).not.toMatch(/^\s*export\s+GH_TOKEN/m);
   expect(src).not.toMatch(/^\s*GH_TOKEN=[^ ]*$/m);
-  expect(src).toContain('[[ ${BASH_SOURCE[0]} == "$0" ]]');
+  // The sourcing check comes before set -euo pipefail, so a sourcing shell keeps its options.
+  expect(src.indexOf("return 2 2>/dev/null || exit 2")).toBeGreaterThan(0);
+  expect(src.indexOf("return 2 2>/dev/null || exit 2")).toBeLessThan(src.search(/^set -euo pipefail$/m));
+});
+
+// Important 2: a refused token is a setup error, not a silent retry.
+const notifyCount = (needle: string) => notified().split("\n").filter((l) => l.includes(needle)).length;
+
+test.skipIf(skip)("a 401 from GitHub is a setup error: gh's text in the log, one notification", () => {
+  const r1 = run(["check"], { STUB_LIST_HTTP: "401" });
+  expect(r1.code).toBe(2);
+  expect(r1.out).toContain("setup error: GitHub refused the token (HTTP 401: Bad credentials");
+  const r2 = run(["check"], { STUB_LIST_HTTP: "401" });
+  expect(r2.code).toBe(2);
+  expect(notifyCount("GitHub refused the token")).toBe(1);
+  expect(notified()).not.toContain("check failed");
+});
+
+test.skipIf(skip)("a 403 that is not a rate limit is a setup error too", () => {
+  const r = run(["check"], { STUB_LIST_HTTP: "403" });
+  expect(r.code).toBe(2);
+  expect(r.out).toContain("Resource not accessible by personal access token");
+});
+
+test.skipIf(skip)("a rate-limited 403 is retried quietly", () => {
+  const r = run(["check"], { STUB_LIST_HTTP: "403rl" });
+  expect(r.code).toBe(0);
+  expect(r.out).toContain("the next check tries again");
+  expect(notified()).toBe("");
+});
+
+test.skipIf(skip)("a 401 on a later call (compare) is a setup error as well", () => {
+  const r = run(["check"], { STUB_COMPARE_HTTP: "401" });
+  expect(r.code).toBe(2);
+  expect(r.out).toContain("setup error: GitHub refused the token");
+});
+
+test.skipIf(skip)("once GitHub takes the token again, the next refusal notifies again", () => {
+  run(["check"], { STUB_LIST_HTTP: "401" });
+  run(["check"]);
+  run(["check"], { STUB_LIST_HTTP: "401" });
+  expect(notifyCount("GitHub refused the token")).toBe(2);
+});
+
+// Nit: a failed swap leaves the old app in place and records nothing.
+test.skipIf(skip)("a failed move of the new app keeps the installed app and its record", () => {
+  mkdirSync(join(daily, "Contents"), { recursive: true });
+  writeFileSync(join(daily, "Contents/old-marker"), "old\n");
+  writeFileSync(join(state, "installed"), OLD + "\n");
+  const r = run(["check"], { STUB_MV_FAIL: "1" });
+  expect(r.out).toContain("could not move the new app into place");
+  expect(read(join(state, "installed")).trim()).toBe(OLD);
+  expect(existsSync(join(daily, "Contents/old-marker"))).toBe(true);
+  expect(existsSync(join(state, "built"))).toBe(false);
+  expect(existsSync(`${daily}.next`)).toBe(false);
+});
+
+test.skipIf(skip)("a successful swap replaces the old app and leaves no .prev", () => {
+  mkdirSync(join(daily, "Contents"), { recursive: true });
+  writeFileSync(join(daily, "Contents/old-marker"), "old\n");
+  writeFileSync(join(state, "installed"), OLD + "\n");
+  run(["check"]);
+  expect(read(join(state, "installed")).trim()).toBe(SHA);
+  expect(existsSync(join(daily, "Contents/old-marker"))).toBe(false);
+  expect(existsSync(`${daily}.prev`)).toBe(false);
+});
+
+// Nits: the bootstrap's sourcing refusal and its first-install bound.
+for (const sh of ["bash", "zsh"]) {
+  const have = spawnSync("sh", ["-c", `command -v ${sh}`]).status === 0;
+  test.skipIf(skip || !have)(`sourcing the bootstrap from ${sh} returns 2 and leaves the shell's options alone`, () => {
+    const opts = sh === "zsh" ? "[[ -o errexit ]] && echo errexit-on || echo errexit-off" : "case $- in *e*) echo errexit-on ;; *) echo errexit-off ;; esac";
+    const r = spawnSync(sh, ["-c", `source '${BOOTSTRAP}'; echo "rc=$?"; ${opts}`], { encoding: "utf8", env: { HOME: home, PATH: process.env.PATH ?? "" } });
+    const out = (r.stdout ?? "") + (r.stderr ?? "");
+    expect(out).toContain("run it with bash, not source");
+    expect(out).toContain("rc=2");
+    expect(out).toContain("errexit-off");
+    expect(read(join(home, "security.log"))).toBe("");
+  });
+}
+
+test.skipIf(skip)("bootstrap refuses a release more than 5 commits behind master, like a first install", () => {
+  compare(SHA, "master", "ahead", 6, 0);
+  const r = bootstrap();
+  expect(r.code).toBe(1);
+  expect(r.out).toContain("is 6 commits behind master (more than 5)");
+  expect(existsSync(self)).toBe(false);
+});
+
+test("the bootstrap's bound is the agent's", () => {
+  const n = (src: string, re: RegExp) => src.match(re)?.[1];
+  expect(n(readFileSync(BOOTSTRAP, "utf8"), /^max_behind=(\d+)/m)).toBe(n(readFileSync(SCRIPT, "utf8"), /^first_install_max_behind=(\d+)/m));
 });

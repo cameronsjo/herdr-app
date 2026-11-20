@@ -21,6 +21,14 @@
 # The token goes only into the environment of each gh call here; nothing is
 # exported, so it stays out of your shell. Run it with bash, not source.
 # Exit: 0 set up; 1 a check failed; 2 setup error.
+
+# Before set -euo pipefail, so a sourcing shell (bash or zsh) keeps its options:
+# return when sourced, exit when run.
+if [ -n "${ZSH_VERSION:-}" ] || [ "${BASH_SOURCE[0]:-$0}" != "$0" ]; then
+  echo "bootstrap-download-only: run it with bash, not source: it must not leave anything in your shell" >&2
+  # shellcheck disable=SC2317  # exit is reached when run, not sourced
+  return 2 2>/dev/null || exit 2
+fi
 set -euo pipefail
 
 repo=cameronsjo/herdr-app
@@ -28,6 +36,7 @@ item=herdr-fork-gh-token
 state="$HOME/.local/share/herdr-fork"
 agent="$state/daily-update"
 identity="https://github.com/$repo/.github/workflows/fork-mac-build.yml@refs/heads/master"
+max_behind=5   # daily-update's first_install_max_behind: the same bound as the agent's first install
 
 die() { local rc=$1; shift; echo "bootstrap-download-only: $*" >&2; exit "$rc"; }
 
@@ -37,7 +46,6 @@ case ${1:-} in
   '') ;;
   *) sed -n '2,23p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
-[[ ${BASH_SOURCE[0]} == "$0" ]] || die 2 "run it with bash, not source: it must not leave anything in your shell"
 for tool in gh security shasum install; do
   command -v "$tool" >/dev/null 2>&1 || die 2 "needs $tool"
 done
@@ -75,6 +83,8 @@ while IFS= read -r tag; do
   if [[ -z $best_n ]] || (( ahead < best_n )); then best=$sha best_n=$ahead; fi
 done <<<"$tags"
 [[ -n $best ]] || die 1 "no browser-<sha> release on master"
+(( best_n <= max_behind )) ||
+  die 1 "the newest release on master, browser-${best:0:8}, is $best_n commits behind master (more than $max_behind); wait for a newer release"
 sha=$best tag="browser-$best"
 points=$(ghs api "repos/$repo/git/ref/tags/$tag" --jq '.object.type + " " + .object.sha') ||
   die 1 "could not read the tag $tag"

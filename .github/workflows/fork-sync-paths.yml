@@ -1,6 +1,7 @@
 # FORK(sync-guard): a required check (ruleset 27338965) that fails a PR that
 # would merge without a person and touches the files that decide what runs on
-# Cameron's Macs or what agents and the sync routine do. Auto-merge then waits
+# Cameron's Macs or what agents and the sync routine do (agent configuration
+# at any depth: CLAUDE.md, CLAUDE.local.md, .claude/). Auto-merge then waits
 # on it; Cameron reads such a PR and merges with the admin bypass. Fork-only file.
 #
 # Would merge without a person: auto-merge is on (any branch, any title; the
@@ -66,7 +67,9 @@ jobs:
           hit=()
           while IFS= read -r f; do
             case $f in
-              scripts/fork/* | .github/* | .claude/* | .mcp.json | docs/fork/weekly-sync.md | CLAUDE.md) hit+=("$f") ;;
+              # Agent configuration at any depth: a nested CLAUDE.md or .claude/skills loads into sessions too.
+              scripts/fork/* | .github/* | .mcp.json | docs/fork/weekly-sync.md | \
+              CLAUDE.md | */CLAUDE.md | CLAUDE.local.md | */CLAUDE.local.md | .claude/* | */.claude/*) hit+=("$f") ;;
             esac
           done <<<"$files"
           if [[ ${#hit[@]} -eq 0 ]]; then echo "merges without a person ($why), but no protected path touched"; exit 0; fi

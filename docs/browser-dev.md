@@ -160,9 +160,12 @@ again and puts them in place.
 `GH_TOKEN` when someone runs the script by hand; never `gh`'s own login. Make a
 fine-grained token for `cameronsjo/herdr-app` only with Contents: read,
 Metadata: read and Attestations: read (`GET /repos/{owner}/{repo}/attestations/{digest}`
-needs the last one), and an expiry date. Renew it before then: once it lapses
-the log shows `gh`'s own error, an HTTP 401 or 403, which is how to tell a
-token problem from a build that failed its check.
+needs the last one), and an expiry date. Renew it before then. When GitHub
+refuses the token (HTTP 401, or a 403 that is not a rate limit), every check
+exits 2, logs `setup error: GitHub refused the token (<gh's own error>)` in
+`~/Library/Logs/herdr-fork-daily.log`, and you get one notification until a
+check gets an answer again. That is how a token problem reads apart from a
+build that failed its check, which is refused by name.
 
 Set up, once: get `scripts/fork/bootstrap-download-only` at a commit you have
 read, read it, and run it with `bash`. It is this Mac's trust root, so take it
@@ -170,14 +173,16 @@ from a commit, not a branch:
 
 ```sh
 sha=<a master commit you have read>
-curl -fsSLo /tmp/bootstrap-download-only \
+d=$(mktemp -d)
+curl -fsSLo "$d/bootstrap-download-only" \
   "https://raw.githubusercontent.com/cameronsjo/herdr-app/$sha/scripts/fork/bootstrap-download-only"
-less /tmp/bootstrap-download-only
-bash /tmp/bootstrap-download-only
+less "$d/bootstrap-download-only"
+bash "$d/bootstrap-download-only"
 ```
 
 It asks for the token (into the Keychain; `--new-token` replaces it), picks
-the release by the agent's rule, downloads its `daily-update`, verifies it with
+the release by the agent's rule (and, like a first install, refuses one more
+than 5 commits behind `master`), downloads its `daily-update`, verifies it with
 `gh attestation verify` pinned to this repo,
 `fork-mac-build.yml@refs/heads/master`, GitHub's OIDC issuer,
 `refs/heads/master`, that commit as source and signer digest, SLSA provenance

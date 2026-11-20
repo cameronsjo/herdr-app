@@ -260,12 +260,15 @@ signature_kind() {
 # Anything else gets its own bundle id and an ad hoc signature, as before.
 # With `strict` (download-only), anything but a genuine Developer ID build
 # (rc 0) is refused: the installed app stays, and nothing is re-signed.
+# Download-only calls this as an `if` condition, where set -e is off, so every
+# step checks its own result; a failed swap puts the old app back, and
+# `installed` is written only once the new app is in place.
 install_bundle() {
   local sha=$1 src=${2:-"$build/target/browser-dev-webkit/Herdr Dev.app"} strict=${3:-} was now rc=0
   was=$(signature_kind "$daily")
-  mkdir -p "$(dirname "$daily")"
+  mkdir -p "$(dirname "$daily")" || { say "${sha:0:8}: could not create $(dirname "$daily")"; return 1; }
   rm -rf "$daily.next"
-  ditto "$src" "$daily.next"
+  ditto "$src" "$daily.next" || { say "${sha:0:8}: could not copy the new app"; rm -rf "$daily.next"; return 1; }
   genuine_devid "$daily.next" || rc=$?
   if [[ -n $strict && $rc -ne 0 ]]; then
     rm -rf "$daily.next"
@@ -284,13 +287,24 @@ install_bundle() {
   if [[ $rc -eq 0 ]]; then
     now="Developer ID"
   else
-    /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $daily_id" "$daily.next/Contents/Info.plist"
-    codesign --force --deep --sign - --preserve-metadata=entitlements "$daily.next"
+    if ! { /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $daily_id" "$daily.next/Contents/Info.plist" &&
+      codesign --force --deep --sign - --preserve-metadata=entitlements "$daily.next"; }; then
+      say "${sha:0:8}: could not re-sign the new app"; rm -rf "$daily.next"; return 1
+    fi
     now="ad hoc"
   fi
-  rm -rf "$daily"
-  mv "$daily.next" "$daily"
-  printf '%s\n' "$sha" > "$installed_file"
+  rm -rf "$daily.prev"
+  if [[ -e "$daily" ]] && ! mv "$daily" "$daily.prev"; then
+    say "${sha:0:8}: could not move the installed app aside; it is unchanged"; rm -rf "$daily.next"; return 1
+  fi
+  if ! mv "$daily.next" "$daily"; then
+    if [[ -e "$daily.prev" ]]; then mv "$daily.prev" "$daily" || say "could not put the previous app back from $daily.prev"; fi
+    say "${sha:0:8}: could not move the new app into place; the installed app is unchanged"
+    rm -rf "$daily.next"
+    return 1
+  fi
+  rm -rf "$daily.prev"
+  printf '%s\n' "$sha" > "$installed_file" || { say "${sha:0:8}: installed, but could not record it in $installed_file"; return 1; }
   say "installed ${sha:0:8} in $daily ($now signed)"
   if [[ $was != none && $was != "$now" ]]; then
     say "the app's code identity changed ($was -> $now): macOS asks once more for camera, microphone and keychain access"
@@ -374,10 +388,32 @@ verify_attested() {
   return 1
 }
 
+# Whether gh's error text says GitHub refused the token: HTTP 401, or a 403
+# that is not a rate limit (an expired, revoked or under-scoped token). That
+# stops every update until a person renews it, so it is a setup error, never
+# a quiet "try again".
+token_refused() {
+  case $1 in
+    *"HTTP 401"* | *"Bad credentials"*) return 0 ;;
+    *"HTTP 403"*) case $1 in *"rate limit"*) return 1 ;; esac; return 0 ;;
+  esac
+  return 1
+}
+
+# Logged every run with gh's own words; notified once until a check gets an
+# answer again (cmd_check_download_only clears it).
+token_error() {
+  say "setup error: GitHub refused the token ($1). Renew the Keychain item $gh_token_item: docs/browser-dev.md § Another Mac"
+  if [[ ! -f "$state_dir/token-refused" ]]; then
+    notify "Herdr Browser updates stopped: GitHub refused the token. Renew it (docs/browser-dev.md § Another Mac); see $log"
+    printf '%s\n' "$1" > "$state_dir/token-refused"
+  fi
+}
+
 # One GitHub API read, into api_out. 0: answered; 1: GitHub said 404 (the
 # thing does not exist, which callers treat as a refusal); 2: no answer
-# (network, rate limit, 403, 5xx: the next check tries again), api_why says
-# what gh said. A global, not stdout: a function that fails inside $(...) runs
+# (network, rate limit, 5xx: the next check tries again); 3: GitHub refused
+# the token (token_refused). api_why says what gh said. A global, not stdout: a function that fails inside $(...) runs
 # the ERR trap there under bash 3.2 (see state_of).
 api_out='' api_why=''
 api_get() {
@@ -387,6 +423,7 @@ api_get() {
     *__api_failed__*)
       api_why=$(tr '\n' ' ' < "$err" | cut -c1-200)
       api_out=''
+      if token_refused "$api_why"; then return 3; fi
       case $api_why in *"HTTP 404"*) return 1 ;; esac
       return 2 ;;
   esac
@@ -409,20 +446,25 @@ compare_get() {
 # one closest to master's head (smallest ahead_by), into rel_sha and
 # rel_distance. Not the last published: a re-run of an old commit publishes
 # later, and must neither roll a first install back nor stall updates.
-# 0: found; 1: none; 2: no answer from the API.
+# 0: found; 1: none; 2: no answer from the API; 3: the token was refused.
 first_install_max_behind=5   # a first install takes a release at most 5 commits behind master
 rel_sha='' rel_distance=''
 select_release() {
-  local list tag sha rc best='' best_n=''
+  local list tag sha rc best='' best_n='' err="$state_dir/api.err"
   rel_sha='' rel_distance=''
   list=$(gh release list -R "$repo_url_fork" --limit 30 --exclude-drafts --json tagName \
-    --jq '.[] | .tagName | select(test("^browser-[0-9a-f]{40}$"))' 2>/dev/null || echo __api_failed__)
-  case $list in *__api_failed__*) api_why="release list failed"; return 2 ;; esac
+    --jq '.[] | .tagName | select(test("^browser-[0-9a-f]{40}$"))' 2>"$err" || echo __api_failed__)
+  case $list in
+    *__api_failed__*)
+      api_why=$(tr '\n' ' ' < "$err" | cut -c1-200)
+      if token_refused "$api_why"; then return 3; fi
+      return 2 ;;
+  esac
   while IFS= read -r tag; do
     [[ -n $tag ]] || continue
     sha=${tag#browser-}
     rc=0; compare_get "$sha" master || rc=$?
-    if [[ $rc -eq 2 ]]; then return 2; fi
+    if [[ $rc -ge 2 ]]; then return $rc; fi
     [[ $rc -eq 0 ]] || continue
     [[ $cmp_behind == 0 && $cmp_ahead =~ ^[0-9]+$ ]] || continue
     if [[ -z $best_n ]] || (( cmp_ahead < best_n )); then best=$sha best_n=$cmp_ahead; fi
@@ -432,7 +474,7 @@ select_release() {
 }
 
 # The release's tag is a plain tag on commit <sha> itself. 0 yes; 1 no (or no
-# such tag); 2 no answer.
+# such tag); 2 no answer; 3 the token was refused.
 tag_points_at() {
   local sha=$1 rc=0
   api_get "repos/$repo_url_fork/git/ref/tags/browser-$sha" '.object.type + " " + .object.sha' || rc=$?
@@ -443,12 +485,12 @@ tag_points_at() {
 # The downgrade floor: <sha> is ahead of the installed commit; with nothing
 # installed, it is at most first_install_max_behind commits behind master.
 # (select_release already took only ancestors of master.) 0 above it; 1 not
-# (floor_why says why); 2 no answer.
+# (floor_why says why); 2 no answer; 3 the token was refused.
 above_floor() {
   local installed=$1 sha=$2 distance=$3 rc=0
   if [[ -n $installed ]]; then
     compare_get "$installed" "$sha" || rc=$?
-    if [[ $rc -eq 2 ]]; then return 2; fi
+    if [[ $rc -ge 2 ]]; then return $rc; fi
     if [[ $rc -ne 0 || $cmp_status != ahead ]]; then
       floor_why="browser-${sha:0:8} is not ahead of the installed ${installed:0:8} (${cmp_status:-unknown commit})"
       return 1
@@ -492,10 +534,11 @@ cmd_check_download_only() {
   say "download-only check (gh token: $token_source)"
   select_release || rc=$?
   case $rc in
-    0) ;;
-    1) say "no browser-<sha> release on master yet"; return 0 ;;
+    0 | 1) rm -f "$state_dir/token-refused" ;;   # GitHub took the token again
+    3) token_error "$api_why"; exit 2 ;;
     *) say "the GitHub API did not answer (releases: $api_why); the next check tries again"; return 0 ;;
   esac
+  [[ $rc -eq 0 ]] || { say "no browser-<sha> release on master yet"; return 0; }
   sha=$rel_sha tag="browser-$rel_sha"
   installed=$(state_of "$installed_file")
   if [[ $installed == "$sha" ]]; then
@@ -507,12 +550,14 @@ cmd_check_download_only() {
   case $rc in
     0) ;;
     2) say "${sha:0:8}: the GitHub API did not answer (tag: $api_why); the next check tries again"; return 0 ;;
+    3) token_error "$api_why"; exit 2 ;;
     *) refuse "$sha" "tag $tag does not point at commit $sha"; return 0 ;;
   esac
   rc=0; above_floor "$installed" "$sha" "$rel_distance" || rc=$?
   case $rc in
     0) ;;
     2) say "${sha:0:8}: the GitHub API did not answer (compare: $api_why); the next check tries again"; return 0 ;;
+    3) token_error "$api_why"; exit 2 ;;
     *) refuse "$sha" "$floor_why"; return 0 ;;
   esac
   if ! ci_passed "$sha"; then say "${sha:0:8}: not installing"; return 0; fi
@@ -558,6 +603,7 @@ cmd_adopt() {
   if [[ $from =~ ([0-9a-f]{40}) ]] && [[ ${BASH_REMATCH[1]} != "$sha" ]]; then
     local running_sha=${BASH_REMATCH[1]} rc=0
     compare_get "$running_sha" "$sha" || rc=$?
+    if [[ $rc -eq 3 ]]; then echo "daily-update: GitHub refused the token ($api_why); renew $gh_token_item" >&2; exit 2; fi
     if [[ $rc -eq 2 ]]; then echo "daily-update: the GitHub API did not answer ($api_why); try again" >&2; exit 1; fi
     [[ $rc -eq 0 && $cmp_status == ahead ]] || { echo "daily-update: $sha is not ahead of the running script's ${running_sha:0:8} (${cmp_status:-unknown commit}); not adopted" >&2; exit 1; }
   fi

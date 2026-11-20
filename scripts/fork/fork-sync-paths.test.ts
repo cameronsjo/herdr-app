@@ -76,8 +76,14 @@ test.skipIf(skip)("a rename out of a protected path counts", () => {
   expect(check({ ref: "claude/x", files: ["misc/moved", "scripts/fork/daily-update"] }).code).toBe(1);
 });
 
-test.skipIf(skip)("a nested CLAUDE.md is not the protected one", () => {
-  expect(check({ ref: "claude/x", files: ["src/CLAUDE.md"] }).code).toBe(0);
+for (const path of ["crates/x/CLAUDE.md", "CLAUDE.local.md", "crates/x/CLAUDE.local.md", "crates/x/.claude/skills/s/SKILL.md"]) {
+  test.skipIf(skip)(`agent configuration at any depth is protected: ${path}`, () => {
+    expect(check({ auto: true, files: ["src/a.rs", path] }).code).toBe(1);
+  });
+}
+
+test.skipIf(skip)("a file that only mentions CLAUDE.md in its name is not protected", () => {
+  expect(check({ auto: true, files: ["docs/NOT-CLAUDE.md", "src/claude/x.rs"] }).code).toBe(0);
 });
 
 test.skipIf(skip)("3000 or more changed files fails, whoever merges", () => {
