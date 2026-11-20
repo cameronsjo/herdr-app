@@ -28,7 +28,10 @@
 # else (a local build, an ad hoc release) gets that id and an ad hoc signature.
 # The agent runs a copy of this script (~/.local/share/herdr-fork/); `check`
 # refreshes that copy from the build worktree by an atomic rename, so a
-# running copy is never rewritten.
+# running copy is never rewritten, as soon as the worktree is at a commit that
+# passed the CI check (before any download or build). When that check itself
+# is broken, `bash scripts/fork/daily-update install` from a checkout replaces
+# the copy by hand.
 # Exit: 0 done or nothing to do; 1 a step failed (logged and notified);
 #       2 setup error.
 set -Eeuo pipefail
@@ -56,6 +59,10 @@ say() { printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*"; }
 # The text goes in as an argument, never spliced into the AppleScript source.
 notify() { osascript -e 'on run argv' -e 'display notification (item 1 of argv) with title "Herdr fork"' -e 'end run' "$1" >/dev/null 2>&1 || true; }
 running() { pgrep -f -- "$daily/Contents/MacOS/" >/dev/null 2>&1; }
+# A state file's content, or "" when it is missing. Always this, never a bare
+# $(cat f): under /bin/bash 3.2 a command that fails inside $(...) runs the ERR
+# trap in that subshell (a "check failed" notification) even inside an `if`.
+state_of() { cat "$1" 2>/dev/null || true; }
 
 # Any checkout of the repo finds the primary one; the build worktree sits beside the others.
 mkdir -p "$state_dir"
@@ -93,14 +100,27 @@ lock() {
 # - each required workflow file ran on that push to master and succeeded, and
 #   none failed. Matched by workflow path and event, not by check-run name: a
 #   job or app can name a check "test", but not be .github/workflows/ci.yml.
+# Matched with `case`, not grep: launchd runs this under macOS's /bin/bash 3.2,
+# where a failing `command grep` inside an `if` still fires the ERR trap, which
+# turned every "no failed run" into "check failed" (2026-11-16 to 11-20).
 ci_passed() {
-  local sha=$1 prs runs wf
-  prs=$(gh api "repos/$repo_url_fork/commits/$sha/pulls" --jq ".[] | select(.merged_at != null and .base.ref == \"master\" and .merge_commit_sha == \"$sha\") | .number") || return 1
+  local sha=$1 prs runs wf line ok bad
+  # `|| echo` inside: a failing gh in $(...) would run the ERR trap there (see state_of).
+  prs=$(gh api "repos/$repo_url_fork/commits/$sha/pulls" --jq ".[] | select(.merged_at != null and .base.ref == \"master\" and .merge_commit_sha == \"$sha\") | .number" || echo gh-failed)
+  if [[ $prs == *gh-failed* ]]; then say "${sha:0:8}: the GitHub API did not answer (pulls)"; return 1; fi
   [[ -n "$prs" ]] || { say "${sha:0:8}: not the merge commit of a PR merged into master"; return 1; }
-  runs=$(gh api "repos/$repo_url_fork/actions/runs?head_sha=$sha&event=push&branch=master&per_page=100" --jq '.workflow_runs[] | "\(.path) \(.conclusion)"') || return 1
+  runs=$(gh api "repos/$repo_url_fork/actions/runs?head_sha=$sha&event=push&branch=master&per_page=100" --jq '.workflow_runs[] | "\(.path) \(.conclusion)"' || echo gh-failed)
+  if [[ $runs == *gh-failed* ]]; then say "${sha:0:8}: the GitHub API did not answer (runs)"; return 1; fi
   for wf in "${required_workflows[@]}"; do
-    command grep -qxF "$wf success" <<<"$runs" || { say "${sha:0:8}: $wf has not succeeded on master"; return 1; }
-    if command grep -qE "^$wf (failure|cancelled|timed_out)$" <<<"$runs"; then say "${sha:0:8}: a run of $wf failed"; return 1; fi
+    ok='' bad=''
+    while IFS= read -r line; do
+      case $line in
+        "$wf success") ok=1 ;;
+        "$wf failure" | "$wf cancelled" | "$wf timed_out") bad=1 ;;
+      esac
+    done <<<"$runs"
+    [[ -n $ok ]] || { say "${sha:0:8}: $wf has not succeeded on master"; return 1; }
+    [[ -z $bad ]] || { say "${sha:0:8}: a run of $wf failed"; return 1; }
   done
 }
 
@@ -116,7 +136,8 @@ build_state() {
 # step that matters checks its own result.
 fetch_release() {
   local sha=$1 tag="browser-$1" dir="$state_dir/download" state draft
-  if draft=$(gh release view "$tag" -R "$repo_url_fork" --json isDraft --jq .isDraft 2>/dev/null) && [[ $draft == true ]]; then
+  draft=$(gh release view "$tag" -R "$repo_url_fork" --json isDraft --jq .isDraft 2>/dev/null || true)
+  if [[ $draft == true ]]; then
     state=$(build_state "$sha")
     case $state in
       queued|in_progress|waiting|requested|pending) say "${sha:0:8}: $tag is still being published"; return 2 ;;
@@ -147,7 +168,11 @@ fetch_release() {
   if ! gh attestation verify "$dir/$asset" -R "$repo_url_fork" --signer-workflow "$repo_url_fork/$build_workflow" \
     --source-ref refs/heads/master --source-digest "$sha" --deny-self-hosted-runners >/dev/null 2>&1; then
     say "${sha:0:8}: $tag's attestation did not verify"
-    notify "The downloaded build ${sha:0:8} failed its attestation check, so it was not used; see $log"
+    # Once per commit, like devid-held: an hourly agent would repeat it every hour.
+    if [[ "$(state_of "$state_dir/attest-failed")" != "$sha" ]]; then
+      notify "The downloaded build ${sha:0:8} failed its attestation check, so it was not used; see $log"
+      printf '%s\n' "$sha" > "$state_dir/attest-failed"
+    fi
     return 1
   fi
   ditto -x -k "$dir/$asset" "$dir/unpacked" || { say "${sha:0:8}: could not unpack $asset"; return 1; }
@@ -156,8 +181,9 @@ fetch_release() {
     { say "${sha:0:8}: the Herdr Dev.app in $asset fails codesign --verify"; return 1; }
   xattr -dr com.apple.quarantine "$dir/unpacked/Herdr Dev.app" 2>/dev/null || true
   local dest="$build/target/browser-dev-webkit"
-  mkdir -p "$dest" && rm -rf "$dest/Herdr Dev.app" && mv "$dir/unpacked/Herdr Dev.app" "$dest/Herdr Dev.app" ||
-    { say "${sha:0:8}: could not put the download in $dest"; return 1; }
+  if ! { mkdir -p "$dest" && rm -rf "$dest/Herdr Dev.app" && mv "$dir/unpacked/Herdr Dev.app" "$dest/Herdr Dev.app"; }; then
+    say "${sha:0:8}: could not put the download in $dest"; return 1
+  fi
   rm -rf "$dir"
   return 0
 }
@@ -176,7 +202,7 @@ genuine_devid() {
   codesign --verify --deep --strict \
     -R "=anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = \"$fork_team\" and identifier \"$daily_id\"" "$app" >/dev/null 2>&1 || return 1
   devid_why="signed by the fork's Developer ID, but spctl does not report it notarized"
-  [[ "$(spctl -a -t exec -vv "$app" 2>&1)" == *"source=Notarized Developer ID"* ]] || return 2
+  [[ "$(spctl -a -t exec -vv "$app" 2>&1 || true)" == *"source=Notarized Developer ID"* ]] || return 2
   devid_why="signed by the fork's Developer ID, but stapler validate fails"
   xcrun stapler validate "$app" >/dev/null 2>&1 || return 2
   devid_why=
@@ -205,7 +231,7 @@ install_bundle() {
   if [[ $rc -eq 2 ]]; then
     rm -rf "$daily.next"
     say "${sha:0:8}: not installed: $devid_why; the next check tries again"
-    if [[ "$(cat "$state_dir/devid-held" 2>/dev/null)" != "$sha" ]]; then
+    if [[ "$(state_of "$state_dir/devid-held")" != "$sha" ]]; then
       notify "Build ${sha:0:8} is Developer ID signed but did not pass its notarization check, so it was not installed; see $log"
       printf '%s\n' "$sha" > "$state_dir/devid-held"
     fi
@@ -228,14 +254,21 @@ install_bundle() {
 }
 
 # The agent's copy follows the build worktree's script (takes effect on the next run).
+# Called right after the build worktree is checked out at a commit that passed
+# ci_passed, before any download or build: a release that fails a check or a
+# local build that breaks must not leave the agent on an old script (that pinned
+# it to a1330f9 from 2026-11-16 on). Its source is only ever that gated commit.
+# script_from records where the running copy came from, for `status`.
+script_from="$state_dir/script-from"
 refresh_self() {
-  local newer="$build/scripts/fork/daily-update"
+  local sha=$1 newer="$build/scripts/fork/daily-update"
   [[ -f "$self" && -f "$newer" ]] || return 0
   cmp -s "$newer" "$self" && return 0
   local old_sum new_sum
   old_sum=$(shasum -a 256 "$self" | cut -c1-12); new_sum=$(shasum -a 256 "$newer" | cut -c1-12)
   install -m 0755 "$newer" "$self.new" && mv -f "$self.new" "$self"
-  say "updated the agent's script from the build worktree at $(git -C "$build" rev-parse --short HEAD): $old_sum -> $new_sum"
+  printf 'fork/master %s\n' "$sha" > "$script_from"
+  say "updated the agent's script from the build worktree at ${sha:0:8}: $old_sum -> $new_sum"
   notify "The daily-update agent's script changed ($old_sum -> $new_sum); see $log"
 }
 
@@ -247,7 +280,7 @@ cmd_check() {
   remote=$(fork_remote)
   git -C "$root" fetch --quiet --no-tags "$remote" master
   sha=$(git -C "$root" rev-parse "refs/remotes/$remote/master")
-  if [[ "$(cat "$built_file" 2>/dev/null)" != "$sha" ]]; then
+  if [[ "$(state_of "$built_file")" != "$sha" ]]; then
     if ! ci_passed "$sha"; then say "${sha:0:8}: not building"; return 0; fi
     if [[ -d "$build" ]]; then
       git -C "$build" checkout --quiet --force --detach "$sha"
@@ -256,6 +289,7 @@ cmd_check() {
       git -C "$root" worktree prune
       git -C "$root" worktree add --quiet --detach "$build" "$sha"
     fi
+    refresh_self "$sha"
     rc=0
     fetch_release "$sha" || rc=$?
     if [[ $rc -eq 2 ]]; then return 0; fi
@@ -269,14 +303,13 @@ cmd_check() {
       (cd "$build" && bash scripts/browser-dev-bundle --webkit)
     fi
     printf '%s\n' "$sha" > "$built_file"
-    refresh_self
   else
     say "fork/master ${sha:0:8} already built"
   fi
-  if [[ "$(cat "$installed_file" 2>/dev/null)" == "$sha" ]]; then return 0; fi
+  if [[ "$(state_of "$installed_file")" == "$sha" ]]; then return 0; fi
   if running; then
     say "${sha:0:8} built; Herdr Browser is running, so it waits"
-    if [[ "$(cat "$notified_file" 2>/dev/null)" != "$sha" ]]; then
+    if [[ "$(state_of "$notified_file")" != "$sha" ]]; then
       notify "Build ${sha:0:8} is ready. To use it: bash $self apply (reopens Herdr; terminals keep running)"
       printf '%s\n' "$sha" > "$notified_file"
     fi
@@ -299,6 +332,12 @@ cmd_status() {
   echo "installed:      $(cat "$installed_file" 2>/dev/null || echo none) ($daily)"
   if running; then echo "Herdr Browser:  running"; else echo "Herdr Browser:  not running"; fi
   if launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then echo "agent:          loaded ($plist)"; else echo "agent:          not loaded"; fi
+  if [[ -f "$self" ]]; then
+    echo "agent script:   sha256 $(shasum -a 256 "$self" | cut -d' ' -f1) ($self)"
+    echo "  came from:    $(cat "$script_from" 2>/dev/null || echo "unknown (installed before this was recorded)")"
+  else
+    echo "agent script:   none ($self)"
+  fi
   echo "log:            $log"
 }
 
@@ -306,6 +345,13 @@ cmd_install() {
   mkdir -p "$(dirname "$plist")" "$(dirname "$log")"
   if [[ "$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/daily-update" != "$self" ]]; then
     install -m 0755 "${BASH_SOURCE[0]}" "$self.new" && mv -f "$self.new" "$self"
+    local head
+    head=$(git -C "$src_dir" rev-parse HEAD 2>/dev/null || echo unknown)
+    if git -C "$src_dir" diff --quiet HEAD -- daily-update 2>/dev/null; then
+      printf 'install from %s at %s\n' "$src_dir" "$head" > "$script_from"
+    else
+      printf 'install from %s at %s, with local changes\n' "$src_dir" "$head" > "$script_from"
+    fi
   fi
   cat > "$plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

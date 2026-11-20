@@ -108,6 +108,33 @@ home: never run it and stock Herdr at once, and while it's off, stock
 Herdr shows browser panes as a mod that didn't load. `DRY_RUN=1` prints
 the steps. Moving to Herdr's own browser later: [browser-transition.md](browser-transition.md).
 
+### Keeping it current (`scripts/fork/daily-update`)
+
+`bash scripts/fork/daily-update install` adds a launchd agent that runs a
+copy of the script (`~/.local/share/herdr-fork/daily-update`) every hour; it
+installs each new `fork/master` that passed CI (setup and trust:
+[fork/weekly-sync.md](fork/weekly-sync.md)). `daily-update status` shows what
+is built and installed, and the agent script's sha256 with where it came
+from (`fork/master <sha>` or `install from <checkout> at <sha>`).
+
+The agent updates its own copy only from a commit that passed the CI check,
+right after checking it out and before any download or build. So when the
+check itself is broken, the agent cannot fix itself: every run logs `check
+failed` (`~/Library/Logs/herdr-fork-daily.log`) and the copy stays put.
+Recover by hand from `fork/master`, in a throwaway worktree so no checkout
+moves:
+
+```sh
+git fetch fork && git worktree add --detach /tmp/herdr-recover fork/master
+bash /tmp/herdr-recover/scripts/fork/daily-update install   # replaces the agent's copy, reloads the agent
+git worktree remove /tmp/herdr-recover
+bash ~/.local/share/herdr-fork/daily-update check
+bash ~/.local/share/herdr-fork/daily-update status
+```
+
+Test a change to the script with `bun test scripts/fork/daily-update.test.ts`;
+on macOS it runs under `/bin/bash` 3.2, as launchd does.
+
 ## Try it
 
 `just browser-dev` runs the app on its own home, `/tmp/hbd.dev`, kept
