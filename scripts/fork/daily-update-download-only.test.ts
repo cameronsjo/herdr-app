@@ -89,6 +89,7 @@ case "$1 $2" in
       401) echo "HTTP 401: Bad credentials (https://api.github.com/graphql)" >&2; exit 1 ;;
       403) echo "HTTP 403: Resource not accessible by personal access token (https://api.github.com/graphql)" >&2; exit 1 ;;
       403rl) echo "HTTP 403: API rate limit exceeded for user ID 1. (https://api.github.com/graphql)" >&2; exit 1 ;;
+      403long) echo 'gh: Resource not accessible by personal access token. This fine-grained token lacks a permission the endpoint needs; see https://docs.github.com/rest/overview/permissions-required-for-fine-grained-personal-access-tokens for which one, then regenerate it (HTTP 403)' >&2; exit 1 ;;
     esac
     def='[{"tagName":"${TAG}"}]'; answer "\${STUB_RELEASES:-$def}"; exit 0 ;;
   "release download")
@@ -117,6 +118,7 @@ case "$*" in
     read -r t s <<<"\${STUB_TAG_POINTS:-commit ${SHA}}"
     answer '{"object":{"type":"'"$t"'","sha":"'"$s"'"}}' ;;
   *"/compare/"*)
+    [ "\${STUB_COMPARE_HTTP:-}" != 403long ] || { echo 'gh: Resource not accessible by personal access token. This fine-grained token lacks a permission the endpoint needs; see https://docs.github.com/rest/overview/permissions-required-for-fine-grained-personal-access-tokens for which one, then regenerate it (HTTP 403)' >&2; exit 1; }
     [ -z "\${STUB_COMPARE_HTTP:-}" ] || fail_http "Server Error" "$STUB_COMPARE_HTTP"
     path=$2; pair=\${path##*/compare/}
     if [ -f "$F/compare/$pair" ]; then
@@ -288,6 +290,11 @@ test.skipIf(skip)("a floor compare the API does not answer is retried, not refus
 test.skipIf(skip)("a failed attestation check logs gh's error (a 403 is not a forgery)", () => {
   const r = run(["check"], { STUB_ATTEST_403: "1" });
   expect(r.out).toContain("HTTP 403: Resource not accessible by personal access token");
+  // docs/browser-dev.md § Another Mac: a token without Attestations: read reads
+  // as a verification refusal, not a setup error.
+  expect(r.code).toBe(0);
+  expect(r.out).toContain("refused: herdr-browser-webkit.zip did not verify");
+  expect(r.out).not.toContain("setup error");
   expect(existsSync(daily)).toBe(false);
 });
 
@@ -522,4 +529,17 @@ test.skipIf(skip)("bootstrap refuses a release more than 5 commits behind master
 test("the bootstrap's bound is the agent's", () => {
   const n = (src: string, re: RegExp) => src.match(re)?.[1];
   expect(n(readFileSync(BOOTSTRAP, "utf8"), /^max_behind=(\d+)/m)).toBe(n(readFileSync(SCRIPT, "utf8"), /^first_install_max_behind=(\d+)/m));
+});
+
+// gh puts "(HTTP 403)" at the end of its line; a cut before classifying lost it.
+test.skipIf(skip)("a 403 whose line is longer than 200 characters is still a setup error (release list)", () => {
+  const r = run(["check"], { STUB_LIST_HTTP: "403long" });
+  expect(r.code).toBe(2);
+  expect(r.out).toContain("setup error: GitHub refused the token (gh: Resource not accessible");
+});
+
+test.skipIf(skip)("a 403 whose line is longer than 200 characters is still a setup error (compare)", () => {
+  const r = run(["check"], { STUB_COMPARE_HTTP: "403long" });
+  expect(r.code).toBe(2);
+  expect(r.out).toContain("setup error: GitHub refused the token");
 });

@@ -417,14 +417,17 @@ token_error() {
 # the ERR trap there under bash 3.2 (see state_of).
 api_out='' api_why=''
 api_get() {
-  local err="$state_dir/api.err"
+  local err="$state_dir/api.err" full
   api_out=$(gh api "$1" --jq "$2" 2>"$err" || echo __api_failed__)
   case $api_out in
     *__api_failed__*)
-      api_why=$(tr '\n' ' ' < "$err" | cut -c1-200)
+      # Classify on gh's whole text: it puts "(HTTP 403)" at the end of the
+      # line, past any cut. Only the log copy is shortened.
+      full=$(tr '\n' ' ' < "$err")
+      api_why=${full:0:200}
       api_out=''
-      if token_refused "$api_why"; then return 3; fi
-      case $api_why in *"HTTP 404"*) return 1 ;; esac
+      if token_refused "$full"; then return 3; fi
+      case $full in *"HTTP 404"*) return 1 ;; esac
       return 2 ;;
   esac
 }
@@ -450,14 +453,15 @@ compare_get() {
 first_install_max_behind=5   # a first install takes a release at most 5 commits behind master
 rel_sha='' rel_distance=''
 select_release() {
-  local list tag sha rc best='' best_n='' err="$state_dir/api.err"
+  local list tag sha rc best='' best_n='' err="$state_dir/api.err" full
   rel_sha='' rel_distance=''
   list=$(gh release list -R "$repo_url_fork" --limit 30 --exclude-drafts --json tagName \
     --jq '.[] | .tagName | select(test("^browser-[0-9a-f]{40}$"))' 2>"$err" || echo __api_failed__)
   case $list in
     *__api_failed__*)
-      api_why=$(tr '\n' ' ' < "$err" | cut -c1-200)
-      if token_refused "$api_why"; then return 3; fi
+      full=$(tr '\n' ' ' < "$err")   # classified whole; see api_get
+      api_why=${full:0:200}
+      if token_refused "$full"; then return 3; fi
       return 2 ;;
   esac
   while IFS= read -r tag; do

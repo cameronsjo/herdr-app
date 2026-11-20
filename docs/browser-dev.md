@@ -160,12 +160,20 @@ again and puts them in place.
 `GH_TOKEN` when someone runs the script by hand; never `gh`'s own login. Make a
 fine-grained token for `cameronsjo/herdr-app` only with Contents: read,
 Metadata: read and Attestations: read (`GET /repos/{owner}/{repo}/attestations/{digest}`
-needs the last one), and an expiry date. Renew it before then. When GitHub
-refuses the token (HTTP 401, or a 403 that is not a rate limit), every check
-exits 2, logs `setup error: GitHub refused the token (<gh's own error>)` in
-`~/Library/Logs/herdr-fork-daily.log`, and you get one notification until a
-check gets an answer again. That is how a token problem reads apart from a
-build that failed its check, which is refused by name.
+needs the last one), and an expiry date. Renew it before then. A token
+problem shows up in `~/Library/Logs/herdr-fork-daily.log` in one of two ways:
+
+- When GitHub refuses the token on the release or compare calls (HTTP 401,
+  or a 403 that is not a rate limit: expired, revoked, or not for this repo),
+  every check exits 2 and logs `setup error: GitHub refused the token (<gh's
+  own error>)`, and you get one notification until a check gets an answer
+  again.
+- A token that works for those calls but lacks Attestations: read gets a 403
+  from `gh attestation verify` itself. That reads as a verification refusal,
+  not a setup error: the log says `refused: herdr-browser-webkit.zip did not
+  verify …` after a `gh attestation verify …` line carrying gh's own text,
+  with one notification per release, and the check exits 0. When every
+  release "did not verify", check Attestations: read first.
 
 Set up, once: get `scripts/fork/bootstrap-download-only` at a commit you have
 read, read it, and run it with `bash`. It is this Mac's trust root, so take it
