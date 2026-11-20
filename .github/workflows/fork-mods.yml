@@ -19,10 +19,12 @@ concurrency:
 jobs:
   fork-mods:
     # Windows too: open-folder's Windows paths are otherwise only checked on Linux.
+    # macOS too: scripts/fork/daily-update*.test.ts run the updater under /bin/bash
+    # 3.2 there, as launchd does; bash 5 hides the ERR-trap bugs it had.
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:
