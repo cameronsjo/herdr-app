@@ -118,4 +118,9 @@ test.skipIf(skip)("a gated commit refreshes the script before the download, even
   expect(existsSync(join(state, "built"))).toBe(false);
   expect(readFileSync(self, "utf8")).toBe(readFileSync(join(root, "scripts/fork/daily-update"), "utf8"));
   expect(readFileSync(join(state, "script-from"), "utf8").trim()).toBe(`fork/master ${gatedSha}`);
+  // Only the script-changed notice: under bash 3.2 a failing command inside $(...)
+  // runs the ERR trap in that subshell, which notified "check failed" on a good run.
+  const notified = readFileSync(join(home, "notified.log"), "utf8");
+  expect(notified).toContain("agent's script changed");
+  expect(notified).not.toContain("check failed");
 });
