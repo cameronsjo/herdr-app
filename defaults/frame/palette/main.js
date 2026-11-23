@@ -7,7 +7,8 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { commands, layouts, keys, run, theme, props, closeOverlay, openOverlay, shared, window as win } from "herdr";
+import { commands, layouts, keys, run, theme, themes, settings, props, closeOverlay, openOverlay, shared, window as win } from "herdr";
+import * as fork from "./fork.js"; // FORK(palette): mod commands and the direction chooser
 
 // The list keeps one height while you move: rows and group titles have fixed
 // heights, and the window shows as many as fit in LIST_H.
@@ -17,7 +18,7 @@ const SHOWN = 10;
 const ROW_H = 32;
 const HEAD_H = 26;
 const LIST_H = SHOWN * ROW_H;
-const GROUPS = ["Recent", "Tab", "Pane", "Space", "Layout", "Terminal", "Agent", "Window", "App"];
+const GROUPS = ["Recent", "Tab", "Pane", "Space", "Layout", "Terminal", "Agent", "Window", "App", "Mods"]; // FORK(palette): Mods
 
 // The palette's names for commands: [command, args, group, title, keywords].
 const NAMED = [
@@ -59,7 +60,6 @@ const NAMED = [
   ["app.zoom_out", {}, "App", "Zoom out", "smaller font size"],
   ["app.zoom_reset", {}, "App", "Reset zoom", "font size"],
   ["app.quit", {}, "App", "Quit Herdr", "exit"],
-  ...["graphite", "ink", "moss", "atom-one-dark"].map((n) => ["app.theme", { name: n }, "App", `Theme: ${n.replace(/-/g, " ")}`, "colors look"]),
 ];
 
 // Commands that act on something you point at (ids, terminals): not for a list.
@@ -83,9 +83,18 @@ function entries() {
   const list = NAMED.filter(([n]) => known.has(n))
     .filter(([n]) => !(mac && n.startsWith("window.")))
     .map(([name, args, group, title, words]) => ({ name, args, group, title, words }));
-  for (const l of layouts()) {
+  const shown = layouts();
+  for (const l of shown) {
     const t = { main: "Herdr", terminals: "Terminals", win98: "Herdr 98" }[l] ?? l.charAt(0).toUpperCase() + l.slice(1);
     list.push({ name: "layout.switch", args: { name: l }, group: "Layout", title: `Layout: ${t}`, words: `look ${l}` });
+  }
+  // `app.theme` sets the half of its theme's lightness, so only the themes
+  // that can show now are offered: dark ones in a dark window, light ones in a
+  // light one. A theme named like a layout is that layout's own (as in Settings).
+  const dark = Boolean(settings().dark);
+  for (const { name, light } of themes()) {
+    if (Boolean(light) === dark || (name !== shared("layout") && shown.includes(name))) continue;
+    list.push({ name: "app.theme", args: { name }, group: "App", title: `Theme: ${name.replace(/-/g, " ")}`, words: "colors look" });
   }
   // Anything new in the app shows up too, until it gets a better name here.
   const named = new Set(NAMED.map(([n]) => n));
@@ -141,6 +150,7 @@ export default class Palette extends View {
     this.scroll = 0;
     this.recent = JSON.parse(localStorage.getItem("recent") ?? "[]");
     this.handle = cx.focus_handle();
+    this.recent = fork.withPicked(this.recent); cx.spawn(async (cx) => fork.load(() => cx.notify())); // FORK(palette): a picked direction joins Recent; read mods' commands
   }
 
   close() {
@@ -157,14 +167,14 @@ export default class Palette extends View {
         title: "Duplicate mod", hint: "Mod to copy; creates <name>-copy",
         command: { name: "mod.clone", args: {} },
       } });
-    } else {
+    } else if (!fork.go(e)) { // FORK(palette): a direction family opens the chooser
       run(e.name, e.name === "layout.clone" ? { name: shared("layout") ?? "main" } : e.args);
     }
   }
 
   // The rows to show: grouped when empty, ranked while typing.
   rows() {
-    const all = entries();
+    const all = fork.entries(entries(), this.query, this.recent); // FORK(palette)
     const q = this.query.trim().toLowerCase().replace(/\s+/g, "");
     if (!q) {
       const recent = this.recent.map((id) => all.find((e) => e.id === id)).filter(Boolean).slice(0, 5);

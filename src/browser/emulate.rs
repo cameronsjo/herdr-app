@@ -92,6 +92,12 @@ impl Viewport {
     }
 }
 
+/// What an engine with size-only emulation (WebKit) applies of `v`: its
+/// size and the preset it came from, never mobile or a pixel ratio.
+pub fn size_only(v: Viewport) -> Viewport {
+    Viewport { mobile: false, scale_factor: 0.0, ..v }
+}
+
 /// `preset` names: (name, width, height, pixel ratio). Both are mobile.
 /// "fit" (no override: the page fills its pane) is the third.
 pub const PRESETS: [(&str, u32, u32, f64); 2] = [("phone", 390, 844, 3.0), ("tablet", 820, 1180, 2.0)];
@@ -232,6 +238,13 @@ mod tests {
         assert_eq!(phone.json(), json!({ "width": 390, "height": 844, "mobile": true, "preset": "phone" }));
         assert!(viewport(&json!({ "preset": "watch" })).unwrap_err().contains("not \"watch\""));
         assert!(viewport(&json!({ "preset": "phone", "width": 100 })).unwrap_err().contains("not both"));
+    }
+
+    #[test]
+    fn a_size_only_engine_keeps_the_size_and_preset() {
+        let phone = size_only(viewport(&json!({ "preset": "phone" })).unwrap().unwrap());
+        assert_eq!((phone.width, phone.height, phone.mobile, phone.scale_factor, phone.preset), (390, 844, false, 0.0, Some("phone")));
+        assert_eq!(phone.json(), json!({ "width": 390, "height": 844, "mobile": false, "preset": "phone" }));
     }
 
     #[test]

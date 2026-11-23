@@ -27,6 +27,10 @@ compile_error!("browser-pane (or dev-agent-access) needs an engine: add the `bro
 
 /// The control socket is this user's only (every build: `control.rs`).
 pub mod socket;
+/// Browser blocks: mod blocks the fork reads as browsers (every build).
+pub mod block;
+/// `nativeView`: the mod element a browser block's page sits in (every build).
+pub mod element;
 #[cfg(any(test, all(target_os = "macos", feature = "browser-pane")))]
 pub mod agent;
 #[cfg(any(test, all(target_os = "macos", feature = "browser-pane")))]
@@ -55,12 +59,12 @@ use webkit as engine;
 #[cfg(all(target_os = "macos", feature = "browser-pane"))]
 mod view;
 #[cfg(all(target_os = "macos", feature = "browser-pane"))]
-pub use native::{Browsers, Event};
+pub use native::{Browsers, Event, place, place_whole};
 
 #[cfg(not(all(target_os = "macos", feature = "browser-pane")))]
 mod off;
 #[cfg(not(all(target_os = "macos", feature = "browser-pane")))]
-pub use off::{Browsers, Event};
+pub use off::{Browsers, Event, place, place_whole};
 
 /// Shows `ask` as an app-modal macOS alert and waits for the person's
 /// answer (`confirm::ask`). Call it from a foreground task, never while
@@ -570,6 +574,12 @@ pub fn core_id(hello: &serde_json::Value) -> Option<String> {
 
 pub fn not_in_herdr() -> String {
     "this terminal is not in Herdr (HC_TERMINAL_ID is unset): agent-browser can only drive a Herdr browser pane from a Herdr terminal".into()
+}
+/// The error for a terminal this app doesn't know. The provider's
+/// `agent::not_here` matches it to ask the next app, so it is built here
+/// only (cameronsjo/herdr-app#6).
+pub fn no_terminal(terminal: &str) -> String {
+    format!("no terminal {terminal} in Herdr")
 }
 pub fn parked(terminal: &str) -> String {
     format!("terminal {terminal} has no pane in Herdr (parked): give it one with herdr-app do terminal.keep --terminal {terminal}")

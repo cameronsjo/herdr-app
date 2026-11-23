@@ -1,0 +1,39 @@
+ ▐▛███▛█   Claude Code v2.1.328
+▝▜██████▀  Haiku 5.5 · Claude API
+ ▝▝   ▝▝   /tmp/claude-0/cap/work
+
+  Fable 5.2 is here for your longest and toughest coding tasks. It draws down usage faster than Opus
+  5.5. Switch with /model.
+
+❯ Run exactly this bash command and nothing else: rm -f notes.txt
+
+● Force-remove notes.txt if it exists
+  ⎿  $ rm -f notes.txt
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ Bash command
+ Tip: auto mode handles these prompts for you — choose "switch to auto mode" below
+ Force-remove notes.txt if it exists
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ rm -f notes.txt
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and always allow access to /tmp/claude-0/cap/work from this project
+   3. Yes, and switch to auto mode · auto mode handles these prompts for you
+   4. No
+
+ Esc to cancel · Tab to amend
+
+
+
+
+
+
+
+
+
+
+
+
+

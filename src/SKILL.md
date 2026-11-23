@@ -141,8 +141,10 @@ those files or the generated guide. The app rewrites them on start.
   branches become dashes). Use an absolute path or `~` / `~/...`, resolved on the
   space's machine. Read on dialog open; existing checkouts stay put. No clones
   needed, and the app does not read the TUI's config.toml.
-- Mods live in `mods/<name>/` with `main.js` and optional `mod.json`.
-  They are trusted JavaScript with command and network access.
+- Mods live in `mods/<name>/` with `main.js` for a view or `link.js` for
+  Ctrl/Cmd-clicked terminal links. They are trusted JavaScript with command
+  and network access. `mod.json` declares link rules. A personal layout's
+  root `link_handlers` array selects the mods and their order.
   `"focusable": true` in `mod.json` lets `pane.go` move onto a copy; it receives
   `"focus"` from `nextCommand()` and focuses its own keyboard handle.
 - A mod's `watchFolder(dir)` promise has `cancel()`; cancel it when the folder
@@ -169,9 +171,12 @@ herdr-app status
 herdr-app shot /tmp/mod.png   # then look at the picture
 ```
 
-`check` loads the mod and renders it once. It exits nonzero with the exact
-error. Its shared state starts empty and stays in memory; it leaves shared.json
-untouched. Its `init()` still runs: import `checking` from `"herdr"` and guard
+`check` loads and renders the mod's view if it has one. It validates link rules.
+For mods with link rules and standalone link mods, it checks the `handleLink`
+export in `link.js` without running the module.
+It exits nonzero with the exact error. Its shared state starts empty and stays
+in memory, leaving shared.json untouched. Its `init()` still runs: import
+`checking` from `"herdr"` and guard
 process side effects with `if (checking()) return;`. It is true throughout a
 check and false in a live window; `exec`, `hc` and `writeTextFile` still run
 and warn during checks. Never call a mod done without a passing check.
@@ -214,3 +219,26 @@ Never experiment with pointer/key automation on the person's real display.
 When developing the app on Linux, its `scripts/sandbox` provides an isolated
 home, core and display: `up`, `do`, `status`, `shot`, then `down` when done.
 Never stop a server or session you didn't start.
+
+<!-- FORK(background-mods) -->
+## This build's extra commands
+
+- Open a folder without making a second space for it:
+  `herdr-app do open-folder.open:~/code/app` goes to the space already there, else makes one.
+- Move the shown space with its git worktree spaces: `herdr-app do space-groups.up` (or `.down`).
+- A terminal started with a name (`hc run --name fix-login …`) names its tab when
+  it is the tab's only named terminal and nobody named the tab; a tab still called
+  by the old name follows a new one.
+- Extra environment variables for an agent go through `env` in its argv
+  (macOS and Linux): `herdr-app do tab.new --name api --argv '["env","API_MODE=dev","claude"]'`.
+  The values show in the terminal's argv (`hc ls`), so don't pass secrets this way.
+- Say what you're on in the agents list: `hc label $HC_TERMINAL_ID task="fix the login test"`
+  puts that line under your row; `task=` clears it. `project=<name>` groups you with other
+  agents on that project.
+- An agent running outside Herdr (cmux, a plain terminal) can still show in its agents
+  list: write `~/.config/herdr-app/outside-agents/<id>.json` as
+  `{"name":"cmux claude","status":"working","title":"fixing login","ttl":60}` and rewrite
+  it at least every `ttl` seconds; delete it when you stop. status: working, blocked, done, idle.
+  In a sandbox, ask for write access to that folder only, not the app home.
+- A mod's commands show in the palette when its `mod.json` lists them:
+  `"commands": [{"command":"my-mod.refresh","title":"Refresh my board"}]` (its own `<mod>.` only).

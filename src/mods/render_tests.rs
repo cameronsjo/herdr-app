@@ -1,4 +1,8 @@
 //! Shipped JS descriptions and native rendering regressions.
+// FORK(agents): the fork's agents-list cases, in render_tests/fork_agents.rs.
+mod fork_agents;
+// FORK(palette): the palette's family rows and the direction chooser, in render_tests/fork_palette.rs.
+mod fork_palette;
 use super::*;
 use gpui::TestAppContext;
 use gpui_shell::{ShellRuntime, plugin::DescriptionSession, policy::Policy};
@@ -244,6 +248,8 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
                 "hc" if first == json!(["machine", "add", "host", "--json"]) => {
                     Some(json!({"code":1,"stdout":"{\"error\":{\"kind\":\"host_key\",\"message\":\"unknown host key\"}}","stderr":""}))
                 }
+                // FORK(palette): the palette lists mods/ with ls when the app home is outside home.
+                "exec" if first == "ls" && a.get(1).map(from_host) == Some(json!(["-1A", "--", "/fixture/app/mods"])) => Some(json!({"code":0,"stdout":"","stderr":""})),
                 // The files panel lists a folder with sh: kind and name pairs.
                 "exec" if first == "sh" && a.get(1).map(from_host).and_then(|v| v.get(2).cloned()) == Some(json!("files")) => {
                     Some(json!({"code":0,"stdout":"d\u{0}src\u{0}f\u{0}README.md\u{0}","stderr":""}))
@@ -447,7 +453,7 @@ fn describe_with_values(
         .with_storage_path(staged.0.join(format!("store-{}.json", NEXT_STORE.fetch_add(1, Ordering::Relaxed))))
         .with_capabilities(Capabilities::new().storage(true).read_roots([staged.0.clone()]))
         .with_host_module(module(values, calls.clone()))?;
-    let runtime = ShellRuntime::new_isolated()?;
+    let runtime = ShellRuntime::new_isolated_with_components(crate::browser::element::components())?; // FORK(browser): the app's VM has nativeView
     let root = setup.map(|s| staged.wrapper(entry, s)).unwrap_or_else(|| staged.0.join(entry));
     let window = cx.add_window(|_, _| Empty);
     let result = window.update(cx, |_, window, cx| {
@@ -581,10 +587,30 @@ fn font_pickers_contain_scroll_on_the_wrapper(cx: &mut TestAppContext) {
             Some(&format!("this.picking = '{which}';")),
         ).unwrap();
         let scroll = tree.lines().find(|line| line.contains(&format!("st-fl-{which}"))).unwrap();
-        assert!(scroll.contains("overflow_y_scrollbar"), "{tree}");
+        assert!(scroll.contains("uniform_list"), "{tree}"); // FORK(font-picker): a lazy list scrolls itself
         assert!(!scroll.contains("on_scroll_wheel"), "the native scroller must receive the event: {tree}");
         assert_eq!(tree.matches("on_scroll_wheel").count(), 1, "the wrapper must stop scroll chaining: {tree}");
     }
+}
+
+// FORK(font-picker): every installed font is listed, past upstream's 200 cap (CAM-923).
+#[gpui::test]
+fn font_picker_lists_every_installed_font(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let names: Vec<String> = (0..300).map(|i| format!("Font {i:03}")).collect();
+    let mut p = props();
+    p["section"] = json!("look");
+    let mut values = fixture(true, p, updates("current", "current"));
+    values.insert("fonts".into(), json!(names));
+    let tree = describe_with_values(cx, &staged, "frame/settings", values.clone(), Some("this.picking = 'font';")).unwrap();
+    let list = tree.lines().find(|line| line.contains("uniform_list")).unwrap();
+    // 300 fonts plus the "Default" row.
+    assert!(list.contains("\u{d7}301"), "{list}");
+    let tree = describe_with_values(cx, &staged, "frame/settings", values, Some("this.picking = 'font'; this.filter = 'Font 2';")).unwrap();
+    let list = tree.lines().find(|line| line.contains("uniform_list")).unwrap();
+    // A search drops the "Default" row: Font 200..Font 299.
+    assert!(list.contains("\u{d7}100"), "{list}");
 }
 
 struct RootedView(gpui::Entity<gpui_shell::ShellRoot>);
@@ -1117,7 +1143,11 @@ fn local_state_and_overlay_initial_descriptions(cx: &mut TestAppContext) {
         assert!(entries.iter().any(|e| e == entry), "orphan scenario: {entry}");
         let mut p = props();
         p.as_object_mut().unwrap().extend(patch.as_object().unwrap().clone());
-        describe(cx, &staged, entry, true, p, updates("current", "current"), None).unwrap();
+        let tree = describe(cx, &staged, entry, true, p, updates("current", "current"), None).unwrap();
+        if patch["tab"] == "pane" {
+            let at = |label: &str| tree.find(label).unwrap_or_else(|| panic!("{label} missing: {tree}"));
+            assert!(at("Rename") < at("Split right"), "Rename leads the pane menu: {tree}");
+        }
     }
     eprintln!("18 local-state/overlay cases, each twice: {:?}", start.elapsed());
 }

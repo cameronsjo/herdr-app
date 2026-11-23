@@ -3,6 +3,7 @@
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { agents, terminals, panes, focused, spaces, run, theme, shared, setShared, setAgentOrder, openOverlay, closeOverlay, props, window, layout } from "herdr";
+import * as fork from "./fork.js"; // FORK(agents): the fork's sorts, task line and name
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -27,8 +28,9 @@ function toggleSidebar() {
 
 // Drops what an agent puts before its title: a status glyph or spinner and the separator
 // after it ("✦  Working", "⠋ - Thinking"), and Codex's blinking "[ ! ] " / "[ . ] " mark.
-// Stops at an opening bracket or quote, so a title that starts with one ("[web] login") keeps it.
-const clean = (s) => (s ?? "").replace(/^[^\p{L}\p{N}\p{Ps}\p{Pi}]+/u, "").replace(/^\[ [!.] \] /, "").trim();
+// Stops at an opening bracket or quote, so a title that starts with one ("[web] login") keeps it,
+// and at an emoji ("🔴 login", "❤️ deploy"), except for known status marks.
+const clean = (s) => (s ?? "").replace(/^(?:\[ [!.] \] |[✋⏳]\uFE0F?(?=\s)|(?!(?:\p{Emoji}\uFE0F|[#*]\u20E3))[^\p{L}\p{N}\p{Ps}\p{Pi}\p{Emoji_Presentation}])+/u, "").trim();
 
 function leadPanes(all) {
   const leads = new Map();
@@ -52,13 +54,16 @@ function title(tab, l) {
 const RANK = { blocked: 4, done: 3, working: 2, idle: 1 };
 // A sub-agent without a pane isn't in agents(): its raw word, error counting as
 // blocked. It's never done: it reports to its parent, and the parent's done is the news.
+// A kept sub-agent (one with a pane) is in agents() too: it keeps its own status, done included.
 const kidStatus = (k, listed) => {
-  const s = listed.get(k.address) ?? k.status;
+  if (listed.has(k.address)) return listed.get(k.address);
+  const s = k.status;
   return s === "error" ? "blocked" : s === "done" ? "idle" : s;
 };
 const SORTS = [
   { id: "priority", label: "Priority", icon: "clock" },
   { id: "grouped", label: "Grouped by space", icon: "layers" },
+  ...fork.FORK_SORTS, // FORK(agents)
 ];
 const sortOf = () => SORTS.find((s) => s.id === shared("agents.sort")) ?? SORTS[0];
 const SECTION = { 4: "Needs you", 3: "Done", 2: "Working", 1: "Idle" };
@@ -208,9 +213,11 @@ export default class Agents extends View {
   // compact: a ! for blocked where a header already says "Needs you".
   status(t, a, compact = false) {
     const color = t[a.status] ?? t.dim;
+    if (a.status === "working" && a.stalled && narrow()) return div().size(14).flex_none().rounded(4).bg(t.dim + "26").text_size(10.5).font_bold().text_color(t.muted ?? t.dim).flex().items_center().justify_center().child("…"); // FORK(attention): stalled, in the narrow rail's 14 px slot
+    if (a.status === "working" && a.stalled) return div().flex_none().px(6).h(18).rounded(5).bg(t.dim + "26").text_size(10.5).font_semibold().text_color(t.muted ?? t.dim).flex().items_center().child("Stalled"); // FORK(attention): no sign of life for a while
     if (a.status === "working") return svg("mods/workspace-chrome/spinner.svg").size(12).mx(1).flex_none().text_color(t.working).spin(900);
     if (a.status === "blocked" && compact) return div().size(14).flex_none().rounded(4).bg(t.blocked + "26").text_size(10.5).font_bold().text_color(t.blocked).flex().items_center().justify_center().child("!");
-    if (a.status === "blocked") return div().flex_none().px(6).h(18).rounded(5).bg(t.blocked + "26").text_size(10.5).font_semibold().text_color(t.blocked).flex().items_center().child("Needs you");
+    if (a.status === "blocked") return div().flex_none().px(6).h(18).rounded(5).bg(t.blocked + "26").text_size(10.5).font_semibold().text_color(t.blocked).max_w(160).flex().items_center().child(div().truncate().child(needsYou(a))); // FORK(attention): says why
     // Idle: a ring; done: a dot.
     if (a.status === "idle") return div().size(7).mx(3).flex_none().rounded(4).border(1.5).border_color(t.idle ?? t.dim);
     return div().size(7).mx(3).flex_none().rounded(4).bg(a.status === "done" ? color : t.dim + "00");
@@ -234,10 +241,13 @@ export default class Agents extends View {
     list = list.filter((a) => a.pinned || !nested.has(a.address));
     const tabCounts = new Map();
     for (const a of list) tabCounts.set(a.tab, (tabCounts.get(a.tab) ?? 0) + 1);
-    const byPriority = sort.id === "priority";
-    const urgency = new Map(list.map((a) => [a.address, Math.max(this.rank(a), ...this.tree(all, a.address).map((s) => RANK[kidStatus(s.t, this.listed)] ?? 0))]));
+    const byPriority = sort.id === "priority" || fork.prioritySort(sort.id); // FORK(agents)
+    // A helper's done is its own row's news: it doesn't pull a working parent out of Working.
+    const kidRank = (k) => { const s = kidStatus(k, this.listed); return RANK[s === "done" ? "idle" : s] ?? 0; };
+    const urgency = new Map(list.map((a) => [a.address, Math.max(this.rank(a), ...this.tree(all, a.address).map((s) => kidRank(s.t)))]));
     const rankOf = (a) => urgency.get(a.address);
     if (byPriority) list = [...list].sort((x, y) => rankOf(y) - rankOf(x) || this.since(y) - this.since(x) || y.seq - x.seq);
+    list = fork.order(sort.id, list, all, rankOf); // FORK(agents)
     const pinned = list.filter((a) => a.pinned);
     const rest = list.filter((a) => !a.pinned);
     list = [...pinned, ...rest];
@@ -245,7 +255,7 @@ export default class Agents extends View {
 
     const withKids = (a, i) => {
       const subs = collapsed ? [] : this.tree(all, a.address);
-      const r = row(a, i, subs);
+      const r = fork.withTask(row(a, i, subs), a, all, t, collapsed); // FORK(agents)
       if (this.folded.has(a.address)) return [r];
       return [r, ...subs.map((s) => this.subRow(t, s, shown, byPriority))];
     };
@@ -297,7 +307,7 @@ export default class Agents extends View {
 
     const row = (a, i, subs = []) => {
       const pic = icon(a.program, 16, t.foreground);
-      const more = detail.get(a.address);
+      const more = fork.detailOf(all, a.address, tabs.get(a.tab)?.named && tabCounts.get(a.tab) === 1, detail.get(a.address)); // FORK(agents)
       // An agent on another machine (`vps/t7`) says which.
       const machine = a.address.includes("/") ? a.address.split("/")[0] : null;
       if (collapsed) {
@@ -338,7 +348,7 @@ export default class Agents extends View {
         .child(svg(`mods/workspace-chrome/${isPinned ? "pin-off" : "pin"}.svg`).size(13));
       // Under a space header the space goes without saying; an automatic tab number says nothing.
       // Without a space header above (priority, pinned) the row names its space.
-      const full = byPriority || isPinned;
+      const full = byPriority || isPinned || fork.namesSpace(sort.id, all, a.address); // FORK(agents): a project header can span spaces
       const name = full ? a.space_name || label(a) : more ?? (/^\d+$/.test(label(a)) ? a.program?.name || label(a) : label(a));
       return h_flex()
         .id(`ag-${a.address}`)
@@ -410,9 +420,11 @@ export default class Agents extends View {
           .when(!byPriority && top && top !== "idle", (el) => el.child(this.status(t, { status: top }, true)))
           .child(svg("mods/workspace-chrome/chevron-right.svg").size(11).flex_none().text_color(t.dim)));
     };
+    groups.splice(0, groups.length, ...fork.groups(sort.id, groups, groups.filter((g) => g.id === "pinned"), rest, all)); // FORK(agents)
     const rows = collapsed
       ? list.flatMap(withKids)
       : groups.flatMap((g) => [header(g), ...(this.folded.has(g.id) ? [] : g.members.flatMap(withKids))]);
+    rows.push(...fork.outside(t, sort.id, collapsed, shared("fork.outside-agents"), (a) => this.status(t, { status: a.status, reason: a.reason }, byPriority))); // FORK(outside-agents)
 
     return v_flex()
       .size_full()
@@ -438,14 +450,15 @@ export default class Agents extends View {
                 .text_size(11)
                 .text_color(t.dim)
                 .hover((s) => s.text_color(t.foreground))
-                .on_click(() => openOverlay({ mod: "agents", kind: "popup", width: 200, height: 140, props: { sortMenu: true } }))
+                .on_click(() => openOverlay({ mod: "agents", kind: "popup", width: 200, height: fork.menuHeight(140), props: { sortMenu: true } })) // FORK(agents): room for its sorts
                 .tooltip(`Sort agents: ${sort.label}`)
                 .child(svg(`mods/workspace-chrome/${sort.icon}.svg`).size(14)),
             ),
         ),
       )
       .when(list.length === 0 && !collapsed, (el) =>
-        el.child(div().px(12).text_size(12).text_color(t.dim).child("No agent status yet. Agents show up here when they report their status. Older versions and agents inside tmux may not.")),
+        // FORK(agents): needs you says so when agents run but none needs you.
+        ((m) => (m === "" ? el : el.child(div().px(12).text_size(12).text_color(t.dim).child(m ?? "No agent status yet. Agents show up here when they report their status. Older versions and agents inside tmux may not."))))(fork.empty(sort.id, this.listed.size > 0, shared("fork.outside-agents"))),
       )
       .child(v_flex().id("ag-list").flex_1().min_h(0).px(collapsed ? 0 : 8).overflow_y_scrollbar().mode("always").children(rows))
       .when(collapsed, (el) =>
@@ -466,4 +479,11 @@ export default class Agents extends View {
         ),
       );
   }
+}
+
+// FORK(attention): why a blocked agent needs you (agents()'s `reason`, cameronsjo/herdr-app#16).
+function needsYou(a) {
+  const words = { permission: "Approval", question: "Question", auth: "Sign in", error: "Error" };
+  if (a.reason === "attention" && a.attention) return a.attention;
+  return words[a.reason] ?? "Needs you";
 }
