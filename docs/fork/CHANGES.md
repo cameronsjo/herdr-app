@@ -139,7 +139,7 @@ Added 2026-11-16, as a mod (no Rust).
 - `defaults/mods/markdown/` (fork-only): a pane that renders a markdown file with `TextView.markdown`, follows its saves (a folder watch plus a 10-second poll on this computer, a 5-second poll on another machine) and toggles to the raw source. Open it with `pane.split {direction, mod: "markdown", props: {file, on?}}`; `file` must be absolute.
 - `defaults/mods/files/main.js`: `.md` and `.markdown` previews render instead of showing raw text, with an **Open** button that splits the markdown pane beside the focused terminal (`FORK(markdown)` lines).
 - `defaults/AGENTS.md`: one `FORK(markdown)` sentence naming the mod in the list of shipped mods.
-- `scripts/fork/markdown.test.ts` (fork-only, run by `fork-mods.yml`): the pane's path rule.
+- `scripts/fork-mods.test.ts` (fork-only, run by `fork-mods.yml`): two tests for the pane's path rule.
 
 ## Updates and automation
 
