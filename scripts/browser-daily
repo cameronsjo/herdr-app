@@ -16,6 +16,9 @@
 # `on` copies the bundle `just browser-build [--webkit]` made to
 # ~/Applications/Herdr Browser.app first, so later dev rebuilds never remove
 # the binary your everyday app runs from. Re-run `on` to take a newer build.
+# A WebKit bundle that daily-update downloaded from a signed release keeps its
+# Developer ID signature; any other WebKit bundle gets the everyday bundle id
+# and an ad hoc signature.
 # It then adds Herdr's provider to ~/.agent-browser/config.json
 # (browser.agent_browser_setup), so terminals from before the switch can use
 # `agent-browser -p herdr --session herdr-$HC_TERMINAL_ID`.
@@ -33,6 +36,32 @@ run() {
   if [ "${DRY_RUN:-}" = 1 ]; then printf 'would run:'; printf ' %q' "$@"; echo; else "$@"; fi
 }
 running() { pgrep -f -- "$1/Contents/MacOS/" >/dev/null 2>&1; }
+# FORK(signing): a release fork-mac-build signed with the fork's Developer ID,
+# notarized and stapled for the everyday bundle id. Kept in step with
+# scripts/fork/daily-update's copy. Returns 0 for that build; 1 when the app is
+# not signed by the fork's Developer ID for that id; 2 when it is, but spctl or
+# stapler does not confirm the notarization (devid_why says which).
+fork_team=5H883FMW6H
+devid_why=
+genuine_devid() {
+  local app=$1
+  devid_why="not signed by the fork's Developer ID for $daily_id"
+  codesign --verify --deep --strict \
+    -R "=anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = \"$fork_team\" and identifier \"$daily_id\"" "$app" >/dev/null 2>&1 || return 1
+  devid_why="signed by the fork's Developer ID, but spctl does not report it notarized"
+  [[ "$(spctl -a -t exec -vv "$app" 2>&1)" == *"source=Notarized Developer ID"* ]] || return 2
+  devid_why="signed by the fork's Developer ID, but stapler validate fails"
+  xcrun stapler validate "$app" >/dev/null 2>&1 || return 2
+  devid_why=
+}
+# The installed copy's code identity, which is what macOS keys camera,
+# microphone and keychain grants on: the signature, not the notarization.
+signature_kind() {
+  local rc=0
+  [ -d "$1" ] || { echo none; return 0; }
+  genuine_devid "$1" || rc=$?
+  if [ "$rc" -eq 1 ]; then echo "ad hoc"; else echo "Developer ID"; fi
+}
 which_runs() {
   if running "$daily"; then echo "browser build ($daily)"
   elif running "$stock"; then echo "Herdr ($stock)"
@@ -70,16 +99,39 @@ case "${1:-}" in
     [ -x "$stock/Contents/MacOS/Herdr" ] || { echo "browser-daily: no $stock to switch back to; install Herdr first." >&2; exit 1; }
     quit_herdr "$daily"
     quit_herdr "$stock"
+    was=$(signature_kind "$daily")
     echo "copying $src to $daily"
     run mkdir -p "$(dirname "$daily")"
     run rm -rf "$daily"
     run ditto "$src" "$daily"
+    now="ad hoc"  # the CEF bundle is only ever built and signed ad hoc locally
     if [ "$bundle" = browser-dev-webkit ]; then
-      # WebKit keeps the person's cookies and storage per bundle id: its own
-      # id keeps them apart from the dev app's (CEF keeps them per app home).
-      echo "giving it its own bundle id ($daily_id), signed ad hoc"
-      run /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $daily_id" "$daily/Contents/Info.plist"
-      run codesign --force --deep --sign - --preserve-metadata=entitlements "$daily"
+      # Check the copy that runs, not the source, which a daily-update run
+      # can replace meanwhile. Under DRY_RUN there is no copy: check the
+      # source to show which path a real run would take.
+      checked=$daily
+      [ "${DRY_RUN:-}" = 1 ] && checked=$src
+      rc=0
+      genuine_devid "$checked" || rc=$?
+      if [ "$rc" -eq 0 ]; then
+        echo "keeping its Developer ID signature (notarized, bundle id $daily_id)"
+        now="Developer ID"
+      else
+        # The app is already quit, so even a Developer ID build that fails the
+        # notarization check is re-signed ad hoc rather than left uninstalled.
+        # `daily-update apply` comes through here too; only daily-update's
+        # unattended install holds such a build back for the next check.
+        [ "$rc" -eq 2 ] && echo "browser-daily: $devid_why; signing it ad hoc instead" >&2
+        # WebKit keeps the person's cookies and storage per bundle id: its own
+        # id keeps them apart from the dev app's (CEF keeps them per app home).
+        echo "giving it its own bundle id ($daily_id), signed ad hoc"
+        run /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $daily_id" "$daily/Contents/Info.plist"
+        run codesign --force --deep --sign - --preserve-metadata=entitlements "$daily"
+        now="ad hoc"
+      fi
+    fi
+    if [ "$was" != none ] && [ "$was" != "$now" ]; then
+      echo "the app's code identity changed ($was -> $now): macOS asks once more for camera, microphone and keychain access"
     fi
     echo "opening the browser build on your real home"
     run open -n "$daily"

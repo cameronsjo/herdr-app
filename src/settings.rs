@@ -14,6 +14,8 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Mutex;
 
+mod fork_artificer; // FORK(artificer)
+
 /// A terminal palette, as herdr-app shipped them.
 #[derive(Clone)]
 struct Palette {
@@ -80,8 +82,9 @@ const PAPER: Palette = Palette {
 pub const PRESETS: &[&str] = &["graphite", "ink", "moss", "paper"];
 
 /// The theme a layout without one shows, by appearance.
-pub const DEFAULT_DARK: &str = "graphite";
-pub const DEFAULT_LIGHT: &str = "paper";
+// FORK(artificer): the fork's default is the Artificer pair (upstream: "graphite" / "paper").
+pub const DEFAULT_DARK: &str = "artificer-dark";
+pub const DEFAULT_LIGHT: &str = "artificer-light";
 
 fn preset(name: &str) -> Option<&'static Palette> {
     match name {
@@ -97,8 +100,10 @@ fn preset(name: &str) -> Option<&'static Palette> {
 const THEMES: &[(&str, &str)] = &[
     ("atom-one-dark", include_str!("../defaults/themes/atom-one-dark.json")),
     ("win98", include_str!("../defaults/themes/win98.json")),
+    ("artificer-dark", include_str!("../defaults/themes/artificer-dark.json")), // FORK(artificer)
+    ("artificer-light", include_str!("../defaults/themes/artificer-light.json")), // FORK(artificer)
 ];
-pub const SHIPPED_THEMES: &[&str] = &["atom-one-dark", "win98"];
+pub const SHIPPED_THEMES: &[&str] = &["atom-one-dark", "win98", "artificer-dark", "artificer-light"]; // FORK(artificer)
 
 /// `themes/<name>.json`: a palette, plus `colors` overrides like settings.json's.
 #[derive(Deserialize)]
@@ -182,7 +187,7 @@ fn palette(name: &str) -> Result<(Palette, BTreeMap<String, String>), String> {
         return Ok((p.clone(), BTreeMap::new()));
     }
     let path = theme_path(name);
-    let text = std::fs::read_to_string(&path)
+    let text = fork_artificer::theme_text(&path, name) // FORK(artificer): a missing shipped theme file resolves from its embedded copy
         .map_err(|_| format!("theme {name:?} is not one of {} and there is no themes/{name}.json", PRESETS.join(", ")))?;
     parse_theme_file(name, &text)
 }

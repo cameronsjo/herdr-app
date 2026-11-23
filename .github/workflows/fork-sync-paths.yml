@@ -1,0 +1,80 @@
+# FORK(sync-guard): a required check (ruleset 27338965) that fails a PR that
+# would merge without a person and touches the files that decide what runs on
+# Cameron's Macs or what agents and the sync routine do (agent configuration
+# at any depth: CLAUDE.md, CLAUDE.local.md, .claude/). Auto-merge then waits
+# on it; Cameron reads such a PR and merges with the admin bypass. Fork-only file.
+#
+# Would merge without a person: auto-merge is on (any branch, any title; the
+# check runs again when auto-merge is turned on or off), or by name: the head
+# branch is sync/* (scripts/fork/sync-upstream) or claude/* (cloud sessions,
+# the weekly routine included), the title says it syncs upstream, or the head
+# is in another repository. A PR changing 3000 or more files fails outright:
+# the files API lists at most 3000, so the check could not see them all.
+#
+# pull_request_target, so the job that runs is master's copy of this file, and
+# it checks out nothing and runs no code from the PR. It catches accidents, not
+# a hostile change: a required check reported by GitHub Actions can be faked by
+# a workflow in a same-repo PR that reports a job of the same name
+# (docs/fork/weekly-sync.md § Trust).
+name: fork-sync-paths
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited, ready_for_review, auto_merge_enabled, auto_merge_disabled]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  sync-paths:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: PRs that merge without a person leave the protected paths alone
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          AUTO_MERGE: ${{ github.event.pull_request.auto_merge != null }}
+          CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
+          # Untrusted text: read from the environment, never spliced into the script.
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          set -euo pipefail
+          if [[ ! $CHANGED_FILES =~ ^[0-9]+$ ]] || (( CHANGED_FILES >= 3000 )); then
+            echo "::error::This PR changes ${CHANGED_FILES} files; the files API lists at most 3000, so this check cannot see them all. Split it, or Cameron merges it with the admin bypass." >&2
+            exit 1
+          fi
+          why=''
+          if [[ $AUTO_MERGE == true ]]; then why="auto-merge is on"; fi
+          if [[ -z $why ]]; then
+            case $HEAD_REF in sync/* | claude/*) why="head branch $HEAD_REF" ;; esac
+          fi
+          shopt -s nocasematch
+          if [[ -z $why && $TITLE == *"sync upstream"* ]]; then why="title says it syncs upstream"; fi
+          shopt -u nocasematch
+          if [[ -z $why && $HEAD_REPO != "$REPO" ]]; then why="head is in $HEAD_REPO"; fi
+          if [[ -z $why ]]; then echo "a person merges this PR: nothing to check"; exit 0; fi
+          # Both names of a renamed file count: moving a protected file out is a change to it.
+          files=$(gh api --paginate "repos/$REPO/pulls/$PR/files" --jq '.[] | .filename, (.previous_filename // empty)')
+          hit=()
+          while IFS= read -r f; do
+            case $f in
+              # Agent configuration at any depth: a nested CLAUDE.md or .claude/skills loads into sessions too.
+              scripts/fork/* | .github/* | .mcp.json | docs/fork/weekly-sync.md | \
+              CLAUDE.md | */CLAUDE.md | CLAUDE.local.md | */CLAUDE.local.md | .claude/* | */.claude/*) hit+=("$f") ;;
+            esac
+          done <<<"$files"
+          if [[ ${#hit[@]} -eq 0 ]]; then echo "merges without a person ($why), but no protected path touched"; exit 0; fi
+          {
+            echo "::error::This PR would merge without a person ($why) and changes protected paths. Turn auto-merge off; Cameron reviews it and merges with the admin bypass:"
+            printf '  %s\n' "${hit[@]}"
+          } >&2
+          exit 1

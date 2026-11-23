@@ -1,0 +1,291 @@
+# FORK(browser): the everyday browser build, made here instead of on
+# Cameron's Mac. Each push to master builds the WebKit dev bundle (the same
+# `scripts/browser-dev-bundle --webkit` that scripts/fork/daily-update runs
+# locally), signs and notarizes it with the fork's Developer ID, attests where
+# it was built, and publishes it as the prerelease `browser-<sha>`.
+# daily-update downloads it, checks the attestation and the signature, and
+# installs it as is. Fork-only file: upstream syncs never conflict on it.
+#
+#   build    compiles; holds no secret and no write token
+#   sign     the only job on the apple-signing environment; runs no repo code
+#            but the fork's signing scripts
+#   publish  attests and releases what sign made, with this commit's
+#            scripts/fork/daily-update (for download-only Macs)
+name: fork-mac-build
+run-name: ${{ format('browser build {0}', github.sha) }}
+
+on:
+  push:
+    branches: [master]
+  # Builds the current master again (e.g. after a failed run).
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One build per commit, never cancelled: a cancelled run publishes nothing.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.sha }}
+  cancel-in-progress: false
+
+env:
+  RUST_TOOLCHAIN: 1.95.0
+  ZIG_VERSION: 0.16.0
+  CARGO_INCREMENTAL: "0"
+  # How many browser-* prereleases to keep.
+  KEEP: 10
+
+jobs:
+  # Runs every build script and proc macro, so it holds no write token and no
+  # secret. It builds cold: no cache is restored or saved, because what it
+  # builds ships notarized under the fork's Developer ID, and a cache entry is
+  # written by other runs.
+  build:
+    if: github.ref == 'refs/heads/master'
+    runs-on: macos-15
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          # On by default: it restores and saves the global Zig cache under a
+          # key shared with release.yml's `build` job, and that cache's
+          # packages and objects end up in the notarized binary.
+          use-cache: false
+      - name: Build the WebKit bundle
+        run: scripts/browser-dev-bundle --webkit
+      - name: Pack
+        run: |
+          mkdir -p dist
+          ditto -c -k --norsrc --keepParent "target/browser-dev-webkit/Herdr Dev.app" dist/herdr-browser-webkit-unsigned.zip
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: herdr-browser-webkit-unsigned
+          path: dist/herdr-browser-webkit-unsigned.zip
+          if-no-files-found: error
+          retention-days: 3
+
+  # The only job that can read the Apple secrets (environment apple-signing,
+  # master only). It checks out nothing but the fork's signing files, runs no
+  # setup action and restores no cache; the secrets reach only the sign and
+  # notarize steps. With no certificate in the environment it signs ad hoc,
+  # unless the repo variable FORK_REQUIRE_DEVID is true, which makes a missing
+  # certificate a failure.
+  sign:
+    needs: build
+    if: github.ref == 'refs/heads/master'
+    runs-on: macos-15
+    timeout-minutes: 80
+    environment: apple-signing
+    permissions:
+      contents: read
+    outputs:
+      sha256: ${{ steps.pack.outputs.sha256 }}
+      signed: ${{ steps.sign.outputs.signed }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      # Whether the certificate is set, as true/false; never the value.
+      HAS_CERT: ${{ secrets.APPLE_CERTIFICATE_P12 != '' }}
+      REQUIRE_DEVID: ${{ vars.FORK_REQUIRE_DEVID == 'true' }}
+      DAILY_ID: dev.herdr.app.browser-daily
+      TEAM: 5H883FMW6H
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            scripts/fork/mac-sign
+            scripts/fork/mac-notarize
+            scripts/fork/macos-entitlements.plist
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: herdr-browser-webkit-unsigned
+          path: ${{ runner.temp }}/in
+      # The zip comes from a job that ran every build script, so check its
+      # shape before anything signs it: one app, one Mach-O, no symlinks.
+      - name: Unpack and check
+        run: |
+          set -euo pipefail
+          in="$RUNNER_TEMP/in" out="$RUNNER_TEMP/app"
+          APP="$out/Herdr Dev.app"
+          echo "APP=$APP" >> "$GITHUB_ENV"
+          files=$(find "$in" -mindepth 1)
+          [[ $files == "$in/herdr-browser-webkit-unsigned.zip" ]] || { echo "::error::expected only herdr-browser-webkit-unsigned.zip, got: $files"; exit 1; }
+          ditto -x -k "$in/herdr-browser-webkit-unsigned.zip" "$out"
+          top=$(find "$out" -mindepth 1 -maxdepth 1)
+          [[ $top == "$APP" && -d $APP ]] || { echo "::error::expected only Herdr Dev.app at the top, got: $top"; exit 1; }
+          links=$(find "$out" -type l)
+          [[ -z $links ]] || { echo "::error::the bundle holds symlinks: $links"; exit 1; }
+          exe=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Contents/Info.plist")
+          machos=()
+          while IFS= read -r -d '' f; do
+            case $(file -b "$f") in Mach-O*) machos+=("$f") ;; esac
+          done < <(find "$APP" -type f -print0)
+          [[ ${#machos[@]} -eq 1 && ${machos[0]} == "$APP/Contents/MacOS/$exe" ]] ||
+            { echo "::error::expected one Mach-O, Contents/MacOS/$exe; got ${#machos[@]}: ${machos[*]}"; exit 1; }
+      # Info.plist is sealed by the signature, so the everyday copy's bundle id
+      # goes in before signing; daily-update then installs it unchanged.
+      - name: Set the everyday bundle id
+        run: /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $DAILY_ID" "$APP/Contents/Info.plist"
+      - name: Sign
+        id: sign
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ $HAS_CERT != true ]]; then
+            if [[ $REQUIRE_DEVID == true ]]; then
+              echo "::error::FORK_REQUIRE_DEVID is true but the apple-signing environment has no APPLE_CERTIFICATE_P12"
+              exit 1
+            fi
+            echo "::warning::no signing certificate in apple-signing: signing ad hoc"
+            unset APPLE_CERTIFICATE_P12 APPLE_CERTIFICATE_PASSWORD
+          fi
+          "$GITHUB_WORKSPACE/scripts/fork/mac-sign" "$APP"
+          echo "signed=$HAS_CERT" >> "$GITHUB_OUTPUT"
+      - name: Notarize and staple
+        if: env.HAS_CERT == 'true'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: '"$GITHUB_WORKSPACE/scripts/fork/mac-notarize" "$APP"'
+      - name: Check the signature
+        run: |
+          set -euo pipefail
+          codesign --verify --deep --strict "$APP"
+          if [[ $HAS_CERT != true ]]; then exit 0; fi
+          codesign --verify --strict -R "=anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = \"$TEAM\" and identifier \"$DAILY_ID\"" "$APP"
+          info=$(codesign -dvv "$APP" 2>&1)
+          echo "$info"
+          [[ $info =~ flags=0x[0-9a-f]+\([^\)]*runtime ]] || { echo "::error::no hardened runtime flag"; exit 1; }
+          # Only the four entitlements the fork plist grants, nothing added.
+          codesign -d --entitlements - --xml "$APP" > "$RUNNER_TEMP/got.plist"
+          got=$(plutil -convert json -o - "$RUNNER_TEMP/got.plist" | jq -S .)
+          want=$(plutil -convert json -o - "$GITHUB_WORKSPACE/scripts/fork/macos-entitlements.plist" | jq -S .)
+          [[ $got == "$want" ]] || { echo "::error::entitlements differ from scripts/fork/macos-entitlements.plist: $got"; exit 1; }
+          xcrun stapler validate "$APP"
+          gk=$(spctl -a -t exec -vv "$APP" 2>&1) || true
+          echo "$gk"
+          if [[ $gk == *"security disabled"* ]]; then
+            # Gatekeeper off on this runner: stapler validate above is the check.
+            echo "::warning::Gatekeeper is disabled on this runner; spctl could not assess the app"
+          elif [[ $gk != *"source=Notarized Developer ID"* ]]; then
+            echo "::error::Gatekeeper does not see a notarized Developer ID app"; exit 1
+          fi
+      - name: Pack
+        id: pack
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/out"
+          cd "$RUNNER_TEMP/out"
+          ditto -c -k --norsrc --keepParent "$APP" herdr-browser-webkit.zip
+          shasum -a 256 herdr-browser-webkit.zip > herdr-browser-webkit.zip.sha256
+          cat herdr-browser-webkit.zip.sha256
+          echo "sha256=$(cut -d' ' -f1 herdr-browser-webkit.zip.sha256)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: herdr-browser-webkit
+          path: ${{ runner.temp }}/out/
+          if-no-files-found: error
+          retention-days: 7
+
+  # Attests and publishes what sign made, plus this commit's
+  # scripts/fork/daily-update as a file; runs none of the repo's code.
+  publish:
+    needs: sign
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: herdr-browser-webkit
+          path: dist
+      # The checksum file travels with the zip, so also compare with the
+      # digest sign reported as its job output.
+      - name: Check the download
+        env:
+          WANT: ${{ needs.sign.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum -c herdr-browser-webkit.zip.sha256
+          got=$(sha256sum herdr-browser-webkit.zip | cut -d' ' -f1)
+          [[ -n $WANT && $got == "$WANT" ]] || { echo "::error::zip sha256 $got is not the one sign made ($WANT)"; exit 1; }
+      # The updater script, for a Mac with no checkout (daily-update
+      # --download-only stages it; a person adopts it). Taken from this commit
+      # only, never from build or sign, and never run here.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: src
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            scripts/fork/daily-update
+      - name: Add the updater script
+        run: |
+          set -euo pipefail
+          f=src/scripts/fork/daily-update
+          # Byte for byte the blob at this commit: no filter or line-ending change.
+          want=$(git -C src rev-parse "$GITHUB_SHA:scripts/fork/daily-update")
+          got=$(git -C src hash-object --no-filters "scripts/fork/daily-update")
+          [[ $got == "$want" ]] || { echo "::error::$f is blob $got, not $GITHUB_SHA's $want"; exit 1; }
+          cp "$f" dist/daily-update
+          sha256sum dist/daily-update
+      - name: Attest where it was built
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
+        with:
+          subject-path: |
+            dist/herdr-browser-webkit.zip
+            dist/daily-update
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SIGNED: ${{ needs.sign.outputs.signed }}
+        run: |
+          tag="browser-$GITHUB_SHA"
+          if [ "$SIGNED" = true ]; then
+            notes="The WebKit browser build of $GITHUB_SHA, for scripts/fork/daily-update. Developer ID signed, notarized and stapled, bundle id dev.herdr.app.browser-daily; daily-update installs it as is."
+          else
+            notes="The WebKit browser build of $GITHUB_SHA, for scripts/fork/daily-update. Ad hoc signed; daily-update re-signs it on install."
+          fi
+          if draft=$(gh release view "$tag" -R "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [ "$draft" != true ]; then echo "$tag is already published"; exit 0; fi
+            # An earlier run stopped part-way: start that release again.
+            gh release delete "$tag" -R "$GITHUB_REPOSITORY" --yes
+          fi
+          # A draft first, published once both files are up, so a reader never
+          # sees a release whose files are still uploading.
+          gh release create "$tag" dist/herdr-browser-webkit.zip dist/herdr-browser-webkit.zip.sha256 dist/daily-update \
+            -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --draft --prerelease --latest=false \
+            --title "Browser build ${GITHUB_SHA:0:8}" --notes "$notes"
+          gh release edit "$tag" -R "$GITHUB_REPOSITORY" --draft=false
+      - name: Keep the newest ${{ env.KEEP }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release list -R "$GITHUB_REPOSITORY" --limit 200 --json tagName,publishedAt,isDraft \
+            --jq "[.[] | select((.tagName | startswith(\"browser-\")) and (.isDraft | not))] | sort_by(.publishedAt) | reverse | .[$KEEP:] | .[].tagName" |
+            while read -r old; do gh release delete "$old" -R "$GITHUB_REPOSITORY" --cleanup-tag --yes; done

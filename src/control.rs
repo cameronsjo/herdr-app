@@ -24,7 +24,7 @@ pub fn listen(tx: async_channel::Sender<Request>) {
         return;
     }
     let _ = std::fs::remove_file(&path);
-    let listener = match crate::browser::socket::bind_private(&path, |p| UnixListener::bind(p)) { // FORK(browser): owner-only socket
+    let listener = match crate::browser::socket::bind_control(&path, |p| UnixListener::bind(p)) { // FORK(browser): owner-only socket
         Ok(l) => l,
         Err(e) => return tracing::warn!("cannot serve {}: {e}", path.display()),
     };

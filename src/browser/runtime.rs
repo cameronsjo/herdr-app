@@ -171,6 +171,8 @@ pub fn reload(id: &str) -> Result<(), String> {
 
 /// CEF's DevTools opens in a window of its own: nothing to tell the person.
 pub const DEVTOOLS_NOTE: Option<&str> = None;
+/// CEF applies all of a viewport: size, mobile and pixel ratio.
+pub const VIEWPORT_SIZE_ONLY: bool = false;
 
 /// Opens or closes CEF's own DevTools window for a browser (None toggles).
 /// Returns whether it's open now. No debugging port: DevTools talks to the

@@ -108,6 +108,102 @@ home: never run it and stock Herdr at once, and while it's off, stock
 Herdr shows browser panes as a mod that didn't load. `DRY_RUN=1` prints
 the steps. Moving to Herdr's own browser later: [browser-transition.md](browser-transition.md).
 
+### Keeping it current (`scripts/fork/daily-update`)
+
+`bash scripts/fork/daily-update install` adds a launchd agent that runs a
+copy of the script (`~/.local/share/herdr-fork/daily-update`) every hour; it
+installs each new `fork/master` that passed CI (setup and trust:
+[fork/weekly-sync.md](fork/weekly-sync.md)). `daily-update status` shows what
+is built and installed, and the agent script's sha256 with where it came
+from (`fork/master <sha>` or `install from <checkout> at <sha>`).
+
+The agent updates its own copy only from a commit that passed the CI check,
+right after checking it out and before any download or build. So when the
+check itself is broken, the agent cannot fix itself: every run logs `check
+failed` (`~/Library/Logs/herdr-fork-daily.log`) and the copy stays put.
+Recover by hand from `fork/master`, in a throwaway worktree so no checkout
+moves:
+
+```sh
+git fetch fork && git worktree add --detach /tmp/herdr-recover fork/master
+bash /tmp/herdr-recover/scripts/fork/daily-update install   # replaces the agent's copy, reloads the agent
+git worktree remove /tmp/herdr-recover
+bash ~/.local/share/herdr-fork/daily-update check
+bash ~/.local/share/herdr-fork/daily-update status
+```
+
+Test a change to the script with `bun test scripts/fork/daily-update.test.ts
+scripts/fork/daily-update-download-only.test.ts`; on macOS (and in
+`fork-mods.yml`'s `macos-latest` leg) they run under `/bin/bash` 3.2, as
+launchd does.
+
+### Another Mac (download-only)
+
+A Mac with no checkout runs the same agent in download-only mode. It never
+builds and never re-signs. Of the `browser-<sha>` releases whose commit is an
+ancestor of `master`, it takes the one closest to `master`'s head, not the last
+published, so a re-run of an old commit can neither roll it back nor stall it.
+It installs that release only when the tag points at `<sha>`, `<sha>` is ahead
+of what is installed (a first install takes a release at most 5 commits behind
+`master`), its CI passed, `gh attestation verify` passes with every pin, and the
+app is the fork's notarized Developer ID build. Anything else is refused,
+logged, and notified once; a GitHub API that does not answer is logged and
+tried again at the next check. Like the main Mac, it installs only while Herdr
+Browser is not running; quit it and the next hourly check installs.
+
+It does not update its own script on its own. A newer `daily-update` from a
+release is verified, staged and announced; `bash
+~/.local/share/herdr-fork/daily-update adopt <sha>` verifies the staged bytes
+again and puts them in place.
+
+`gh` reads a token from the Keychain item `herdr-fork-gh-token`, or an exported
+`GH_TOKEN` when someone runs the script by hand; never `gh`'s own login. Make a
+fine-grained token for `cameronsjo/herdr-app` only with Contents: read,
+Metadata: read and Attestations: read (`GET /repos/{owner}/{repo}/attestations/{digest}`
+needs the last one), and an expiry date. Renew it before then. A token
+problem shows up in `~/Library/Logs/herdr-fork-daily.log` in one of two ways:
+
+- When GitHub refuses the token on the release or compare calls (HTTP 401,
+  or a 403 that is not a rate limit: expired, revoked, or not for this repo),
+  every check exits 2 and logs `setup error: GitHub refused the token (<gh's
+  own error>)`, and you get one notification until a check gets an answer
+  again.
+- A token that works for those calls but lacks Attestations: read gets a 403
+  from `gh attestation verify` itself. That reads as a verification refusal,
+  not a setup error: the log says `refused: herdr-browser-webkit.zip did not
+  verify …` after a `gh attestation verify …` line carrying gh's own text,
+  with one notification per release, and the check exits 0. When every
+  release "did not verify", check Attestations: read first.
+
+Set up, once: get `scripts/fork/bootstrap-download-only` at a commit you have
+read, read it, and run it with `bash`. It is this Mac's trust root, so take it
+from a commit, not a branch:
+
+```sh
+sha=<a master commit you have read>
+d=$(mktemp -d)
+curl -fsSLo "$d/bootstrap-download-only" \
+  "https://raw.githubusercontent.com/cameronsjo/herdr-app/$sha/scripts/fork/bootstrap-download-only"
+less "$d/bootstrap-download-only"
+bash "$d/bootstrap-download-only"
+```
+
+It asks for the token (into the Keychain; `--new-token` replaces it), picks
+the release by the agent's rule (and, like a first install, refuses one more
+than 5 commits behind `master`), downloads its `daily-update`, verifies it with
+`gh attestation verify` pinned to this repo,
+`fork-mac-build.yml@refs/heads/master`, GitHub's OIDC issuer,
+`refs/heads/master`, that commit as source and signer digest, SLSA provenance
+v1 and a GitHub-hosted runner for `publish`, checks that the attestation names
+that file and its sha256, renames those same bytes into
+`~/.local/share/herdr-fork/daily-update`, and runs `install --download-only
+<sha>` (which verifies its copy again), `check` and `status`. It runs as its own
+process and exports nothing, so the token never lands in your shell.
+
+`daily-update verify <file> <sha>` checks any file against the same pins.
+Remove the agent with `daily-update uninstall`; the Keychain item stays until
+`security delete-generic-password -s herdr-fork-gh-token`.
+
 ## Try it
 
 `just browser-dev` runs the app on its own home, `/tmp/hbd.dev`, kept
@@ -148,7 +244,10 @@ into the agent's console. It writes your answers to a results file.
   after a restart) or as a block in a layout. It is saved as a mod block so
   a herdr-app without this prototype, sharing the same core, shows that one
   pane as a mod that didn't load instead of failing to read the whole
-  layout. The name isn't `browser`, which Herdr's own browser mod will
+  layout. In this build it is an ordinary mod: the shipped
+  `browser-prototype` mod draws the placeholder and says where the page goes
+  with `nativeView` (`src/browser/element.rs`); Herdr draws the agent header
+  above it and places the page each frame. The name isn't `browser`, which Herdr's own browser mod will
   likely use: neither reads the other's blocks. In a floating block it
   never opens: a native view can't float over GPUI's drawing.
 - Each frame the page's view takes its block's bounds; a block that isn't
@@ -305,6 +404,22 @@ Terminal ids are per core, so the provider also reads the caller's core id
 (`hc` from the caller's environment), and the window attaches only a
 terminal of its own core.
 
+Which app the provider asks: the one that holds the caller's terminal now.
+Each app with browser panes labels its local terminals
+`herdr-app-fork.socket=<its control socket>`, once per terminal per run,
+so the app started last holds the terminals it shows. The provider reads
+that label from the core (`terminal.get`) and tries it first, but only if
+the socket and its folder are this user's and nobody else may write to the
+folder. Then it tries the socket pinned in the terminal's
+`AGENT_BROWSER_PLUGINS` when it started, then the default app home's. It
+skips a socket whose listener runs as another user (`getpeereid`, which a
+swapped symlink can't fake). An app that doesn't hold the terminal (it
+doesn't know it, has it parked, or is on another core) passes it on; the
+first app that holds it answers, and its refusal (agent access off, no
+browser, two browsers) is the answer. So a terminal started by one build
+keeps working after you switch to another build on another app home
+(cameronsjo/herdr-app#6).
+
 How it works: Herdr gives its local terminals `AGENT_BROWSER_PROVIDER=herdr`,
 `AGENT_BROWSER_PLUGINS` (Herdr's own provider, `herdr-app
 __agent-browser-provider`, first) and an `AGENT_BROWSER_SESSION` of their
@@ -406,6 +521,18 @@ library validation is off (`DYLD_INSERT_LIBRARIES` works on the browser
 process at its next launch, same user only), and Chromium logs a failed
 signature check of its own process (`process_requirement.cc … -67030`);
 whether Chromium then skips checks between its processes is unverified.
+Local dev bundles of either engine stay ad hoc signed. The everyday WebKit
+build that `fork-mac-build.yml` publishes is Developer ID signed with the
+hardened runtime (the four entitlements in
+`scripts/fork/macos-entitlements.plist`), notarized and stapled, with the
+bundle id `dev.herdr.app.browser-daily`; `scripts/fork/daily-update` and
+`scripts/browser-daily on` install it without re-signing once
+`codesign`, `spctl` and `stapler validate` pass. A build with the fork's
+signature that fails the `spctl` or `stapler` check is held: `daily-update`
+leaves the installed app and tries again at its next check, while
+`browser-daily on` (which has already quit the app) re-signs it ad hoc.
+Anything else is re-signed ad hoc, except in `daily-update`'s download-only
+mode, which refuses it and never re-signs (§ Another Mac).
 
 ### Dev-only switch (automated tests only)
 

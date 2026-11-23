@@ -6,12 +6,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-mod fork_browser; // FORK(browser)
-pub use fork_browser::BROWSER_MOD; // FORK(browser)
-
 /// What a block shows.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(from = "fork_browser::Saved", into = "fork_browser::Saved")] // FORK(browser): browser blocks save as mod blocks
+#[serde(untagged)]
 pub enum Content {
     Terminal { terminal: String },
     Mod {
@@ -31,7 +28,6 @@ pub enum Content {
     },
     /// An agent's terminal, full size (`"focused"`: the selected agent).
     Agent { agent: String },
-    Browser { browser: String, url: String, profile: Option<String> }, // FORK(browser): see layout/fork_browser.rs
 }
 
 /// Which side of its node a floating block sits on. Left/right make it
@@ -391,6 +387,9 @@ pub struct Node {
     /// Root only: the terminal right-click menu's mod (default: `menu`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_menu: Option<String>,
+    /// Root only: mods that can handle a terminal link, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub link_handlers: Vec<String>,
     /// Root only: the mod that shows notifications (default: `toast`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub toast: Option<String>,
@@ -437,6 +436,7 @@ impl Node {
             traffic_lights: None,
             preview: None,
             terminal_menu: None,
+            link_handlers: Vec::new(),
             toast: None,
             window_drag: false,
             window_blur: false,
@@ -492,7 +492,7 @@ impl Node {
 
     /// A pane in a tab: a terminal, or a mod beside them (a viewer, a board).
     pub fn is_pane(&self) -> bool {
-        matches!(self.content(), Some(Content::Terminal { .. } | Content::Mod { .. } | Content::Browser { .. })) // FORK(browser)
+        matches!(self.content(), Some(Content::Terminal { .. } | Content::Mod { .. }))
     }
 
     pub fn closable(&self) -> bool {

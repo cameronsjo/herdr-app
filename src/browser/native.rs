@@ -94,6 +94,7 @@ impl Browsers {
             }
             engine::close(id);
             view::remove(id);
+            super::element::forget(id);
         }
         if changes.open.is_empty() {
             return;
@@ -154,7 +155,8 @@ impl Browsers {
                 Ok(json!({ "browser": browser, "zoom": emulate::shown(now) }))
             }
             "browser.viewport" => {
-                let viewport = emulate::viewport(args)?;
+                // The reply, like `ls`, says what the engine applies.
+                let viewport = emulate::viewport(args)?.map(|v| if engine::VIEWPORT_SIZE_ONLY { emulate::size_only(v) } else { v });
                 let shown = viewport.as_ref().map(emulate::Viewport::json);
                 engine::set_viewport(browser, viewport)?;
                 Ok(json!({ "browser": browser, "viewport": shown }))
@@ -317,10 +319,26 @@ impl Browsers {
         view::set_bindings(bindings);
     }
 
-    /// The block: what shows while the page isn't there (opening, an
-    /// error, another block owns it, an overlay over it: the page's title
-    /// and url on the theme's `surface`), and a canvas that puts the page's
-    /// view on the block each frame.
+    /// Whether the `browser-prototype` mod draws this block
+    /// (`super::element`): the browser runs, and this block owns the page or
+    /// it is about to open here. Otherwise the window draws [`Self::element`]
+    /// (an error, another block owns the page, an id that can't open).
+    pub fn drawn_by_mod(&self, node: &str, browser: &str) -> bool {
+        self.error.is_none()
+            && match self.registry.owned_by(node).filter(|e| e.browser == browser) {
+                Some(_) => true,
+                None => self.registry.get(browser).is_none() && registry::herdr_id(browser),
+            }
+    }
+
+    /// Whether this block owns the open page, so its frame places the page.
+    pub fn owns(&self, node: &str, browser: &str) -> bool {
+        self.registry.owned_by(node).is_some_and(|e| e.browser == browser)
+    }
+
+    /// What a browser block shows when the mod doesn't draw it
+    /// ([`Self::drawn_by_mod`]): why the page isn't there, on the theme's
+    /// `surface`. The page itself never shows here.
     pub fn element(&self, node: &str, browser: &str, url: &str, look: Look) -> AnyElement {
         let owner = self.registry.owned_by(node).filter(|e| e.browser == browser);
         let (title, note) = match (&self.error, owner) {
@@ -332,7 +350,7 @@ impl Browsers {
             (None, None) if !registry::herdr_id(browser) => (None, "This browser doesn't open: an agent-profile browser needs an id shaped like Herdr's (b and 1-9 digits: b1, b2, …).".to_owned()),
             (None, None) => (None, format!("Opening {url}")),
         };
-        let mut el = div()
+        div()
             .size_full()
             .relative()
             .flex()
@@ -344,16 +362,34 @@ impl Browsers {
             .overflow_hidden()
             .bg(look.surface)
             .when_some(title, |d, t| d.text_color(look.text).child(t))
-            .child(div().text_color(look.dim).child(note));
-        if let (None, Some(_)) = (&self.error, owner) {
-            let id = browser.to_owned();
-            el = el.child(canvas(|_, _, _| {}, move |bounds, _, window, _| view::place(&id, bounds, window)).absolute().size_full());
-        }
-        el.into_any_element()
+            .child(div().text_color(look.dim).child(note))
+            .into_any_element()
     }
 
     /// Painted after everything else: hides the pages whose block wasn't painted this frame.
     pub fn frame_end(&self) -> Option<AnyElement> {
-        Some(canvas(|_, _, _| {}, |_, _, window, _| view::end_frame(window)).absolute().size_0().into_any_element())
+        Some(
+            canvas(|_, _, _| {}, |_, _, window, _| {
+                view::end_frame(window);
+                super::element::end_frame();
+            })
+            .absolute()
+            .size_0()
+            .into_any_element(),
+        )
+    }
+}
+
+/// The page fills `bounds`: a browser block whose mod didn't load.
+pub fn place_whole(browser: &str, bounds: gpui::Bounds<gpui::Pixels>, window: &Window) {
+    view::place(browser, bounds, window);
+}
+
+/// A browser block's frame, painted every frame after its mod: puts the
+/// page where the mod's `nativeView` says, inside `block` (its bounds).
+/// Not placed this frame, the page hides (`view::end_frame`).
+pub fn place(browser: &str, block: gpui::Bounds<gpui::Pixels>, window: &Window) {
+    if let Some(spot) = super::element::spot(browser, block) {
+        view::place(browser, spot, window);
     }
 }
