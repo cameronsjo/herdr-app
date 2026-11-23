@@ -702,6 +702,8 @@ test("markdown takes absolute and home paths, and refuses relative ones", async 
   expect((await markdownTarget({ file: "\\\\server\\share\\a.md" })).file).toBe("\\\\server\\share\\a.md");
   for (const file of ["README.md", "./a.md", "C:README.md", "\\\\server", "", 7]) expect((await markdownTarget({ file })).file).toBeNull();
   expect((await markdownTarget(null)).file).toBeNull();
+  // A trailing space can be part of the name.
+  expect((await markdownTarget({ file: "/repo/notes.md " })).file).toBe("/repo/notes.md ");
 });
 
 test("markdown keeps a remote file's machine, and refuses ~ there", async () => {

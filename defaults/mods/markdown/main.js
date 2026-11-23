@@ -11,7 +11,7 @@ const ABSOLUTE = /^(\/|[A-Za-z]:[\\/]|\\\\[^\\]+\\[^\\]+)/;
 
 function target() {
   const p = props() ?? {};
-  const raw = typeof p.file === "string" ? p.file.trim() : "";
+  const raw = typeof p.file === "string" ? p.file : ""; // untrimmed: spaces can be part of a file name
   const on = typeof p.on === "string" && p.on ? p.on : null;
   // `~` is the home of this computer; a remote file must already be absolute.
   const file = raw === "~" || raw.startsWith("~/") ? (on ? null : home() + raw.slice(1)) : ABSOLUTE.test(raw) ? raw : null;
