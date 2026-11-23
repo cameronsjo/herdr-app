@@ -543,3 +543,35 @@ test.skipIf(skip)("a 403 whose line is longer than 200 characters is still a set
   expect(r.code).toBe(2);
   expect(r.out).toContain("setup error: GitHub refused the token");
 });
+
+// install writes the check interval into the agent's plist; status reads it back.
+const plistPath = () => join(home, "Library/LaunchAgents/dev.herdr.fork.daily-update.plist");
+const startInterval = () => read(plistPath()).match(/<key>StartInterval<\/key><integer>(\d+)<\/integer>/)?.[1];
+
+test.skipIf(skip)("install checks every 15 minutes by default, and status says so", () => {
+  const r = run(["install", "--download-only"]);
+  expect(r.code).toBe(0);
+  expect(startInterval()).toBe("900");
+  expect(r.out).toContain("a check every 15 min");
+  expect(run(["status"]).out).toContain("interval:       every 15 min (900 s)");
+});
+
+test.skipIf(skip)("HERDR_DAILY_INTERVAL sets the plist's interval", () => {
+  const r = run(["install", "--download-only"], { HERDR_DAILY_INTERVAL: "3600" });
+  expect(r.code).toBe(0);
+  expect(startInterval()).toBe("3600");
+  expect(run(["status"]).out).toContain("interval:       every 1 h (3600 s)");
+});
+
+test.skipIf(skip)("an interval under a minute or not in whole seconds is refused, and no plist is written", () => {
+  for (const bad of ["59", "15m", "-900", "0x3c"]) {
+    const r = run(["install", "--download-only"], { HERDR_DAILY_INTERVAL: bad });
+    expect(r.code).toBe(2);
+    expect(r.out).toContain("HERDR_DAILY_INTERVAL must be whole seconds, at least 60");
+    expect(existsSync(plistPath())).toBe(false);
+  }
+});
+
+test.skipIf(skip)("status without an installed agent says there is no interval", () => {
+  expect(run(["status"]).out).toContain("interval:       none (no agent plist)");
+});
