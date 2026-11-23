@@ -55,38 +55,9 @@ pub fn within(path: &Path, dir: &Path) -> bool {
     path.starts_with(dir) || real(path).starts_with(real(dir))
 }
 
-/// Opens `path` for `readTextFile` only when it is a plain file (a link to
-/// one too): never waiting on a pipe, never reading a device. On Unix the
-/// open itself doesn't wait (O_NONBLOCK), so a pipe swapped in for a listed
-/// name between a mod's listing and its read can't hang the read.
-pub fn open_plain(path: &Path) -> std::io::Result<std::fs::File> {
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.custom_flags(O_NONBLOCK);
-    }
-    let file = options.open(path)?;
-    if !file.metadata()?.is_file() {
-        return Err(std::io::Error::other("Not a plain file"));
-    }
-    Ok(file)
-}
-
-// libc's O_NONBLOCK, without the dependency on Linux, for the targets the
-// fork ships (other Unix targets open without it). Reads of a plain file
-// ignore it.
-#[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))]
-const O_NONBLOCK: i32 = 0o4000;
-#[cfg(target_os = "macos")]
-const O_NONBLOCK: i32 = 0x0004;
-#[cfg(not(any(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")), target_os = "macos")))]
-const O_NONBLOCK: i32 = 0;
-
 #[cfg(test)]
 mod tests {
-    use super::{open_plain, within};
+    use super::within;
 
     #[cfg(unix)]
     #[test]
@@ -107,14 +78,16 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let pipe = root.join("b.json");
         assert!(std::process::Command::new("mkfifo").arg(&pipe).status().unwrap().success());
-        // Without O_NONBLOCK this open waits for a writer forever.
-        assert!(open_plain(&pipe).is_err());
-        assert!(open_plain(std::path::Path::new("/dev/null")).is_err());
-        assert!(open_plain(&root).is_err());
+        // `readTextFile` (upstream's `mod_files::read` since 0.1.17, which
+        // replaced the fork's own open): without O_NONBLOCK this waits forever.
+        let read = crate::mod_files::read;
+        assert!(read(&pipe).is_err());
+        assert!(read(std::path::Path::new("/dev/null")).is_err());
+        assert!(read(&root).is_err());
         std::fs::write(root.join("a.json"), "{}").unwrap();
         std::os::unix::fs::symlink(root.join("a.json"), root.join("link.json")).unwrap();
-        assert!(open_plain(&root.join("a.json")).is_ok());
-        assert!(open_plain(&root.join("link.json")).is_ok());
+        assert_eq!(read(&root.join("a.json")).unwrap().as_deref(), Some("{}"));
+        assert_eq!(read(&root.join("link.json")).unwrap().as_deref(), Some("{}"));
         let _ = std::fs::remove_dir_all(&root);
     }
 

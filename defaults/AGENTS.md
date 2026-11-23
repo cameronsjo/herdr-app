@@ -161,6 +161,9 @@ the highlighted line shows where it will land.
   mapped; otherwise they stay as the core reported them. They belong to their
   parent's tab without a pane; the `agents` mod shows them,
   `terminal.peek` opens one, `terminal.keep` gives one a pane.
+  When the shown space is on another machine, the peek's Keep button uses the
+  nearest ancestor's space on the terminal's machine, or the first space there
+  if no ancestor has a pane there. Keep is hidden if that machine has no space.
   Ctrl-click (Cmd-click on macOS) a live terminal address in terminal text to
   peek at it. Bare addresses refer to the machine of the terminal showing them;
   use `machine/address` for another machine. Names and non-live addresses aren't links.
@@ -353,9 +356,10 @@ layout's look and a block can differ:
   are placed in their cells as Ghostty places them.
 - `terminal_scroll_speed`: wheel and trackpad multiplier (default 1, clamped
   to 0.1..5), including mouse reports to programs. Small moves accumulate.
-- `font` / `font_size`: the terminals' (px at zoom 1); `ui_font`: the mods'
-  (their text sizes are their own, in px, and follow zoom). Optional: without
-  them a layout uses settings.json's, else Herdr's (JetBrains Mono 14, Geist).
+- `font` / `font_size`: the terminals', the Files preview's and the Changes
+  diff's (px at zoom 1); `ui_font`: the mods' (their text sizes are their own,
+  in px, and follow zoom). Optional: without them a layout uses settings.json's,
+  else Herdr's (JetBrains Mono 14, Geist).
   Herdr (main) leaves these unset; Terminals sets text size 15, and Herdr 98
   brings its own fonts.
   JetBrains Mono, Geist Mono and Geist ship with Herdr; any installed font
@@ -583,9 +587,10 @@ The main ones:
 - Spaces: `space.new {name?, folder?, tab?, argv?, task?, machine?, focus?}`
   (machine: another machine from `hc machine ls`; omitted: the focused space's
   machine for keys and clicks, this computer for scripts; `""`: this computer.
-  The space lives there, its
-  terminals start in that machine's home unless folder, and its tabs and
-  splits stay there; `spaces()` gives each space's `machine`, null here),
+  The space lives there, its tabs and splits stay there, and `spaces()` gives
+  each space's `machine`, null here. Without folder, its terminals start in
+  the focused terminal's folder when that terminal is on the same machine,
+  else in that machine's home),
   `space.close {id?, confirmed?}`, `space.rename {id?, name}` ("": Herdr's name again),
   `space.move {id, index}`, `space.select {index | id}`, `space.next`, `space.prev`.
   With no `argv`, the target core chooses that machine's default shell (PowerShell 7 when available on Windows).
@@ -607,9 +612,7 @@ The main ones:
   space shown, the new space is shown), for work the person looks at later;
   such tabs go last in their space, in the order made. `focus` is a boolean.
 - Panes: `pane.split {direction: "right" | "down", pane?, argv? | mod?, props?}` (a new
-  terminal, or a mod pane; `argv` starts in your interactive shell, for its PATH, and the
-  pane ends with it, keeping its exit code; that shell PATH needs sh, bash, zsh, dash, ksh or
-  fish: with other shells (nushell) and on Windows `argv` runs directly), `pane.close {pane?}`,
+  terminal, or a mod pane), `pane.close {pane?}`,
   `pane.zoom {pane?}`, `pane.focus {pane | terminal}`, `pane.go {direction}`,
   `pane.swap {pane?, direction | target}`, `pane.rename {pane?, name}` ("": unnamed
   again; `panes()[i].name`, kept with its tab), `pane.resize {direction, pane?, px?}` (moves
@@ -632,10 +635,7 @@ The main ones:
   They never act on the terminal's source pane. An explicit `pane` still targets that
   model pane; composition edits belong to the mod (edit its layout instead).
 - Terminals: `terminal.open {argv?, folder?, place?, name?}` (`folder` sets the
-  starting directory for tabs and right/down splits, with or without `argv`; `argv` starts in
-  your interactive shell wherever it goes: a tab's shell stays after it, a split ends with it;
-  only with sh, bash, zsh, dash, ksh or fish: other shells (nushell) and Windows don't give
-  `argv` that shell's PATH, and a split there runs `argv` directly), `terminal.kill {terminal}`,
+  starting directory for tabs and right/down splits, with or without `argv`), `terminal.kill {terminal}`,
   `terminal.keep {terminal, place?}`, `terminal.park {terminal}`,
   `terminal.peek {terminal}` (peek over the tab, with keep-as-tab and close),
   `terminal.show {terminal?, pane?}`, `terminal.search` (screen and scrollback;
@@ -1029,8 +1029,9 @@ a local path when the host is empty or `localhost`. A link handler starts withou
 a view and shares `localStorage` with views of the same mod with null props.
 Return `"handled"` when done or `"pass"` to try the next matching mod.
 If all pass, a local terminal uses the usual opener target. A matched file
-from a remote terminal has no opener target. A load or handler error stops
-the click, shows a toast and appears in `herdr-app status`.
+from a remote terminal has no opener target. A handler has 30 seconds to
+answer. A load or handler error stops the click, shows a toast and appears in
+`herdr-app status`.
 
 ### Check before you finish
 
@@ -1038,9 +1039,10 @@ the click, shows a toast and appears in `herdr-app status`.
 herdr-app check ~/.config/herdr-app/mods/<name>
 ```
 
-Loads and renders the mod's view if it has one. It checks link rules and
-verifies that `link.js` exports `handleLink` without running the module or
-its imports. It exits nonzero with the exact error. Run it after every change.
+Loads and renders the mod's view if it has one. It validates link rules.
+For mods with link rules and standalone link mods, it verifies that `link.js`
+exports `handleLink` without running the module or its imports. It exits
+nonzero with the exact error. Run it after every change.
 
 `init()` runs for real during a check. Import `checking` from `"herdr"` and
 use `if (checking()) return;` before starting helpers or writing files.

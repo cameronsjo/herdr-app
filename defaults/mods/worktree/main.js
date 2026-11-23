@@ -117,7 +117,9 @@ async function repoOf(folder, on) {
   const common = await git(folder, ["rev-parse", "--path-format=absolute", "--git-common-dir"], on);
   if (!top.ok || !common.ok) return null;
   const main = common.out.endsWith("/.git") ? common.out.slice(0, -5) : common.out;
-  return { top: top.out, main, name: main.split("/").pop(), linked: main !== top.out };
+  // A bare repo hidden beside its worktrees (<project>/.bare) is named after its project.
+  const parts = main.split("/"), name = parts.at(-1) === ".bare" ? parts.at(-2) : parts.at(-1);
+  return { top: top.out, main, name, linked: main !== top.out };
 }
 
 export default class Worktree extends View {
@@ -242,8 +244,7 @@ export default class Worktree extends View {
     if (!list.ok) return list.err || "git worktree list failed.";
     const checkout = list.out.split(/\n\n+/).map((record) => record.split("\n"))
       .find(([path]) => path === `worktree ${this.repo.top}`);
-    if (!checkout) return "Git could not find this worktree.";
-    const lock = checkout.find((field) => field === "locked" || field.startsWith("locked "));
+    const lock = checkout?.find((field) => field === "locked" || field.startsWith("locked "));
     if (lock) return lock === "locked" ? "This worktree is locked." : `This worktree is locked: ${lock.slice(7)}`;
 
     // Git on a remote Windows machine reports a drive-letter or UNC path.
