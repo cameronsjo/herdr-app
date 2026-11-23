@@ -180,8 +180,7 @@ export default class Files extends View {
       .when(!this.file, el => el.child(v_flex().id("files-tree").flex_1().min_h(0).overflow_y_scrollbar().p(6).children(this.rows("", 0, [], t))
         .when(Boolean(this.error) || !this.entries.get("")?.length, el => el.child(div().p(8).text_size(12).text_color(t.dim).child(this.error || (this.loading ? "Loading files…" : this.root ? "No files" : "No folder"))))
         .when(this.limited, el => el.child(div().p(8).text_size(11).text_color(t.dim).child("File list limited to 500 entries per folder and 5,000 total")))))
-      .when(Boolean(this.file), el => el.child(this.markdown != null // FORK(markdown): rendered .md preview
-        ? div().flex_1().min_h(0).p(12).child(TextView.markdown("files-markdown", this.markdown).scrollable(true).selectable(true).size_full())
+      .when(Boolean(this.file), el => el.child(this.markdown != null ? div().flex_1().min_h(0).p(12).child(TextView.markdown("files-markdown", this.markdown).scrollable(true).selectable(true).size_full()) /* FORK(markdown) */
         : this.code
         ? Editor.new(this.code).font_family(font.font_family).text_size(font.font_size).flex_1().min_h(0)
         : div().p(12).text_color(t.dim).child(this.fileError || "Loading file…")));
