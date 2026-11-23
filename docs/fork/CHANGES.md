@@ -132,6 +132,15 @@ Built 2026-10-30 to 2026-11-01 on `browser-prototype`. Design and security model
 - agent-browser's provider asks the app that holds the caller's terminal now, not the one that started it (cameronsjo/herdr-app#6, 2026-11-17): the app labels its local terminals `herdr-app-fork.socket` (one `FORK(browser)` call in `tend_terminals`), and the provider tries that socket, then the pinned one, then the default home's (`docs/browser-dev.md`).
 - Review follow-ups (2026-11-19, cameronsjo/herdr-app#29, #31, #43, #5; Linear CAM-998). Source-order tests now guard `render_block`'s browser early return and the panes-list seam, each scoped to its function and its needles required exactly once. The provider builds "no terminal" in one place (`browser::no_terminal`), waits 6 s per app instead of 10 (a live app answers in 5 s), and no longer puts a labeled socket path in the agent's errors. An app labels terminals only while it serves its control socket (`browser::socket::bind_control`, the same `FORK(browser)` line in `src/control.rs`), retries a failed label every 30 s instead of every tick, and takes its terminals back when the app that took them quits (its socket file is gone, or it is this user's private socket and refuses connections; a label pointing anywhere else is never connected to). A floating `browser-prototype` copy has a fixed width, since a content-sized float collapses `size_full()`. The window draws the mod's root itself instead of through `render_slot`, so a click on a browser pane focuses it once instead of publishing and saving twice. An edited `browser-prototype` (files differ from `installed.json`) no longer draws over pages: the window draws the block and places the page whole until the next start moves the edit aside. Seam: one `FORK(browser)` line in `files_changed`'s mod-edit path (`fork_mods_edited`), +1 line in upstream files. The duplicate "Script error." from #5 needs a live WebKit page and moved to the hands-on checks in cameronsjo/herdr-app#1.
 
+## Markdown viewer
+
+Added 2026-11-16, as a mod (no Rust).
+
+- `defaults/mods/markdown/` (fork-only): a pane that renders a markdown file with `TextView.markdown`, follows its saves (a folder watch plus a 10-second poll on this computer, a 5-second poll on another machine) and toggles to the raw source. Open it with `pane.split {direction, mod: "markdown", props: {file, on?}}`; `file` must be absolute.
+- `defaults/mods/files/main.js`: `.md` and `.markdown` previews render instead of showing raw text, with an **Open** button that splits the markdown pane beside the focused terminal (`FORK(markdown)` lines).
+- `defaults/AGENTS.md`: one `FORK(markdown)` sentence naming the mod in the list of shipped mods.
+- `scripts/fork-mods.test.ts` (fork-only, run by `fork-mods.yml`): two tests for the pane's path rule.
+
 ## Updates and automation
 
 Added 2026-11-15; setup order and the routine's prompt: `docs/fork/weekly-sync.md`.

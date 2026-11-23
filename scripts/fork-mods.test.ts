@@ -687,3 +687,27 @@ test("palette: direction families are one row until you type", async () => {
   expect(go(empty[1])).toBe(true);
   expect(opened.at(-1)).toMatchObject({ mod: "pick-direction", props: { command: "pane.split", title: "Split pane", dirs: ["right", "down"] } });
 });
+
+// FORK(markdown): the markdown pane's path rule (defaults/mods/markdown).
+async function markdownTarget(p: unknown) {
+  const { target } = await load("markdown", ["target"], { props: () => p, home: () => "/home/me" });
+  return target();
+}
+
+test("markdown takes absolute and home paths, and refuses relative ones", async () => {
+  expect((await markdownTarget({ file: "/repo/README.md" })).file).toBe("/repo/README.md");
+  expect((await markdownTarget({ file: "~/notes/a.md" })).file).toBe("/home/me/notes/a.md");
+  expect((await markdownTarget({ file: "C:\\repo\\a.md" })).file).toBe("C:\\repo\\a.md");
+  expect((await markdownTarget({ file: "C:/repo/a.md" })).file).toBe("C:/repo/a.md");
+  expect((await markdownTarget({ file: "\\\\server\\share\\a.md" })).file).toBe("\\\\server\\share\\a.md");
+  for (const file of ["README.md", "./a.md", "C:README.md", "\\\\server", "", 7]) expect((await markdownTarget({ file })).file).toBeNull();
+  expect((await markdownTarget(null)).file).toBeNull();
+  // A trailing space can be part of the name.
+  expect((await markdownTarget({ file: "/repo/notes.md " })).file).toBe("/repo/notes.md ");
+});
+
+test("markdown keeps a remote file's machine, and refuses ~ there", async () => {
+  expect(await markdownTarget({ file: "/srv/a.md", on: "vps" })).toEqual({ file: "/srv/a.md", on: "vps", raw: "/srv/a.md" });
+  expect((await markdownTarget({ file: "~/a.md", on: "vps" })).file).toBeNull();
+  expect((await markdownTarget({ file: "/a.md", on: "" })).on).toBeNull();
+});
