@@ -111,8 +111,9 @@ the steps. Moving to Herdr's own browser later: [browser-transition.md](browser-
 ### Keeping it current (`scripts/fork/daily-update`)
 
 `bash scripts/fork/daily-update install` adds a launchd agent that runs a
-copy of the script (`~/.local/share/herdr-fork/daily-update`) every hour; it
-installs each new `fork/master` that passed CI (setup and trust:
+copy of the script (`~/.local/share/herdr-fork/daily-update`) every 15
+minutes (`HERDR_DAILY_INTERVAL=<seconds>` at install sets another interval,
+at least 60; `status` prints the one in effect); it installs each new `fork/master` that passed CI (setup and trust:
 [fork/weekly-sync.md](fork/weekly-sync.md)). `daily-update status` shows what
 is built and installed, and the agent script's sha256 with where it came
 from (`fork/master <sha>` or `install from <checkout> at <sha>`).
@@ -149,7 +150,7 @@ of what is installed (a first install takes a release at most 5 commits behind
 app is the fork's notarized Developer ID build. Anything else is refused,
 logged, and notified once; a GitHub API that does not answer is logged and
 tried again at the next check. Like the main Mac, it installs only while Herdr
-Browser is not running; quit it and the next hourly check installs.
+Browser is not running; quit it and the next check installs.
 
 It does not update its own script on its own. A newer `daily-update` from a
 release is verified, staged and announced; `bash

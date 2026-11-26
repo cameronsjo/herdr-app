@@ -15,9 +15,10 @@
 #   daily-update apply     put the built one in use now: quits Herdr and opens
 #                          it (scripts/browser-daily on; terminals keep running)
 #   daily-update status    what is built, installed, and waiting
-#   daily-update install   add the launchd agent (a check every hour; a local
-#                          build only on AC power, HERDR_DAILY_ANY_POWER=1 on
-#                          battery too)
+#   daily-update install   add the launchd agent (a check every 15 minutes, or
+#                          every HERDR_DAILY_INTERVAL seconds, at least 60; a
+#                          local build only on AC power, HERDR_DAILY_ANY_POWER=1
+#                          on battery too)
 #   daily-update install --download-only
 #                          the same agent on a Mac with no checkout: it only
 #                          downloads, and installs only a notarized Developer ID
@@ -75,6 +76,7 @@ label=dev.herdr.fork.daily-update
 plist="$HOME/Library/LaunchAgents/$label.plist"
 daily="$HOME/Applications/Herdr Browser.app"
 self="$state_dir/daily-update"
+default_interval=900                   # seconds between checks; HERDR_DAILY_INTERVAL at install
 
 export PATH="$HOME/.cargo/bin:$HOME/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 export ZIG="${ZIG:-$HOME/.local/share/mise/installs/zig/0.16.0/bin/zig}"
@@ -205,7 +207,7 @@ fetch_release() {
   # same pins as download-only (verify_attested is the one place they live).
   if ! verify_attested "$dir/$asset" "$sha"; then
     say "${sha:0:8}: $tag's attestation did not verify"
-    # Once per commit, like devid-held: an hourly agent would repeat it every hour.
+    # Once per commit, like devid-held: the agent would repeat it at every check.
     if [[ "$(state_of "$state_dir/attest-failed")" != "$sha" ]]; then
       notify "The downloaded build ${sha:0:8} failed its attestation check, so it was not used; see $log"
       printf '%s\n' "$sha" > "$state_dir/attest-failed"
@@ -697,6 +699,7 @@ cmd_status() {
   echo "installed:      $(cat "$installed_file" 2>/dev/null || echo none) ($daily)"
   if running; then echo "Herdr Browser:  running"; else echo "Herdr Browser:  not running"; fi
   if launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then echo "agent:          loaded ($plist)"; else echo "agent:          not loaded"; fi
+  echo "interval:       $(plist_interval)"
   if [[ -f "$self" ]]; then
     echo "agent script:   sha256 $(shasum -a 256 "$self" | cut -d' ' -f1) ($self)"
     echo "  came from:    $(cat "$script_from" 2>/dev/null || echo "unknown (installed before this was recorded)")"
@@ -706,7 +709,26 @@ cmd_status() {
   echo "log:            $log"
 }
 
+# The check interval the installed agent runs at, as written in its plist.
+plist_interval() {
+  local secs
+  secs=$(sed -n 's|.*<key>StartInterval</key><integer>\([0-9]*\)</integer>.*|\1|p' "$plist" 2>/dev/null || true)
+  if [[ -n $secs ]]; then echo "every $(describe_interval "$secs") ($secs s)"; else echo "none (no agent plist)"; fi
+}
+describe_interval() {
+  if (( $1 % 3600 == 0 )); then echo "$(( $1 / 3600 )) h"
+  elif (( $1 % 60 == 0 )); then echo "$(( $1 / 60 )) min"
+  else echo "$1 s"; fi
+}
+
 cmd_install() {
+  local interval=${HERDR_DAILY_INTERVAL:-$default_interval}
+  # A check makes a few API calls and launchd won't start a job more often
+  # than every 10 s, so a minute is the floor; whole seconds only.
+  if ! [[ $interval =~ ^[0-9]+$ ]] || (( 10#$interval < 60 )); then
+    echo "daily-update: HERDR_DAILY_INTERVAL must be whole seconds, at least 60 (got '$interval')" >&2; exit 2
+  fi
+  interval=$(( 10#$interval ))
   mkdir -p "$(dirname "$plist")" "$(dirname "$log")"
   if [[ -n $download_only ]]; then
     # install --download-only [<sha>]: with <sha>, the agent's copy must verify
@@ -743,7 +765,7 @@ cmd_install() {
   <key>ProgramArguments</key>
   <array><string>/bin/bash</string><string>$self</string><string>check</string></array>
   <key>WorkingDirectory</key><string>$HOME</string>
-  <key>StartInterval</key><integer>3600</integer>
+  <key>StartInterval</key><integer>$interval</integer>
   <key>StandardOutPath</key><string>$log</string>
   <key>StandardErrorPath</key><string>$log</string>
   <key>LowPriorityIO</key><true/>
@@ -761,10 +783,10 @@ PLIST
     sleep 1
   done
   if [[ -n $download_only ]]; then
-    echo "installed: $plist (download-only, a check every hour); log $log"
+    echo "installed: $plist (download-only, a check every $(describe_interval "$interval")); log $log"
     echo "first check now: bash $self check"
   else
-    echo "installed: $plist (a check every hour; local builds on AC power only); log $log"
+    echo "installed: $plist (a check every $(describe_interval "$interval"); local builds on AC power only); log $log"
     echo "first build now: bash $self check"
   fi
 }
@@ -783,5 +805,5 @@ case "${1:-}" in
   adopt) cmd_adopt "${2:-}" ;;
   verify) cmd_verify "${2:-}" "${3:-}" ;;
   uninstall) cmd_uninstall ;;
-  *) sed -n '2,29p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  *) sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
