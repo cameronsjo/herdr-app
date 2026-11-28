@@ -13,6 +13,7 @@ Output of `scripts/fork/seams` at each sync, so growth is visible.
 | 2026-11-15 | `8e1208d` (synced, `bf9b67c`) | 761 | 23 | 45 | 51 |
 | 2026-11-18 | `5b32e12` (synced) | 951 | 30 | 85 | 148 |
 | 2026-11-23 | `a751b75` (synced) | 1077 | 32 | 97 | 157 |
+| 2026-11-27 | `4c14b47` (synced) | 1080 | 33 | 99 | 165 |
 
 ## Unmarked seams
 
@@ -31,6 +32,29 @@ Exceptions to `CLAUDE.md` rule 4, each with its reason.
 ## Upstream syncs
 
 Conflict decisions per sync, under a dated heading: file, what each side changed, what was kept and why.
+
+### 2026-11-27: `a751b75` → `4c14b47` (47 commits, upstream 0.1.18)
+
+Manual sync on top of `#74` (`407a9d7`). Supply-chain review: **HELD (workflow change only)**. Upstream moved the mod runtime out of `vendor/gpui-kit/crates/shell` into workspace crate `crates/herdr-shell` (`herdr-shell`), updated `.github/workflows/ci.yml` to run `-p herdr-shell` tests on Linux, bumped to 0.1.18, and added mod command palette entries (`modPalettes`), `agent.select`, `pickFiles`, terminal row/selection/key APIs, markdown editor highlighting, pane veiling, and Kitty graphics fixes. No changes to `build.rs`, signing files, or agent configuration (`CLAUDE.md`, `.claude/`, `.mcp.json`).
+
+No upstream renames of fork-touched files. 9 conflicted files (17 hunks) plus 3 fork-only files updated from `gpui_shell` to `herdr_shell`; `log_safe`, `log_escaped` and `public_url` call sites in `src/browser/`, `src/window.rs`, `src/window/fork_browser.rs`: 108 before, 108 after.
+
+| File | Upstream | Fork | Kept |
+|---|---|---|---|
+| `justfile` | `cargo test --locked -p herdr-app -p herdr-shell` | `bun test scripts/fork-mods.test.ts` | both |
+| `src/main.rs` | `herdr_shell::host::main_with_components(herdr_shell::FrozenComponentRegistry::default())` | `browser::element::components()` | upstream's `herdr_shell` crate name with the fork's `browser::element::components()` |
+| `src/mods.rs` | `herdr_shell::type_declarations(&herdr_shell::FrozenComponentRegistry::default())` | `&crate::browser::element::components()` | upstream's `herdr_shell` crate name with the fork's `browser::element::components()` |
+| `src/commands.rs` | expanded `terminal.kill` doc (sparing branches with a pane or `herdr.space` label) | `FORK(browser)` command entries | upstream's `terminal.kill` line plus all `FORK(browser)` commands |
+| `src/window.rs` | `render_block` and `render_node` gained `rendered_dividers: &mut HashSet<(String, usize)>` | `fork_render_browser` early return and `fork_with_agent_watch` wrapper | upstream's signatures and `rendered_dividers` plumbing plus both fork seams |
+| `src/mods/render_tests.rs` | `terminalRows` in `fixture`; `RootedView` switched to `herdr_shell::ShellRoot` | `browsers` in `fixture`; `font_picker_lists_every_installed_font` test | both fixture keys; fork font-picker test updated to `herdr_shell::init`; upstream's `RootedView` |
+| `defaults/AGENTS.md` | updated `{ "agent": "focused" }` prose and `agent.select {index}` | `browser-prototype` block note and `FORK(browser)` commands block | both |
+| `defaults/herdr.d.ts` | `agent.select {index}` and updated `setAgentOrder` doc | `FORK(browser)` commands, `BrowserInfo`, `browsers()` | both |
+| `defaults/frame/palette/main.js` | `modPalettes(appHome())`, `"Mod"` group, `layout.clone` `!e.args.name` guard | `fork.js` direction chooser and mod commands (`"Mods"` group) | both: upstream's `modPalettes` fed into `fork.entries(entries(this.mods), ...)`, `"Mod"` + `"Mods"` in `GROUPS`, upstream's `layout.clone` guard inside `!fork.go(e)` |
+| `src/browser/element.rs`, `src/mods/render_tests/fork_{agents,palette}.rs` (fork-only, no conflict) | `gpui-shell` crate renamed to `herdr-shell` | `gpui_shell::` imports/calls | updated `gpui_shell::` to `herdr_shell::` |
+| `defaults/frame/palette/fork.js` (fork-only, no conflict) | `palette_lists_the_entries_mods_declare_in_their_mod_json` expects `fs.readFile`, not `readTextFile`, when reading under `appHome` | `load()` called `readTextFile` unconditionally | use `fs.readFile` when `fs.readdir` succeeded, keeping `readTextFile` for the `ls`/`dir` fallback |
+| `Cargo.lock`, `THIRD-PARTY-NOTICES` | | | upstream's, then regenerated |
+
+Footprint: 1080 lines in 33 upstream files (`crates/herdr-shell/src/engine/quickjs/mod.rs` is the moved `vendor/gpui-kit` fork patch).
 
 ### 2026-11-23: `5b32e12` → `a751b75` (36 commits, upstream 0.1.17)
 

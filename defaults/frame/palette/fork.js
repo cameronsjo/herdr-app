@@ -58,19 +58,20 @@ export function commandsOf(mod, manifest) {
   return out;
 }
 
-// The folder's entries. Mods may read only under the home folder, so an app home
-// set elsewhere (HERDR_APP_HOME) is listed by `ls`, or `dir` on Windows.
+// The folder's entries, and whether `fs` could read the directory directly.
+// Mods may read only under the home/app folder, so an app home set elsewhere
+// (HERDR_APP_HOME) is listed by `ls`, or `dir` on Windows, and read via `readTextFile`.
 async function folders(dir) {
   try {
-    return await fs.readdir(dir);
+    return { entries: await fs.readdir(dir), direct: typeof fs.readFile === "function" };
   } catch (e) {
     if (win()?.platform !== "windows") {
       const out = await exec("ls", ["-1A", "--", dir]);
-      if (out.code === 0) return out.stdout.split("\n");
+      if (out.code === 0) return { entries: out.stdout.split("\n"), direct: false };
     } else if (!/[&|<>^%!"()]/.test(dir)) {
       // cmd parses its line again: a path with its special characters isn't listed.
       const out = await exec("cmd", ["/d", "/c", "dir", "/b", "/ad", dir.replace(/\//g, "\\")]);
-      if (out.code === 0) return out.stdout.split(/\r?\n/);
+      if (out.code === 0) return { entries: out.stdout.split(/\r?\n/), direct: false };
     }
     throw e;
   }
@@ -83,10 +84,14 @@ export async function load(done) {
   try {
     const root = `${appHome().replace(/[\\/]+$/, "")}/mods`;
     const taken = appSpaces();
-    const names = (await folders(root)).filter((n) => listable(n, taken)).sort().slice(0, 200);
+    const { entries, direct } = await folders(root);
+    const names = entries.filter((n) => listable(n, taken)).sort().slice(0, 200);
     const found = [];
     for (const mod of names) {
-      const raw = await readTextFile(`${root}/${mod}/mod.json`).catch(() => null);
+      const path = `${root}/${mod}/mod.json`;
+      const raw = direct
+        ? await fs.readFile(path, "utf8").catch(() => null)
+        : await readTextFile(path).catch(() => null);
       if (!raw || raw.length > 65536) continue;
       try { found.push(...commandsOf(mod, JSON.parse(raw))); } catch {}
     }

@@ -36,7 +36,7 @@
 use std::{cell::RefCell, collections::HashMap, sync::Arc};
 
 use gpui::{AnyElement, Bounds, ParentElement as _, Pixels, Point, Size, Styled as _, canvas, div};
-use gpui_shell::{
+use herdr_shell::{
     ArgumentDescriptor, ArgumentSchema, COMPONENT_REGISTRY_API_VERSION, ComponentArgument, ComponentDescriptor, ComponentMaterializer, ComponentPayload,
     ComponentRegistry, ConstructorDescriptor, FrozenComponentRegistry, MaterializeRequest, RegistryError,
 };

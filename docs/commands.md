@@ -188,7 +188,7 @@ Pin an agent to the top of the agent lists (pinned true) or unpin it (false). Pi
 
 ## `terminal.kill`
 
-End a terminal and its sub-agents.
+End a terminal and its sub-agents. Spare branches whose first sub-agent has a pane or a herdr.space label. Core still applies parent-lifetime rules.
 
 | Argument | Required |
 |---|---|
@@ -439,12 +439,13 @@ Select a terminal's whole screen and scrollback (default: the focused one), read
 
 ## `terminal.select`
 
-Start a terminal selection (default: the focused one), replacing the old selection. at defaults to "cursor" or takes {row, col}: zero-based cells, rows from the top of the history including the active screen. mode is "cell" (default), "word" or "line" (like double/triple click). Mods read the inclusive endpoints from focused().selection or terminals(); selection.end is the moving end.
+Start a terminal selection (default: the focused one), replacing the old selection. at defaults to "cursor" or takes {row, col}: zero-based cells, rows from the top of the history including the active screen. mode is "cell" (default), "word" or "line" (like double/triple click). With to: {row, col}, the endpoints are exact and the view follows to. Line mode with to selects whole screen rows. Mods read the inclusive endpoints from focused().selection or terminals(); selection.end is the moving end.
 
 | Argument | Required |
 |---|---|
 | `terminal` | no |
 | `at` | no |
+| `to` | no |
 | `mode` | no |
 
 ## `terminal.adjust_selection`
@@ -479,6 +480,15 @@ Scroll a terminal's view of its history (default: the focused one). Give exactly
 | `lines` | no |
 | `pages` | no |
 | `to` | no |
+| `terminal` | no |
+
+## `terminal.send_key`
+
+Send one key in keys.json syntax, such as ctrl-b, to a terminal (default: the focused one). It uses the program's current keyboard mode and goes through the same connection as typing. The terminal must have a view.
+
+| Argument | Required |
+|---|---|
+| `keys` | yes |
 | `terminal` | no |
 
 ## `terminal.paste`
@@ -518,6 +528,14 @@ No arguments.
 Show the previous agent.
 
 No arguments.
+
+## `agent.select`
+
+Show an agent by position (1 = first), in the same navigation order as `agent.next`.
+
+| Argument | Required |
+|---|---|
+| `index` | yes |
 
 ## `layout.switch`
 
