@@ -726,7 +726,7 @@ impl AppWindow {
         let owns = self.fork.browsers.owns(&n.id, browser);
         let b = browser.to_owned();
         let body = if let Some(root) = root.filter(|_| !self.fork.prototype_edited && self.fork.browsers.drawn_by_mod(&n.id, browser)) {
-            let place = owns.then(|| canvas(|_, _, _| {}, move |bounds, _, window, _| crate::browser::place(&b, bounds, window)).absolute().size_full());
+            let place = owns.then(|| canvas(|_, _, _| {}, move |bounds, _, window, _| crate::browser::place(&b, bounds, window)).absolute().inset_0());
             // The mod's root as `render_slot` draws a pane mod, without its
             // click handler: that one focuses the pane as a mod that keeps the
             // keyboard (publish, save), and the handler below would at once undo
@@ -746,7 +746,7 @@ impl AppWindow {
             // The window's own placeholder. Also when the mod didn't load (the mods' VM
             // failed, a broken edit) or was edited: the page then fills the body, so it
             // never depends on the mod runtime or code Herdr didn't ship.
-            let fill = owns.then(|| canvas(|_, _, _| {}, move |bounds, _, window, _| crate::browser::place_whole(&b, bounds, window)).absolute().size_full());
+            let fill = owns.then(|| canvas(|_, _, _| {}, move |bounds, _, window, _| crate::browser::place_whole(&b, bounds, window)).absolute().inset_0());
             div().size_full().relative().child(self.fork.browsers.element(&n.id, browser, url, look)).children(fill).into_any_element()
         };
         div()
@@ -888,6 +888,18 @@ mod window_tests {
             // It loaded: `herdr-native` (nativeView) resolves in the mods' VM.
             assert!(page.root.is_some() && page.error.is_none(), "browser-prototype did not load: {:?}", page.error);
             assert!(super::missing_mods("browsers").iter().all(|m| m != BROWSER_MOD), "the mod ships with Herdr");
+        });
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        if crate::browser::AVAILABLE {
+            // Regression (cameronsjo/herdr-app#68): the placement canvas must sit on the block
+            // (inset_0), not below it at its static flex position, so nativeView's report lands inside.
+            let (offset, size) = crate::browser::element::debug_held("b1").expect("nativeView placed b1 inside its block");
+            assert_eq!(offset, gpui::point(gpui::px(0.0), gpui::px(0.0)));
+            assert!(size.width > gpui::px(0.0) && size.height > gpui::px(0.0), "non-empty spot: {size:?}");
+        }
+        view.update(cx, |this, _| {
+            let (_, shown) = this.visible();
             // No copy's props hold a page's url, the float's included.
             let owned = this.owned_mods();
             for (slot, i) in shown.iter().map(|(s, i)| (s, i)).chain(owned.iter()) {
