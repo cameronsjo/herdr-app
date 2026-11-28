@@ -713,7 +713,9 @@ cmd_status() {
 plist_interval() {
   local secs
   secs=$(sed -n 's|.*<key>StartInterval</key><integer>\([0-9]*\)</integer>.*|\1|p' "$plist" 2>/dev/null || true)
-  if [[ -n $secs ]]; then echo "every $(describe_interval "$secs") ($secs s)"; else echo "none (no agent plist)"; fi
+  if [[ -z $secs ]]; then echo "none (no agent plist)"; return; fi
+  if launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then echo "every $(describe_interval "$secs") ($secs s)"
+  else echo "every $(describe_interval "$secs") ($secs s) once the agent is loaded"; fi
 }
 describe_interval() {
   if (( $1 % 3600 == 0 )); then echo "$(( $1 / 3600 )) h"
@@ -725,8 +727,8 @@ cmd_install() {
   local interval=${HERDR_DAILY_INTERVAL:-$default_interval}
   # A check makes a few API calls and launchd won't start a job more often
   # than every 10 s, so a minute is the floor; whole seconds only.
-  if ! [[ $interval =~ ^[0-9]+$ ]] || (( 10#$interval < 60 )); then
-    echo "daily-update: HERDR_DAILY_INTERVAL must be whole seconds, at least 60 (got '$interval')" >&2; exit 2
+  if ! [[ $interval =~ ^[0-9]{1,7}$ ]] || (( 10#$interval < 60 )); then
+    echo "daily-update: HERDR_DAILY_INTERVAL must be whole seconds, 60 to 9999999 (got '$interval')" >&2; exit 2
   fi
   interval=$(( 10#$interval ))
   mkdir -p "$(dirname "$plist")" "$(dirname "$log")"

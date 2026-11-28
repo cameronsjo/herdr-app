@@ -146,7 +146,7 @@ case "$1" in
   find-generic-password) [ -n "\${STUB_KEYCHAIN:-}" ] || exit 44; case " $* " in *" -w "*) echo "$STUB_KEYCHAIN" ;; esac ;;
   *) exit 0 ;;
 esac`);
-  stub("launchctl", `echo "launchctl $*" >> "$HOME/launchctl.log"`);
+  stub("launchctl", `echo "launchctl $*" >> "$HOME/launchctl.log"\n[ "$1" != print ] || [ -z "\${STUB_NOT_LOADED:-}" ]`);
   stub("plutil", `exit 0`);
   // mv: real, except moving the new app in when STUB_MV_FAIL is set.
   const realMv = existsSync("/bin/mv") ? "/bin/mv" : "/usr/bin/mv";
@@ -564,14 +564,19 @@ test.skipIf(skip)("HERDR_DAILY_INTERVAL sets the plist's interval", () => {
 });
 
 test.skipIf(skip)("an interval under a minute or not in whole seconds is refused, and no plist is written", () => {
-  for (const bad of ["59", "15m", "-900", "0x3c"]) {
+  for (const bad of ["59", "15m", "-900", "0x3c", "99999999999999999999"]) {
     const r = run(["install", "--download-only"], { HERDR_DAILY_INTERVAL: bad });
     expect(r.code).toBe(2);
-    expect(r.out).toContain("HERDR_DAILY_INTERVAL must be whole seconds, at least 60");
+    expect(r.out).toContain("HERDR_DAILY_INTERVAL must be whole seconds, 60 to 9999999");
     expect(existsSync(plistPath())).toBe(false);
   }
 });
 
 test.skipIf(skip)("status without an installed agent says there is no interval", () => {
   expect(run(["status"]).out).toContain("interval:       none (no agent plist)");
+});
+
+test.skipIf(skip)("status says when the plist's interval is not running yet", () => {
+  expect(run(["install", "--download-only"]).code).toBe(0);
+  expect(run(["status"], { STUB_NOT_LOADED: "1" }).out).toContain("interval:       every 15 min (900 s) once the agent is loaded");
 });
