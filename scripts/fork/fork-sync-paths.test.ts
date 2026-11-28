@@ -2,7 +2,7 @@
 // script is taken from the workflow file as is and run against a gh stand-in
 // that lists the PR's files, with the event fields the workflow passes in env.
 import { test, expect, beforeAll, afterAll } from "bun:test";
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, chmodSync, mkdirSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, chmodSync, mkdirSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -12,11 +12,19 @@ const yml = readFileSync(WORKFLOW, "utf8");
 const skip = process.platform === "win32";
 let dir = "";
 
+// The n-th `run: |` block of the workflow, its 10-space indent removed; it ends
+// at the first line indented less.
+function runBlock(n: number) {
+  const lines = yml.split("        run: |\n")[n].split("\n");
+  const end = lines.findIndex((l) => l.trim() !== "" && !l.startsWith("          "));
+  return lines.slice(0, end < 0 ? undefined : end).map((l) => l.slice(10)).join("\n") + "\n";
+}
+
 beforeAll(() => {
   if (skip) return;
   dir = mkdtempSync(join(tmpdir(), "fork-sync-paths-test-"));
-  const run = yml.split("        run: |\n")[1];
-  writeFileSync(join(dir, "step.sh"), run.split("\n").map((l) => l.slice(10)).join("\n"));
+  writeFileSync(join(dir, "step.sh"), runBlock(1));
+  writeFileSync(join(dir, "report.sh"), runBlock(2));
   mkdirSync(join(dir, "bin"));
   writeFileSync(join(dir, "bin/gh"), `#!/bin/bash\necho "$*" >> "${dir}/gh.log"\nprintf '%b\\n' "$STUB_FILES"\n`);
   chmodSync(join(dir, "bin/gh"), 0o755);
@@ -29,6 +37,7 @@ function check(pr: Pr) {
     encoding: "utf8",
     env: {
       PATH: `${join(dir, "bin")}:${process.env.PATH}`,
+      RUNNER_TEMP: dir,
       REPO: "cameronsjo/herdr-app", PR: "7",
       HEAD_REF: pr.ref ?? "fix/thing", HEAD_REPO: pr.repo ?? "cameronsjo/herdr-app", TITLE: pr.title ?? "fix: a thing",
       AUTO_MERGE: pr.auto ? "true" : "false",
@@ -97,4 +106,65 @@ test.skipIf(skip)("the title is data, never run", () => {
   const r = check({ title: '$(echo PWNED >&2)"; exit 0', ref: "claude/x", files: ["scripts/fork/x"] });
   expect(r.code).toBe(1);
   expect(r.out).not.toContain("PWNED");
+});
+
+// The App step: a curl stand-in answers the installation and token calls and
+// keeps what is posted; the JWT must verify against the App's public key.
+function report(outcome: string, text = "rules said this\n") {
+  writeFileSync(join(dir, "sync-paths.txt"), text);
+  writeFileSync(join(dir, "bin/curl"), `#!/bin/bash
+echo "$*" >> "${dir}/curl.log"
+for a in "$@"; do case "$a" in "Authorization: Bearer "*) echo "\${a#Authorization: Bearer }" > "${dir}/last-bearer" ;; esac; done
+case "$*" in
+  *"/repos/cameronsjo/herdr-app/installation"*) echo '{"id": 42}' ;;
+  *"/app/installations/42/access_tokens"*) printf '%s' "\${@: -1}" > "${dir}/token-request"; echo '{"token": "ghs_test"}' ;;
+  *"/check-runs"*) cat > "${dir}/posted" ;;
+  *) echo "curl stub: unexpected: $*" >&2; exit 3 ;;
+esac`);
+  chmodSync(join(dir, "bin/curl"), 0o755);
+  const r = spawnSync("bash", [join(dir, "report.sh")], {
+    encoding: "utf8",
+    env: {
+      PATH: `${join(dir, "bin")}:${process.env.PATH}`, RUNNER_TEMP: dir,
+      APP_ID: "123456", APP_KEY: readFileSync(join(dir, "test-key.pem"), "utf8"),
+      REPO: "cameronsjo/herdr-app", HEAD_SHA: "a".repeat(40), OUTCOME: outcome, RUN_URL: "https://example.invalid/run/1",
+    },
+  });
+  return { code: r.status, out: (r.stdout ?? "") + (r.stderr ?? "") };
+}
+
+test.skipIf(skip)("the App step posts the rules' outcome as sync-paths on the PR head, with a token for checks alone", () => {
+  const g = spawnSync("openssl", ["genrsa", "-out", join(dir, "test-key.pem"), "2048"], { encoding: "utf8" });
+  expect(g.status, g.stderr).toBe(0);
+  spawnSync("openssl", ["rsa", "-in", join(dir, "test-key.pem"), "-pubout", "-out", join(dir, "test-key.pub")]);
+  for (const [outcome, want] of [["success", "success"], ["failure", "failure"], ["cancelled", "failure"]]) {
+    const r = report(outcome);
+    expect(r.code).toBe(0);
+    const posted = JSON.parse(readFileSync(join(dir, "posted"), "utf8"));
+    expect(posted.name).toBe("sync-paths");
+    expect(posted.head_sha).toBe("a".repeat(40));
+    expect(posted.conclusion).toBe(want);
+    expect(posted.output.text).toContain("rules said this");
+  }
+  expect(JSON.parse(readFileSync(join(dir, "token-request"), "utf8"))).toEqual({ repositories: ["herdr-app"], permissions: { checks: "write" } });
+  expect(readFileSync(join(dir, "last-bearer"), "utf8").trim()).toBe("ghs_test");
+  // The JWT the step signed (the bearer of the installation call) verifies and names the App.
+  const jwt = readFileSync(join(dir, "curl.log"), "utf8").match(/Authorization: Bearer (\S+\.\S+\.\S+) https:\/\/api\.github\.com\/repos\/cameronsjo\/herdr-app\/installation/)![1];
+  const [h, p, sig] = jwt.split(".");
+  const unb64 = (x: string) => Buffer.from(x.replace(/-/g, "+").replace(/_/g, "/"), "base64");
+  expect(JSON.parse(unb64(p).toString()).iss).toBe("123456");
+  writeFileSync(join(dir, "jwt.in"), `${h}.${p}`);
+  writeFileSync(join(dir, "jwt.sig"), unb64(sig));
+  const v = spawnSync("openssl", ["dgst", "-sha256", "-verify", join(dir, "test-key.pub"), "-signature", join(dir, "jwt.sig"), join(dir, "jwt.in")], { encoding: "utf8" });
+  expect(v.stdout).toContain("Verified OK");
+  // The step removes the key file it wrote.
+  expect(existsSync(join(dir, "app.pem"))).toBe(false);
+});
+
+test("the App's key is read only in the step that posts, and only from the master-only environment", () => {
+  expect(yml).toContain("environment: sync-paths-app");
+  expect(yml.match(/secrets\.SYNC_PATHS_APP_KEY/g)?.length).toBe(1);
+  expect(yml).toContain("if: ${{ always() && vars.SYNC_PATHS_APP_ID != '' }}");
+  // The Actions job still fails on its own, so the check stays meaningful before the App is set up.
+  expect(yml).toContain("if: ${{ always() && steps.rules.outcome != 'success' }}");
 });

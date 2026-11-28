@@ -12,10 +12,13 @@
 # the files API lists at most 3000, so the check could not see them all.
 #
 # pull_request_target, so the job that runs is master's copy of this file, and
-# it checks out nothing and runs no code from the PR. It catches accidents, not
-# a hostile change: a required check reported by GitHub Actions can be faked by
-# a workflow in a same-repo PR that reports a job of the same name
-# (docs/fork/weekly-sync.md § Trust).
+# it checks out nothing and runs no code from the PR. Reported by GitHub Actions
+# alone, it catches accidents, not a hostile change: a workflow in a same-repo
+# PR can report a job of the same name. So once the fork's own GitHub App is set
+# up (docs/fork/sync-paths-app.md), the result is also posted as that App's
+# `sync-paths` check run, and the ruleset requires the App's. Its key lives in
+# the `sync-paths-app` environment, which only master may deploy to, so no PR
+# workflow can read it (docs/fork/weekly-sync.md § Trust).
 name: fork-sync-paths
 
 on:
@@ -34,8 +37,11 @@ jobs:
   sync-paths:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    environment: sync-paths-app
     steps:
       - name: PRs that merge without a person leave the protected paths alone
+        id: rules
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -48,6 +54,8 @@ jobs:
           TITLE: ${{ github.event.pull_request.title }}
         run: |
           set -euo pipefail
+          # The App's check run shows the same text (the report step below).
+          exec > >(tee -a "$RUNNER_TEMP/sync-paths.txt") 2>&1
           if [[ ! $CHANGED_FILES =~ ^[0-9]+$ ]] || (( CHANGED_FILES >= 3000 )); then
             echo "::error::This PR changes ${CHANGED_FILES} files; the files API lists at most 3000, so this check cannot see them all. Split it, or Cameron merges it with the admin bypass." >&2
             exit 1
@@ -78,3 +86,45 @@ jobs:
             printf '  %s\n' "${hit[@]}"
           } >&2
           exit 1
+
+      # As the fork's App, which a PR's workflow can't post as. Skipped until
+      # SYNC_PATHS_APP_ID is set; the key is read by this step alone.
+      - name: Post the result as the sync-paths App
+        if: ${{ always() && vars.SYNC_PATHS_APP_ID != '' }}
+        env:
+          APP_ID: ${{ vars.SYNC_PATHS_APP_ID }}
+          APP_KEY: ${{ secrets.SYNC_PATHS_APP_KEY }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          OUTCOME: ${{ steps.rules.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          [[ -n $APP_KEY ]] || { echo "::error::SYNC_PATHS_APP_KEY is not in the sync-paths-app environment"; exit 1; }
+          key=$RUNNER_TEMP/app.pem
+          (umask 077; printf '%s\n' "$APP_KEY" > "$key")
+          b64() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+          now=$(date +%s)
+          header=$(printf '{"alg":"RS256","typ":"JWT"}' | b64)
+          payload=$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' $((now - 60)) $((now + 540)) "$APP_ID" | b64)
+          sig=$(printf '%s.%s' "$header" "$payload" | openssl dgst -sha256 -sign "$key" -binary | b64)
+          rm -f "$key"
+          jwt="$header.$payload.$sig"
+          api() { curl -fsS -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" "$@"; }
+          inst=$(api -H "Authorization: Bearer $jwt" "https://api.github.com/repos/$REPO/installation" | jq -r .id)
+          # A token for this repo only, allowed to write check runs and nothing else.
+          token=$(api -X POST -H "Authorization: Bearer $jwt" "https://api.github.com/app/installations/$inst/access_tokens" \
+            -d "$(jq -nc --arg r "${REPO#*/}" '{repositories: [$r], permissions: {checks: "write"}}')" | jq -r .token)
+          echo "::add-mask::$token"
+          conclusion=failure
+          [[ $OUTCOME == success ]] && conclusion=success
+          text=$(tail -c 60000 "$RUNNER_TEMP/sync-paths.txt" 2>/dev/null || true)
+          jq -n --arg sha "$HEAD_SHA" --arg c "$conclusion" --arg url "$RUN_URL" --arg text "$text" \
+            '{name: "sync-paths", head_sha: $sha, status: "completed", conclusion: $c, details_url: $url,
+              output: {title: ("sync-paths: " + $c), summary: "Protected paths on PRs that merge without a person (.github/workflows/fork-sync-paths.yml).", text: ("```\n" + $text + "\n```")}}' |
+            api -X POST -H "Authorization: Bearer $token" "https://api.github.com/repos/$REPO/check-runs" -d @- >/dev/null
+          echo "posted sync-paths: $conclusion as app $APP_ID"
+
+      - name: Fail when the rules failed
+        if: ${{ always() && steps.rules.outcome != 'success' }}
+        run: exit 1
