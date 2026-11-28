@@ -41,6 +41,13 @@ export function knownAgents(options?: { on?: string | null }): Promise<(Program 
  *  when the person cancels. `prompt`: the confirm button's text (default "Open"). */
 export function pickFolder(options?: { prompt?: string }): Promise<string | null>;
 
+/** Opens the system's file picker (this machine). Resolves with the chosen files' absolute
+ *  paths, in the order the picker gives them, or null when the person cancels.
+ *  Rejects if the picker fails or a selected file path cannot be represented as a string.
+ *  `prompt`: the confirm button's text (default "Open"). `multiple`: allow several files
+ *  (default false). */
+export function pickFiles(options?: { prompt?: string; multiple?: boolean }): Promise<string[] | null>;
+
 /** Plays "done" or "blocked" (the attention sounds, or the files settings.json names), or an MP3
  *  file (absolute, or relative to ~/.config/herdr-app). */
 export function playSound(sound: string): null;
@@ -70,7 +77,10 @@ export function playSound(sound: string): null;
  *   terminal.park {terminal} (its pane goes, it keeps running; the menu's "Send back"),
  *   terminal.peek {terminal} (peek over the tab, with keep-as-tab and close),
  *   terminal.show {terminal?, pane?} (shown in the pane for now, in place of its own), terminal.copy, terminal.paste,
- *   terminal.select {terminal?, at?: {row, col} | "cursor", mode?: "cell" | "word" | "line"} (replaces the selection; defaults to cursor and cell).
+ *   terminal.send_key {keys: string, terminal?} (one key in keys.json syntax, default: focused terminal, encoded in its current keyboard mode).
+ *   terminal.select {terminal?, at?: {row, col} | "cursor", to?: {row, col}, mode?: "cell" | "word" | "line"} (replaces the selection; defaults to cursor and cell).
+ *     With to, the view follows the exact moving end. Line mode with to covers whole screen rows,
+ *     including blank and soft-wrapped rows. Without to, word and line act like double and triple click.
  *   terminal.adjust_selection {terminal?, direction: "left" | "right" | "up" | "down" | "page_up" | "page_down" | "home" | "end" | "line_start" | "line_end"} (moves the inclusive moving end; view follows; fails without selection).
  *   terminal.clear_selection {terminal?}. No default keys or built-in copy mode.
  *   terminal.select_all {terminal?} (whole screen and scrollback, or only the alternate screen; Cmd+A on macOS).
@@ -81,7 +91,7 @@ export function playSound(sound: string): null;
  *   browser.open_external {browser?} (the page in the default web browser; http and https only),
  *   browser.agent_browser_setup {} (adds Herdr's provider to ~/.agent-browser/config.json for terminals older than this Herdr),
  *   browser.agent_access {browser, on: false} (only the person's click in the pane turns it on).
- * Agents: agent.next, agent.prev (the agents list's order), agent.focus {terminal} (sub-agents too).
+ * Agents: agent.next, agent.prev, agent.select {index} (1 = first), agent.focus {terminal} (sub-agents too).
  * Layout (the shown layout's nodes by id): layout.toggle|show|hide {id}, layout.resize {id, px | weight},
  *   layout.select {stack, child}, layout.set {layout} (personal trees; shipped layouts: click/look fields only), layout.switch {name?} (no name: the next one).
  *   layout.clone {name, as?} duplicates and switches; mod.clone {name, as?} duplicates a mod.
@@ -183,6 +193,10 @@ export interface AgentInfo {
   /** "done" means it finished while you weren't looking; it becomes "idle" once you look
    *  (here or on another Herdr client). */
   status: Status;
+  /** Epoch milliseconds when the agent's reported state last changed.
+   *  Looking at a done agent leaves this alone. Null if the core omits the initial
+   *  time (as with older cores for remote agents). */
+  since: number | null;
   /** What the agent reported (OSC 7501 `app`), e.g. "claude-code", "pi", "codex". */
   app: string | null;
   program: Program;
@@ -287,9 +301,10 @@ export interface BrowserInfo {
 /** Every open browser (macOS builds with the `browser` feature; empty elsewhere). Live. */
 export function browsers(): BrowserInfo[];
 
-/** Sets agent.next / agent.prev order to match the list a mod displays.
- *  Call when rendering the list. In memory only; missing agents are ignored, new agents
- *  are appended in model order. Without a supplied order, navigation uses model order. */
+/** Sets the navigation order for agent.next, agent.prev and agent.select.
+ *  Call when rendering the list. The last order stays in memory until another call or app restart.
+ *  Missing agents drop out of the order. Unlisted agents follow in model order.
+ *  Without a supplied order, navigation uses model order. */
 export function setAgentOrder(addresses: string[]): null;
 
 /** Every core terminal as `hc ls --json` describes it (address, argv, name, template, parent,
@@ -300,6 +315,16 @@ export function setAgentOrder(addresses: string[]): null;
  *  selection is null when absent or without an attached view. Updates when selection changes,
  *  not on cursor motion or output. Start at the cursor with terminal.select and read selection.end. Live. */
 export function terminals(): (Record<string, any> & TerminalSelectionState)[];
+
+/** Reads up to 128 rows from an attached terminal view, or returns null without a view.
+ *  from and count are nonnegative whole numbers. Row numbers match TerminalCell.
+ *  total includes the active screen. wrapped means the row wraps onto the next.
+ *  Empty cells have text ""; wide graphemes occupy two columns. Wide-character spacer
+ *  cells are omitted. Reads do not subscribe to output. */
+export function terminalRows(terminal: string, from: number, count: number): {
+  total: number;
+  rows: { cells: { text: string; wide: boolean }[]; wrapped: boolean }[];
+} | null;
 
 /** Zero-based cells. Rows count from the oldest retained history through the active screen.
  *  Output preserves positions until history is pruned or the grid reflows. */
@@ -337,9 +362,17 @@ export function layouts(): string[];
  *  Mods' own `<mod>.<command>`s aren't listed. */
 export function commands(): { name: string; args: { name: string; required: boolean }[]; about: string }[];
 
-/** The window, for layouts that draw their own title bar (`"titlebar": "none"`). `buttons`:
- *  the system draws no window buttons, so draw them (`window.minimize`, `window.maximize`,
- *  `window.close`); on macOS the traffic lights always stay. Live. */
+/** Live state of the window. With `"titlebar": "none"`, layouts draw their own title bar.
+ *  When `buttons` is true, draw window controls using `window.minimize`, `window.maximize`
+ *  and `window.close`. On macOS the system traffic lights stay.
+ *
+ *  `visible` reports whether the platform is presenting the window. On macOS it is false
+ *  when minimized, hidden, fully covered, on another Space or on a sleeping display.
+ *  On Windows it is false when minimized or hidden. On X11 it is false when unmapped,
+ *  and may be false when fully covered, depending on the window manager. On Wayland it
+ *  stays true unless the compositor reports the xdg-shell `suspended` state (v6 or newer).
+ *  Check it from a timer to pause work when false and use `render` to restart when true.
+ *  Null when there is no window (during `herdr-app check`): read it as `window()?.visible`. */
 export function window(): {
   platform: "linux" | "macos" | "windows";
   titlebar: "system" | "none";
@@ -347,7 +380,8 @@ export function window(): {
   maximized: boolean;
   fullscreen: boolean;
   active: boolean;
-};
+  visible: boolean;
+} | null;
 
 /** Sets the OS window's title, which window switchers, taskbars and time trackers read. The last
  *  call wins, whichever mod made it; null restores "Herdr". It doesn't outlive the app, so set it
@@ -469,6 +503,7 @@ export interface OverlaySpec {
   /** px, or up to 1: a share of the window. */
   width?: number;
   height?: number;
+  /** Window-relative pixels, such as a TextView selection's `position`. */
   at?: "pointer" | { x: number; y: number };
 }
 
@@ -494,7 +529,15 @@ export function notify(n: {
 export interface LinkClick {
   link:
     | { kind: "url"; raw: string; url: string }
-    | { kind: "file"; raw: string; path: string | null };
+    | {
+        kind: "file";
+        raw: string;
+        path: string | null;
+        /** 1-based line from a plain path suffix, if present and valid. */
+        line?: number;
+        /** 1-based column from a plain path suffix, if present and valid and the line is valid. */
+        column?: number;
+      };
   source: {
     terminal: string;
     machine: string | null;
@@ -541,7 +584,7 @@ export function nextCommand(): Promise<string>;
  * Idle watches may be reclaimed to make room; reload when starting a watch.
  * Call cancel() on the returned promise when you stop showing the folder.
  * It resolves with [] and releases this call; other callers keep watching.
- * Closing a mod copy cancels its pending calls. Files also refreshes on its 10-second timer.
+ * Closing a mod copy cancels its pending calls. Files and Changes also poll while focused.
  *   cx.spawn(async (cx) => { for (;;) { await watchFolder(dir); this.reload(); cx.notify(); } });
  * Watch what you show, not a whole home folder (node_modules is a lot of events).
  */

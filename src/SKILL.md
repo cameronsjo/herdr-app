@@ -39,13 +39,19 @@ herdr-app do space.new --name eng-123 --folder ~/code/app/eng-123 --argv '["clau
 Pick an explicit, useful name for every new space and tab; don't rely on
 default names. Use IDs from `ls` rather than guessing or acting on the wrong
 focused pane.
+Tabs opened from the + agent menu are unnamed. `ls` lists their position
+even when the tab bar shows the program or its session title.
 
 ```sh
 herdr-app do space.new --name api --folder /path/to/api
 herdr-app do tab.new --name "fix login" --argv '["claude"]' --task "Look at the login bug"
 herdr-app do pane.split --direction right --pane p12
 herdr-app do agent.focus --terminal t7
+herdr-app do agent.select --index 3
 ```
+
+`agent.select` uses the same navigation order as `agent.next` (1 = first).
+In `keys.json`, `agent.select:3` selects the third agent in that order.
 
 For a remote space:
 
@@ -85,15 +91,21 @@ the same tab. Give `direction` or `target`, not both. Focus stays with the same 
 herdr-app do pane.swap '{"pane":"p12","target":"p14"}'
 ```
 
+`terminal.send_key {keys, terminal?}` sends one key such as `ctrl-b` in keys.json
+syntax. It defaults to the focused terminal, requires an attached view, and uses
+the program's current keyboard mode and the same connection as typing.
+
 `terminal.select_all {terminal?}` selects a terminal's whole screen and scrollback,
 ready for `terminal.copy`. Without a target it follows keyboard focus. In vim and
 other alternate-screen apps, it selects only that screen. Cmd+A runs it on macOS;
 Linux and Windows have no default, so Ctrl+A stays with the shell.
 
-`terminal.select {terminal?, at?: {row, col} | "cursor", mode?: "cell" | "word" | "line"}`
-replaces the selection, at the program cursor by default. Cells are zero-based; rows
-count from the oldest retained history through the active screen. Word and line
-match double/triple click. `terminal.adjust_selection {terminal?, direction}` moves
+`terminal.select {terminal?, at?: {row, col} | "cursor", to?: {row, col}, mode?: "cell" | "word" | "line"}`
+replaces the selection, at the program cursor by default. Cells are zero-based and rows
+count from the oldest retained history through the active screen. With `to`, the view
+follows the exact moving end. Line mode with `to` covers whole screen rows, including blank
+and soft-wrapped rows. Without `to`, word and line act like double and triple click.
+`terminal.adjust_selection {terminal?, direction}` moves
 the inclusive moving end and follows it in the view: left, right, up, down, page_up,
 page_down, home, end, line_start, line_end. It fails without a selection.
 `terminal.clear_selection {terminal?}` clears it; `terminal.copy` copies the focused terminal's selection.
@@ -101,6 +113,9 @@ These add no default keys or built-in copy mode. Mods read the inclusive selecti
 endpoints from `focused().selection` or `terminals()`; null means none (or no
 attached view). Use `selection.end` as a copy-mode cursor. Selection facts update
 when the selection changes, without refreshing readers on ordinary terminal output.
+A copy-mode mod can read an attached view with `terminalRows(terminal, from, count)`.
+It returns up to 128 rows at a time in the same coordinate space as the selection,
+with cell text, wide-character flags, and soft-wrap boundaries.
 
 `terminal.search` opens a find bar in the focused terminal. It searches that
 terminal's screen and scrollback; Enter and Shift-Enter move between matches,
@@ -117,10 +132,15 @@ the exit code and last output lines.
 
 A terminal started with hc opts into the window with `herdr.space=<id>`.
 `herdr.tab=<id>` chooses its tab; without it, Herdr creates a tab in that space.
-Unlabeled workers stay hidden. Do not add labels just to run a background
-worker. Use app commands when the
-user wants to see a new tab or split, hc for orchestration that need not change
-the screen.
+Workers without a label or a pane stay hidden. Do not add labels just to run a
+background worker. Use app commands when the user wants to see a new tab or
+split, hc for orchestration that need not change the screen.
+
+Closing a pane, tab or space ends the terminals in it. Core ends their dependent
+children and keeps children started with `--outlive-parent` running. On cores
+older than 0.1.13, Herdr also ends hidden children when closing. `terminal.kill`
+always follows the sub-agent tree. Both walks stop at children with a pane or a
+`herdr.space` label. Core still applies parent-lifetime rules to every exit.
 
 ## Customize layouts, keys, or mods
 
@@ -144,7 +164,8 @@ those files or the generated guide. The app rewrites them on start.
 - Mods live in `mods/<name>/` with `main.js` for a view or `link.js` for
   Ctrl/Cmd-clicked terminal links. They are trusted JavaScript with command
   and network access. `mod.json` declares link rules. A personal layout's
-  root `link_handlers` array selects the mods and their order.
+  root `link_handlers` array selects the mods and their order. An optional
+  `palette` list in `mod.json` adds named actions to the command palette.
   `"focusable": true` in `mod.json` lets `pane.go` move onto a copy; it receives
   `"focus"` from `nextCommand()` and focuses its own keyboard handle.
 - A mod's `watchFolder(dir)` promise has `cancel()`; cancel it when the folder
@@ -152,13 +173,22 @@ those files or the generated guide. The app rewrites them on start.
 - Shipped mods belong to Herdr: duplicate with `mod.clone` before editing.
   Shipped layouts likewise use `layout.clone` for a personal copy.
   Discover required arguments with `herdr-app commands`.
+- `InputState`, `TextareaState` and `EditorState` use `focus()` to take the
+  keyboard and `blur()` to hand it back to Herdr. `release()` frees the state.
 - Save to reload. A broken save keeps the old version running and reports
   an error in `status`; a still-working screen is not proof the edit worked.
 - Make only the requested change. Don't touch unrelated mods or settings.
+- To pause streaming or polling while the window is hidden, check
+  `window()?.visible` in the timer and stop when false (`window()` is null
+  during `herdr-app check`). Read it in `render` and restart when true. See
+  `herdr.d.ts` for platform differences.
 - Use theme colors. Do not retain a mod's `cx` across callbacks; each
   callback receives its own. Native animations, not redraw timers, keep
   the window cheap to run. Root `on_size_change((size, cx) => …)` reports
   logical pixels after layout, including resizes without pointer movement.
+  For a drag that leaves its element, use `on_window_mouse_move` and
+  `on_window_mouse_up` on a plain layout element. The installed guide covers
+  cancellation when the pointer returns without the held button.
   Optional `View.close(cx)` gets one bounded final call; start cleanup there,
   not in an earlier task. The installed guide explains its 250 ms quit budget
   and which cleanup commands go out before shutdown.

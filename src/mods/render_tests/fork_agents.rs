@@ -52,7 +52,7 @@ fn agents_with_outside(
 
 #[gpui::test]
 fn grouped_by_project_shows_one_header_the_task_line_and_the_name(cx: &mut TestAppContext) {
-    cx.update(gpui_shell::init);
+    cx.update(herdr_shell::init);
     let tree = agents_with(cx, "project", "working");
     for want in ["herdr", "fix the login test", "fix-login"] {
         assert!(tree.contains(want), "missing {want:?}: {tree}");
@@ -68,7 +68,7 @@ fn grouped_by_project_shows_one_header_the_task_line_and_the_name(cx: &mut TestA
 
 #[gpui::test]
 fn needs_you_lists_only_blocked_agents(cx: &mut TestAppContext) {
-    cx.update(gpui_shell::init);
+    cx.update(herdr_shell::init);
     let none = agents_with(cx, "needs", "working");
     assert!(none.contains("No agents need you."), "{none}");
     let one = agents_with(cx, "needs", "blocked");
@@ -78,7 +78,7 @@ fn needs_you_lists_only_blocked_agents(cx: &mut TestAppContext) {
 /// FORK(outside-agents): agents outside Herdr's terminals come last, under "Elsewhere".
 #[gpui::test]
 fn outside_agents_show_under_elsewhere(cx: &mut TestAppContext) {
-    cx.update(gpui_shell::init);
+    cx.update(herdr_shell::init);
     let outside = r#"[{"id":"cmux","name":"cmux claude","status":"blocked","title":"fixing login","task":"the login test"},{"id":"ci","name":"ci bot","status":"working","title":null,"task":null}]"#;
     let tree = agents_with_outside(cx, "priority", "working", outside);
     for want in [

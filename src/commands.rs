@@ -49,7 +49,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("terminal.park", &[req("terminal")], "Take a terminal's pane away and disable core keep; it keeps running (a sub-agent shows under its parent again)."),
     cmd("terminal.right_click", &[req("to"), opt("terminal")], "Where right-clicks in a terminal (default: the focused one) go when its program takes the mouse: \"program\" or \"menu\" (Herdr's, the default). Shift+right-click is always the menu."),
     cmd("terminal.pin", &[req("terminal"), req("pinned")], "Pin an agent to the top of the agent lists (pinned true) or unpin it (false). Pins are kept with the terminal, so every Herdr client shows them, and end with it."),
-    cmd("terminal.kill", &[req("terminal")], "End a terminal and its sub-agents."),
+    cmd("terminal.kill", &[req("terminal")], "End a terminal and its sub-agents. Spare branches whose first sub-agent has a pane or a herdr.space label. Core still applies parent-lifetime rules."),
     // FORK(browser): browser commands, run by src/window/fork_browser.rs (to `browser.agent_access`).
     cmd("browser.open", &[req("url"), opt("place"), opt("pane"), opt("profile")],
         "Open a web page (http, https or about:blank) in a browser pane (macOS builds with the browser feature): \"right\" (default) or \"down\" of a pane (default: the focused one), or as a new \"tab\" in its space. profile \"agent\": a separate test profile, the only kind an agent can drive once the person allows it. Says its browser id and pane."),
@@ -85,17 +85,19 @@ pub const COMMANDS: &[Command] = &[
     cmd("terminal.peek", &[req("terminal")], "Peek at a running terminal over the tab, with keep-as-tab and close controls."),
     cmd("terminal.show", &[opt("terminal"), opt("pane")], "Show a terminal in a pane for now, in place of its own (no terminal: back)."),
     cmd("terminal.select_all", &[opt("terminal")], "Select a terminal's whole screen and scrollback (default: the focused one), ready to copy. On the alternate screen, select only that screen."),
-    cmd("terminal.select", &[opt("terminal"), opt("at"), opt("mode")], "Start a terminal selection (default: the focused one), replacing the old selection. at defaults to \"cursor\" or takes {row, col}: zero-based cells, rows from the top of the history including the active screen. mode is \"cell\" (default), \"word\" or \"line\" (like double/triple click). Mods read the inclusive endpoints from focused().selection or terminals(); selection.end is the moving end."),
+    cmd("terminal.select", &[opt("terminal"), opt("at"), opt("to"), opt("mode")], "Start a terminal selection (default: the focused one), replacing the old selection. at defaults to \"cursor\" or takes {row, col}: zero-based cells, rows from the top of the history including the active screen. mode is \"cell\" (default), \"word\" or \"line\" (like double/triple click). With to: {row, col}, the endpoints are exact and the view follows to. Line mode with to selects whole screen rows. Mods read the inclusive endpoints from focused().selection or terminals(); selection.end is the moving end."),
     cmd("terminal.adjust_selection", &[opt("terminal"), req("direction")], "Move the selection's moving end: left, right, up, down, page_up, page_down, home, end, line_start or line_end. The view follows the moving end. Fails if there is no selection. Defaults to the focused terminal."),
     cmd("terminal.clear_selection", &[opt("terminal")], "Clear a terminal's selection (default: the focused one)."),
     cmd("terminal.copy", &[], "Copy the focused terminal's selection. With nothing selected, that key goes to the program."),
     cmd("terminal.scroll", &[opt("lines"), opt("pages"), opt("to"), opt("terminal")], "Scroll a terminal's view of its history (default: the focused one). Give exactly one of: lines (a whole number; negative goes up, toward history), pages (a number, fractions allowed; one page is the terminal's rows), to: \"top\" (oldest history) or \"bottom\" (the live screen). This scrolls Herdr's view, not the program."),
+    cmd("terminal.send_key", &[req("keys"), opt("terminal")], "Send one key in keys.json syntax, such as ctrl-b, to a terminal (default: the focused one). It uses the program's current keyboard mode and goes through the same connection as typing. The terminal must have a view."),
     cmd("terminal.paste", &[], "Paste into the focused terminal (copied files as if dropped; an image alone as terminal.paste_image pastes it)."),
     cmd("terminal.paste_image", &[], "Ctrl+V: the clipboard's image as a file on the focused terminal's machine, when that's another one; on Windows, paste clipboard text; otherwise Ctrl+V goes to the terminal."),
     cmd("terminal.search", &[], "Search the focused terminal's screen and scrollback; the find bar and query stay with that terminal."),
     cmd("agent.focus", &[req("terminal")], "Show an agent (sub-agents too)."),
     cmd("agent.next", &[], "Show the next agent, in the order the agents list shows them."),
     cmd("agent.prev", &[], "Show the previous agent."),
+    cmd("agent.select", &[req("index")], "Show an agent by position (1 = first), in the same navigation order as `agent.next`."),
     cmd("layout.switch", &[opt("name")], "Show a layout (layouts/<name>.json), or the next one."),
     cmd("layout.clone", &[req("name"), opt("as")], "Duplicate a layout as <name>-copy (or as), then show it."),
     cmd("mod.clone", &[req("name"), opt("as")], "Duplicate a mod as <name>-copy (or as)."),
@@ -244,6 +246,7 @@ mod tests {
         names.dedup();
         assert_eq!(names.len(), COMMANDS.len());
         assert_eq!(shorthand(find("tab.select").unwrap(), "3"), json!({ "index": 3 }));
+        assert_eq!(shorthand(find("agent.select").unwrap(), "3"), json!({ "index": 3 }));
         assert_eq!(shorthand(find("pane.split").unwrap(), "right"), json!({ "direction": "right" }));
         let move_ = find("space.move").unwrap();
         assert_eq!(missing(move_, &json!({ "id": " ", "index": 1 })), Some("id"));

@@ -6,7 +6,7 @@ use super::*;
 
 #[gpui::test]
 fn an_empty_palette_shows_one_row_per_direction_family(cx: &mut TestAppContext) {
-    cx.update(gpui_shell::init);
+    cx.update(herdr_shell::init);
     let staged = Staged::new();
     let tree = describe(
         cx,
@@ -39,7 +39,7 @@ fn an_empty_palette_shows_one_row_per_direction_family(cx: &mut TestAppContext) 
 
 #[gpui::test]
 fn the_chooser_draws_a_tile_per_direction_with_its_key(cx: &mut TestAppContext) {
-    cx.update(gpui_shell::init);
+    cx.update(herdr_shell::init);
     let staged = Staged::new();
     let mut p = props();
     p.as_object_mut().unwrap().extend(
