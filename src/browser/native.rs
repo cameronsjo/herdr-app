@@ -280,7 +280,7 @@ impl Browsers {
     /// Goes inside an overlay (absolute, its full size): reports its bounds
     /// while painting, so a page under it hides (`label` names it in the log).
     pub fn cover(&self, label: String) -> Option<AnyElement> {
-        Some(canvas(|_, _, _| {}, move |bounds, _, _, _| view::cover(&label, bounds)).absolute().size_full().into_any_element())
+        Some(canvas(|_, _, _| {}, move |bounds, _, _, _| view::cover(&label, bounds)).absolute().inset_0().into_any_element())
     }
 
     /// The native dialog for "Allow agent…" on `browser`, if it may open now

@@ -132,7 +132,28 @@ pub fn spot(id: &str, block: Bounds<Pixels>) -> Option<Bounds<Pixels>> {
     // A report outside the block (another mod drawing the same id) is
     // ignored, not taken as "hide": the block's own mod, its paint reused
     // this frame, still holds the spot.
-    if let Some(b) = reports.into_iter().rev().find(|b| inside(b, &block)) {
+    let mut chosen = None;
+    for b in reports.into_iter().rev() {
+        if inside(&b, &block) {
+            if chosen.is_none() {
+                chosen = Some(b);
+            }
+        } else {
+            tracing::debug!(
+                "browser: nativeView {} rejected report {},{} {}x{} outside block {},{} {}x{}",
+                super::log_safe(id),
+                f32::from(b.origin.x),
+                f32::from(b.origin.y),
+                f32::from(b.size.width),
+                f32::from(b.size.height),
+                f32::from(block.origin.x),
+                f32::from(block.origin.y),
+                f32::from(block.size.width),
+                f32::from(block.size.height),
+            );
+        }
+    }
+    if let Some(b) = chosen {
         HELD.with_borrow_mut(|h| h.insert(id.to_owned(), (b.origin - block.origin, b.size)));
         return Some(b);
     }
@@ -150,6 +171,11 @@ pub fn forget(id: &str) {
 #[cfg_attr(not(all(target_os = "macos", feature = "browser-pane")), allow(dead_code))]
 pub fn end_frame() {
     REPORTS.with_borrow_mut(HashMap::clear);
+}
+
+#[cfg(test)]
+pub fn debug_held(id: &str) -> Option<(Point<Pixels>, Size<Pixels>)> {
+    HELD.with_borrow(|h| h.get(id).copied())
 }
 
 #[cfg(test)]
